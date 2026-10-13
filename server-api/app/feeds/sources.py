@@ -70,6 +70,12 @@ def _by_weight(srcs: list[dict]) -> list[dict]:
 
 
 def _to_dict(row: RssSource) -> dict:
+    """源 → 抓取用字典。
+
+    健康/礼仪字段一并带出：`last_fetched_at` 用于**单源最小抓取间隔**判定
+    （定时任务与手动触发叠加时不重复打同一个源），`respect_robots` 决定本轮
+    是否先查对方 robots.txt（P1-16）。
+    """
     return {
         "key": row.key,
         "name": row.name,
@@ -77,6 +83,8 @@ def _to_dict(row: RssSource) -> dict:
         "url": row.url,
         "weight": row.weight,
         "enabled": bool(row.enabled),
+        "respect_robots": bool(row.respect_robots),
+        "last_fetched_at": row.last_fetched_at,
     }
 
 
@@ -118,7 +126,14 @@ def all_enabled_sources(db: Session | None = None) -> list[dict]:
     `db` 为空时回落到内置源——保证单测与不连库的脚本仍可运行。
     """
     if db is None:
-        return _by_weight([s for s in BUILTIN_SOURCES if s["enabled"]])
+        # 无库回退：内置源补齐礼仪字段默认值，使下游判定无需到处 `.get(..., 默认)`
+        return _by_weight(
+            [
+                {**s, "respect_robots": s.get("respect_robots", True), "last_fetched_at": None}
+                for s in BUILTIN_SOURCES
+                if s["enabled"]
+            ]
+        )
     return _by_weight([s for s in _load(db) if s["enabled"]])
 
 

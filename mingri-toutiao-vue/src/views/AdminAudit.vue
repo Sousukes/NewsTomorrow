@@ -44,6 +44,7 @@ const FIELD_LABELS: Record<string, string> = {
   url: '地址',
   weight: '权重',
   enabled: '启用',
+  respectRobots: '遵守 robots',
 };
 
 function actionLabel(action: string): string {
@@ -53,6 +54,7 @@ function actionLabel(action: string): string {
 /** 把 enabled 的 true/false 翻成"启用/停用"，避免出现"true→false"这种后端视角的文案 */
 function fieldValue(field: string, value: unknown): string {
   if (field === 'enabled') return value ? '启用' : '停用';
+  if (field === 'respectRobots') return value ? '遵守' : '忽略';
   if (value === null || value === undefined || value === '') return '空';
   return String(value);
 }
@@ -74,6 +76,8 @@ function changeTexts(item: AdminAuditItem): string[] {
     if (typeof s.url === 'string' && s.url) parts.push(s.url);
     if (typeof s.weight === 'number') parts.push(`权重 ${s.weight}`);
     if (typeof s.enabled === 'boolean') parts.push(s.enabled ? '启用' : '停用');
+    // 只在「关闭遵守」时补一句：true 是默认值，逐条打出来只会稀释真正的信息
+    if (s.respectRobots === false) parts.push('忽略 robots');
     return parts;
   }
   if (typeof item.detail.seeded === 'number') return [`恢复 ${item.detail.seeded} 个内置源`];

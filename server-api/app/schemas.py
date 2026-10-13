@@ -106,6 +106,9 @@ class SourceIn(BaseModel):
     url: str = Field(min_length=1, max_length=500)
     weight: int = Field(default=5, ge=0, le=100)
     enabled: bool = True
+    # 是否遵守对方 robots.txt（P1-16）。默认遵守；个别源 robots 写得过严却实际
+    # 提供公开 RSS，逐源可关——故是源级配置而非全局开关。
+    respect_robots: bool = True
 
     _channel = field_validator("channel")(_valid_channel)
 
@@ -118,6 +121,7 @@ class SourceUpdateIn(BaseModel):
     url: str | None = Field(default=None, min_length=1, max_length=500)
     weight: int | None = Field(default=None, ge=0, le=100)
     enabled: bool | None = None
+    respect_robots: bool | None = None
 
     _channel = field_validator("channel")(_valid_channel)
 

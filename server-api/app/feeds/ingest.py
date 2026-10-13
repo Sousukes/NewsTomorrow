@@ -1,16 +1,31 @@
-"""抓取编排：多源并发 + 重试 + 去重入库 + 关键词过滤 + 空数据兜底。"""
+"""抓取编排：多源并发 + 重试 + 去重入库 + 关键词过滤 + 空数据兜底。
+
+P1-16 抓取治理：
+- **并发化**：多源并行抓取（线程池），源变多后一轮不再线性变慢；
+- **两阶段**：先并发抓取，再**按权重顺序串行合并**——"多源转载同一稿件时
+  权重高者先入库"是先到先得的语义，若直接并发合并会让入库顺序随机化；
+- **礼貌抓取**：按 host 分组（同站串行 + 间隔）、单源最小抓取间隔、
+  遵守 robots.txt（逐源可关，见 `respect_robots`）。
+"""
 import logging
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import (
+    FEED_HOST_GAP_SECONDS,
+    FEED_MAX_CONCURRENCY,
+    FEED_MIN_INTERVAL_MINUTES,
+)
 from ..models import News
-from .fetcher import USER_AGENT, FetchError, NotModified, RawItem, fetch_source
+from .fetcher import USER_AGENT, FetchError, NotModified, RawItem, fetch_source, robots_check
 from .sources import all_enabled_sources, record_fetch_result, sources_for_channel
 
 logger = logging.getLogger("toutiao.ingest")
@@ -67,6 +82,151 @@ def _fetch_with_retry(client: httpx.Client, source: dict, limit: int) -> list[Ra
     raise last_exc if last_exc is not None else FetchError("抓取失败")
 
 
+def _dedupe_sources(srcs: list[dict]) -> list[dict]:
+    """按 key 去重并按 weight 降序（与库内顺序无关，保证高权重优先入库）。"""
+    seen: dict[str, dict] = {}
+    for s in srcs:
+        seen.setdefault(s.get("key", ""), s)
+    return sorted(seen.values(), key=lambda s: s.get("weight", 0), reverse=True)
+
+
+def _host_of(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+def _group_by_host(srcs: list[dict]) -> list[list[dict]]:
+    """按 host 分组：**保持 `srcs` 的相对顺序**（权重降序），同站源归到一组。
+
+    组间并发（不同站点互不影响）、组内串行（同一站点一次只发一个请求）——
+    并发的意义是省掉等待时间，不是把同一站点打 N 遍。
+    """
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for s in srcs:
+        h = _host_of(s.get("url", "")) or s.get("key", "")
+        if h not in groups:
+            groups[h] = []
+            order.append(h)
+        groups[h].append(s)
+    return [groups[h] for h in order]
+
+
+def _too_soon(source: dict, min_interval_minutes: int) -> bool:
+    """是否刚抓过（在最小间隔内）。`last_fetched_at` 由 `sources._to_dict` 带出。"""
+    last = source.get("last_fetched_at")
+    if not last:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(last))
+    except (TypeError, ValueError):
+        return False
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    return (now - dt) < timedelta(minutes=min_interval_minutes)
+
+
+def _fetch_one(
+    client, source: dict, limit: int, min_interval_minutes: int
+) -> tuple[str, list[RawItem] | None, str | None, bool]:
+    """抓一个源 → `(key, items, error, skipped)`。
+
+    单个源的失败/跳过**不抛**：并发下异常要带回主线程归类，而不是炸掉整组。
+    """
+    key = source.get("key") or source.get("url", "")
+    if min_interval_minutes and _too_soon(source, min_interval_minutes):
+        return key, None, None, True
+    if source.get("respect_robots", True):
+        try:
+            allowed, delay, reason = robots_check(client, source["url"])
+        except Exception as e:  # robots 判定本身异常不应拖垮抓取
+            logger.info("robots 检查异常[%s]，按放行处理: %s", key, e)
+            allowed, delay, reason = True, None, ""
+        if not allowed:
+            return key, None, reason or "robots.txt 禁止抓取", False
+        if delay:
+            # 尊重 Crawl-delay，但封顶 5s：对方若写了极大值，不能把整轮拖死
+            time.sleep(min(float(delay), 5.0))
+    try:
+        return key, _fetch_with_retry(client, source, limit), None, False
+    except Exception as e:
+        logger.warning("源 %s 抓取失败：%s", key, e)
+        return key, None, str(e), False
+
+
+def _fetch_group(client, group: list[dict], limit: int, gap: float, min_interval: int):
+    """同一 host 的多个源**串行**抓取，源之间留 `gap` 秒喘息。"""
+    out = []
+    for i, s in enumerate(group):
+        if i and gap:
+            time.sleep(gap)
+        out.append(_fetch_one(client, s, limit, min_interval))
+    return out
+
+
+def _collect_all(
+    srcs: list[dict],
+    client,
+    keyword: str | None,
+    limit_per_source: int,
+    stats: list[dict] | None,
+    workers: int,
+    gap: float,
+    interval: int,
+) -> list[RawItem]:
+    """两阶段：并发抓取 → 按权重顺序串行合并（实现见 `collect` 的说明）。"""
+    groups = _group_by_host(srcs)
+    fetched: dict[str, tuple[list[RawItem] | None, str | None, bool]] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as pool:
+        futures = [
+            pool.submit(_fetch_group, client, g, limit_per_source, gap, interval)
+            for g in groups
+        ]
+        for f in as_completed(futures):
+            # 组内已逐个兜住异常；这里再兜一层，避免线程池本身的意外炸掉整轮
+            try:
+                results = f.result()
+            except Exception as e:  # pragma: no cover - 防御性
+                logger.warning("抓取分组异常: %s", e)
+                continue
+            for key, items, err, skipped in results:
+                fetched[key] = (items, err, skipped)
+
+    collected: dict[str, RawItem] = {}
+    for s in srcs:
+        items, err, skipped = fetched.get(s["key"], (None, "未执行", False))
+        if skipped:
+            if stats is not None:
+                stats.append(
+                    {"key": s["key"], "ok": True, "count": 0, "error": None, "skipped": True}
+                )
+            continue
+        if err is not None or items is None:
+            if stats is not None:
+                stats.append(
+                    {
+                        "key": s["key"],
+                        "ok": False,
+                        "count": 0,
+                        "error": (err or "抓取失败")[:300],
+                        "skipped": False,
+                    }
+                )
+            continue
+        if stats is not None:
+            stats.append(
+                {"key": s["key"], "ok": True, "count": len(items), "error": None, "skipped": False}
+            )
+        for it in items:
+            if keyword and keyword not in it.title and keyword not in it.summary:
+                continue
+            # 同 id 保留先到的一条（多源可能转载同一稿件）
+            collected.setdefault(it.id, it)
+    logger.info("抓取完成：%d 个源 → %d 条去重后", len(srcs), len(collected))
+    return list(collected.values())
+
+
 def collect(
     channel: str | None = None,
     keyword: str | None = None,
@@ -75,13 +235,24 @@ def collect(
     connect_timeout: float = 8.0,
     sources: list[dict] | None = None,
     stats: list[dict] | None = None,
+    max_concurrency: int | None = None,
+    host_gap: float | None = None,
+    min_interval_minutes: int | None = None,
+    client=None,
 ) -> list[RawItem]:
-    """按频道/ 关键词抓取多个源并合并去重。
+    """按频道/关键词抓取多个源并合并去重。
 
     - `sources`：显式指定源列表（**优先**）。抓取流程会传入库中配置的源；
       不传则回退到内置源（`all_enabled_sources()`），保证无库场景仍可运行。
-    - `stats`：可选出参，收集每个源的抓取结果 `{key, ok, count, error}`，
-      供调用方回写健康状态。**单个源失败不影响其他源**。
+    - `stats`：可选出参，收集每个源的抓取结果
+      `{key, ok, count, error, skipped}`，供调用方回写健康状态。
+      **单个源失败不影响其他源**；`skipped=True` 表示本轮按礼仪跳过（未抓取），
+      调用方不应刷新其健康状态。
+    - `client`：注入 HTTP 客户端（测试用）。生产调用不传，由本函数按超时配置创建。
+
+    并发只用于**等待网络**；合并仍按 `srcs`（权重降序）串行进行——
+    `collected.setdefault` 是先到先得，若合并顺序随机化，"高权重源优先入库"
+    的语义就没了。
     """
     if sources is not None:
         srcs = _dedupe_sources(sources)
@@ -92,35 +263,17 @@ def collect(
     else:
         srcs = sources_for_channel(channel)
 
-    collected: dict[str, RawItem] = {}
-    with _client(timeout, connect_timeout) as client:
-        for s in srcs:
-            try:
-                items = _fetch_with_retry(client, s, limit_per_source)
-                if stats is not None:
-                    stats.append({"key": s["key"], "ok": True, "count": len(items), "error": None})
-            except Exception as e:  # 单源失败不得拖垮整轮抓取
-                logger.warning("源 %s 抓取失败：%s", s.get("key"), e)
-                if stats is not None:
-                    stats.append(
-                        {"key": s["key"], "ok": False, "count": 0, "error": str(e)[:300]}
-                    )
-                continue
-            for it in items:
-                if keyword and keyword not in it.title and keyword not in it.summary:
-                    continue
-                # 同 id 保留先到的一条（多源可能转载同一稿件）
-                collected.setdefault(it.id, it)
-    logger.info("抓取完成：%d 个源 → %d 条去重后", len(srcs), len(collected))
-    return list(collected.values())
+    if not srcs:
+        return []
 
+    workers = max(1, max_concurrency or FEED_MAX_CONCURRENCY)
+    gap = FEED_HOST_GAP_SECONDS if host_gap is None else host_gap
+    interval = FEED_MIN_INTERVAL_MINUTES if min_interval_minutes is None else min_interval_minutes
 
-def _dedupe_sources(srcs: list[dict]) -> list[dict]:
-    """按 key 去重并按 weight 降序（与库内顺序无关，保证高权重优先入库）。"""
-    seen: dict[str, dict] = {}
-    for s in srcs:
-        seen.setdefault(s.get("key", ""), s)
-    return sorted(seen.values(), key=lambda s: s.get("weight", 0), reverse=True)
+    if client is not None:
+        return _collect_all(srcs, client, keyword, limit_per_source, stats, workers, gap, interval)
+    with _client(timeout, connect_timeout) as c:
+        return _collect_all(srcs, c, keyword, limit_per_source, stats, workers, gap, interval)
 
 
 def upsert_news(db: Session, items: list[RawItem]) -> FetchReport:
@@ -201,9 +354,20 @@ def run_ingest(
         logger.exception("抓取阶段异常: %s", e)
         items = []
     finally:
-        # 健康状态无论成败都回写：源挂了也要能在列表里看出来
+        # 健康状态无论成败都回写：源挂了也要能在列表里看出来。
+        # 但**按礼仪跳过**的源本轮没抓取，刷新它会让"多久没成功"永远归零。
         for st in stats:
+            if st.get("skipped"):
+                continue
             record_fetch_result(db, st["key"], st["ok"], st["count"], st["error"])
+        # 告警是本轮的收尾动作：源挂了要有人被通知，而不是等人去翻列表。
+        # 放在 finally 里，抓取阶段异常时也能基于已有健康状态发出告警。
+        try:
+            from .alert import notify_unhealthy_sources
+
+            notify_unhealthy_sources(db)
+        except Exception as e:
+            logger.warning("源健康告警失败（不影响抓取结果）: %s", e)
 
     if items:
         rep = upsert_news(db, items)

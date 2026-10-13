@@ -14,6 +14,8 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
+from ..config import FEED_ROBOTS_TTL_HOURS
+
 logger = logging.getLogger("toutiao.feed")
 
 USER_AGENT = "Mozilla/5.0 (compatible; ToutiaoBot/1.0; +https://example.local/bot)"
@@ -186,6 +188,69 @@ def parse_feed(xml_text: str, source: dict) -> list[RawItem]:
             )
         )
     return out
+
+
+# ---- robots.txt（P1-16 礼貌抓取）----
+# 按 host 缓存解析结果，避免每轮每源都去取一次 robots.txt（那本身就是不礼貌的）。
+# 值为 `RobotFileParser | None`：None 表示"取不到"，按放行处理。
+_ROBOTS_CACHE: dict[str, tuple[float, object]] = {}
+# TTL 走配置，避免"改了 env 却不生效"这类假开关
+ROBOTS_TTL_SECONDS = FEED_ROBOTS_TTL_HOURS * 3600
+
+
+def _robots_url(url: str) -> str:
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}/robots.txt"
+
+
+def robots_check(client, url: str, user_agent: str = USER_AGENT) -> tuple[bool, float | None, str]:
+    """查询是否允许抓取本 URL。
+
+    @returns `(允许?, crawl_delay 秒, 原因)`——不允许时原因是给人看的日志/健康信息。
+
+    两个刻意的选择：
+    - **取不到 robots 时放行**：404 / 不可达 / 格式不认识都按"允许"处理。
+      大量站点不提供 robots.txt，把"没有声明"当成"禁止"会让抓取整体停摆；
+      而 robots 的本意是"我不希望被抓"，没有声明即无此项声明。
+    - **按 host 缓存**：robots 是整站声明，同站多源共享一次解析；缓存带 TTL，
+      对方改了规则最多滞后一个 TTL。
+    """
+    import time
+    from urllib.robotparser import RobotFileParser
+
+    host = urlparse(url).netloc
+    now = time.time()
+    cached = _ROBOTS_CACHE.get(host)
+    if cached and now - cached[0] < ROBOTS_TTL_SECONDS:
+        rp = cached[1]
+    else:
+        rp = None
+        try:
+            r = client.get(_robots_url(url))
+            if r.status_code == 200 and r.text:
+                parser = RobotFileParser()
+                parser.parse(r.text.splitlines())
+                rp = parser
+        except Exception as e:  # robots 取不到不该影响正文抓取
+            logger.info("robots.txt 获取失败[%s]，按放行处理: %s", host, e)
+            rp = None
+        _ROBOTS_CACHE[host] = (now, rp)
+
+    if rp is None:
+        return True, None, ""
+    try:
+        if not rp.can_fetch(user_agent, url):
+            return False, None, "robots.txt 禁止抓取"
+        delay = rp.crawl_delay(user_agent)
+        return True, (float(delay) if delay else None), ""
+    except Exception as e:  # 解析/匹配异常同样按放行处理
+        logger.info("robots 判定异常[%s]，按放行处理: %s", host, e)
+        return True, None, ""
+
+
+def clear_robots_cache() -> None:
+    """清空 robots 缓存（测试与"对方刚改规则想立刻生效"时用）。"""
+    _ROBOTS_CACHE.clear()
 
 
 class NotModified(Exception):

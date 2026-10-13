@@ -396,6 +396,7 @@ const freshSources = () =>
     lastError: null,
     lastItemCount: null,
     lastFetchedAt: null,
+    respectRobots: true,
   }));
 
 let sources = freshSources();
@@ -413,6 +414,7 @@ function sourceOut(row) {
     lastError: row.lastError ?? null,
     lastItemCount: row.lastItemCount ?? null,
     lastFetchedAt: row.lastFetchedAt ?? null,
+    respectRobots: row.respectRobots !== false,
   };
 }
 
@@ -779,6 +781,7 @@ const server = createServer(async (req, res) => {
       url: String(url).trim(),
       weight: Number.isFinite(Number(body.weight)) ? Number(body.weight) : 5,
       enabled: body.enabled !== false,
+      respectRobots: body.respectRobots !== false,
       lastStatus: null,
       lastError: null,
       lastItemCount: null,
@@ -808,13 +811,13 @@ const server = createServer(async (req, res) => {
       return fail(res, 400, 40004, '源地址必须为 http/https URL');
     }
     const before = sourceOut(row);
-    for (const f of ['name', 'channel', 'url', 'weight', 'enabled']) {
+    for (const f of ['name', 'channel', 'url', 'weight', 'enabled', 'respectRobots']) {
       if (body[f] !== undefined) row[f] = body[f];
     }
     const after = sourceOut(row);
     // 与后端一致：只记真正变化的字段，无变化的 PATCH 不留痕
     const changes = {};
-    for (const f of ['name', 'channel', 'url', 'weight', 'enabled']) {
+    for (const f of ['name', 'channel', 'url', 'weight', 'enabled', 'respectRobots']) {
       if (before[f] !== after[f]) changes[f] = [before[f], after[f]];
     }
     if (Object.keys(changes).length) audit(operator, 'source.update', b, { changes });

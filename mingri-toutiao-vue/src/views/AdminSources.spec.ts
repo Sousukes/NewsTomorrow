@@ -34,6 +34,7 @@ const source = (over: Partial<RssSourceItem> = {}): RssSourceItem => ({
   lastError: null,
   lastItemCount: 20,
   lastFetchedAt: '2026-10-13T07:38:22',
+  respectRobots: true,
   ...over,
 });
 
@@ -519,5 +520,71 @@ describe('views/AdminSources 批量操作', () => {
       .trigger('click');
     await w.vm.$nextTick();
     expect(w.findAll('[role="switch"]')).toHaveLength(3);
+  });
+});
+
+/* ------------------------------ P1-16：robots 开关 ------------------------------ */
+
+describe('views/AdminSources robots 开关', () => {
+  it('默认遵守时列表不出现「忽略 robots」标记', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__robots-off').exists()).toBe(false);
+  });
+
+  it('关闭遵守的源在列表上留下可见标记', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({ key: 'strict_feed', name: '严格源', respectRobots: false }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__robots-off').text()).toContain('忽略 robots');
+  });
+
+  it('编辑表单取消勾选后 PATCH 带上 respectRobots=false', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    const w = mountPage();
+    await settle(w);
+
+    await w
+      .findAll('button')
+      .find((b) => b.text() === '编辑')!
+      .trigger('click');
+    await w.vm.$nextTick();
+
+    const checks = w.findAll('.admin__form .admin__check input');
+    expect(checks).toHaveLength(2);
+    // 第二个复选是「遵守 robots.txt」，默认勾选（后端默认值）
+    expect((checks[1].element as HTMLInputElement).checked).toBe(true);
+    await checks[1].setValue(false);
+    await w.find('.admin__form').trigger('submit');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(adminApi.updateSource).toHaveBeenCalledWith(
+      'aihot_picks',
+      expect.objectContaining({ respectRobots: false }),
+    );
+  });
+
+  it('新增表单默认勾选遵守，提交时透传 true', async () => {
+    const w = mountPage();
+    await new Promise((r) => setTimeout(r, 0));
+    await w
+      .findAll('button')
+      .find((b) => b.text() === '新增源')!
+      .trigger('click');
+    await w.vm.$nextTick();
+
+    const inputs = w.findAll('.admin__form--new input');
+    await inputs[0].setValue('demo_src');
+    await inputs[1].setValue('演示源');
+    await inputs[2].setValue('https://example.com/feed.xml');
+    await w.find('.admin__form--new').trigger('submit');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(adminApi.createSource).toHaveBeenCalledWith(
+      expect.objectContaining({ respectRobots: true }),
+    );
   });
 });

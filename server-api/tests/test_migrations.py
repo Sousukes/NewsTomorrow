@@ -163,6 +163,16 @@ class TestMigrationChain:
             i["name"] for i in insp.get_indexes("comments")
         }
 
+    def test_fetch_politeness_columns(self, chain_db):
+        """0017：抓取礼仪与告警节流字段（P1-16）。"""
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("rss_sources")}
+        assert "respect_robots" in cols  # 逐源 robots 开关
+        assert "last_alerted_at" in cols  # 告警节流锚点（落库，多实例共享）
+        # 存量行必须是「遵守」而非 NULL：NULL 会在判定里掉进"不遵守"分支
+        col = next(c for c in insp.get_columns("rss_sources") if c["name"] == "respect_robots")
+        assert col["nullable"] is False
+
     def test_admin_audit_logs_table(self, chain_db):
         """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""
         insp = inspector_of(chain_db)

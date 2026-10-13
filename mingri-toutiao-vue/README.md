@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **221** 项，覆盖：
+- **单元测试**：Vitest 共 **227** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -40,8 +40,9 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   - `stores/user` 管理能力标志 `isAdmin`（6）：登录响应带 `isAdmin=true` 时置位、**缺省不授予特权**、
     **落盘后刷新页面运营入口不消失**、登出归位（不把上个账号的特权留给匿名态）、
     **未登录时忽略 prefs 里的 isAdmin**（token 失效不得留下管理入口）、普通账号仍为 false
-  - `api/admin`（14）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
-    `ensureRealBackend` 守卫、行数据归一化（缺 `key` 的脏行丢弃、`lastError` 空串转 null）、
+  - `api/admin`（16）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
+    `ensureRealBackend` 守卫、行数据归一化（缺 `key` 的脏行丢弃、`lastError` 空串转 null、
+    **`respectRobots` 缺失时按更保守的一方兜底为 `true`、显式 `false` 原样透出**）、
     五个源管理接口的路径/方法/错误透传
   - `views/AdminUsers`（11）：管理员白名单渲染（含 `registered` 已注册/预授权与 `addedBy`）、
     env 计数说明、添加成功清空表单并刷新、**手机号格式前端拦截不发请求**、冲突 409 展示服务端文案、
@@ -51,11 +52,13 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     **字段级变更渲染**（权重 9→3、enabled 翻成启用→停用而非 true→false）、
     **加载更多按游标追加且不重复**、带 `target` 进入时只查该对象并提供查看全部、
     加载失败与 403 转无权限态、**非管理员不请求**
-  - `views/AdminSources`（20）：汇总计数、新增/编辑表单与前端校验、启停乐观更新+失败回滚、
+  - `views/AdminSources`（24）：汇总计数、新增/编辑表单与前端校验、启停乐观更新+失败回滚、
     删除/重置二次确认、健康状态渲染、**非管理员不请求列表直接呈无权限态**（不泄露接口存在性）；
     **搜索与筛选**（名称/地址/标识模糊匹配 + 频道/状态 chips + 无结果清除入口）、
     **健康汇总**（总数/启用/异常/未抓取四计数，点数字即筛选；**异常源置顶**，组内保持权重降序）、
-    **批量操作**（多选 + 全选只作用可见项 + 批量启停/删除，乐观更新 + 部分失败回滚汇总）
+    **批量操作**（多选 + 全选只作用可见项 + 批量启停/删除，乐观更新 + 部分失败回滚汇总）、
+    **robots 开关**（默认遵守时列表无标记、关闭的源留下「忽略 robots」可见标记、
+    编辑表单取消勾选后 PATCH 带 `respectRobots=false`、新增表单默认勾选并透传 `true`）
   - `stores/comments`（17）：评论删除成功移除、**失败回滚到原位置**、不存在时返回 false、
     已删除评论不可再点赞；**两级评论**——`reply` 乐观插入已展开线程并递增 `replyCount`
     （服务端失败回滚两者）、未展开线程只递增计数、**回复的回复 rootId 拍平到同一主评论**、
@@ -333,7 +336,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 | `/search/results` | `SearchResults` | S10 搜索结果（**服务端** `/api/news/search`） |
 | `/favorites` | `Favorites` | S7 收藏（S12 空态） |
 | `/history` | `History` | S8 浏览历史（S13 空态） |
-| `/admin/sources` | `AdminSources` | **RSS 源管理**（仅 `isAdmin` 账号可见入口；增删改/启停/重置 + 抓取健康状态 + 搜索筛选 + 异常置顶 + 批量操作） |
+| `/admin/sources` | `AdminSources` | **RSS 源管理**（仅 `isAdmin` 账号可见入口；增删改/启停/重置 + 抓取健康状态 + 搜索筛选 + 异常置顶 + 批量操作 + **「遵守 robots.txt」逐源开关**） |
 | `/admin/users` | `AdminUsers` | **管理员管理**（P1-14）：应用内增删「指定账号」——双源说明（env break-glass + 库白名单）、添加并支持预授权、注册状态标记、移除确认与末位保护提示、**env 管理员为 0 时提示应急通道缺失** |
 | `/admin/audit` | `AdminAudit` | **运营审计**（P1-15）：时间线展示谁改了什么——中文动作标签、对象、操作者、字段级变更（旧→新）、游标分页「加载更多」；带 `?target=` 进入时只看该对象 |
 
@@ -372,7 +375,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 - **`messages.ts`**：`fetchMessagesPage` / `fetchMessages` / `fetchUnreadCount` / `markMessageRead` / `markAllMessagesRead` → `GET /messages`、`GET /messages/unread-count`、`PATCH /messages/{id}`、`POST /messages/read-all`。
 - **`me.ts`**：`fetchFavorites` / `addFavorite` / `removeFavorite` / `mergeFavorites` / `fetchHistory` / `recordHistory` / `clearHistoryRemote` / `mergeHistory` → `/me/favorites`、`/me/history`。所有写操作返回**完整集合** `{ ids, list }`（服务端即事实源）；导出 `MARKS_SYNC_SUPPORTED`，mock 模式下为 `false`，store 据此跳过同步请求。
 - **`auth.ts`**：`login({phone,password})` → `POST /auth/login`（成功写 token）；`logout()` → `POST /auth/logout`（清 token）。登录/注册/续期响应携带 `user.isAdmin`（布尔），store 据此决定管理入口显隐。
-- **`admin.ts`**：`fetchSources` / `createSource` / `updateSource` / `deleteSource` / `resetSources` → `/admin/sources` 五件套（**仅真实后端**，`ADMIN_SOURCES_SUPPORTED` 为门；mock 模式下不短路假数据——伪造一份可变的源列表会误导排障，入口由 `isAdmin` 隐藏即可）。行数据经 `toSource()` 归一化：丢弃缺 `key` 的脏行、`channel` 归一化、空 `lastError` 转 `null`。
+- **`admin.ts`**：`fetchSources` / `createSource` / `updateSource` / `deleteSource` / `resetSources` → `/admin/sources` 五件套（**仅真实后端**，`ADMIN_SOURCES_SUPPORTED` 为门；mock 模式下不短路假数据——伪造一份可变的源列表会误导排障，入口由 `isAdmin` 隐藏即可）。行数据经 `toSource()` 归一化：丢弃缺 `key` 的脏行、`channel` 归一化、空 `lastError` 转 `null`、`respectRobots` 缺失时按更保守的一方兜底为 `true`。
   另含管理员白名单三接口：`fetchAdminUsers` / `addAdminUser` / `removeAdminUser` → `/admin/users`（P1-14，同样只有真实后端），
   列表额外返回 `envAdminCount`（环境变量来源管理员**数量**，不下发号码）用于在界面解释双源机制；
   行数据经 `toAdminUser()` 归一化，**形态非法的手机号直接丢弃**（删除按 phone 定位，脏行无法操作）。

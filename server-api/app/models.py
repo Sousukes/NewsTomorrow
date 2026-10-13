@@ -267,6 +267,12 @@ class RssSource(Base):
     last_error = Column(String(300))
     last_item_count = Column(Integer)
     last_fetched_at = Column(String(30))
+    # P1-16 抓取礼仪：是否遵守对方 robots.txt。逐源可关——个别源的 robots 写得过严
+    #（甚至整站 Disallow）却实际提供公开 RSS，一刀切会让这些源直接失去作用。
+    respect_robots = Column(Boolean, nullable=False, default=True)
+    # P1-16 告警节流：上次就该源发出告警的时间（为空 = 从未告警）。
+    # 落库而非进程内变量：多实例部署时各实例共享同一节流窗口，重启也不失效。
+    last_alerted_at = Column(String(30))
     created_at = Column(String(30), default=now_str, nullable=False)
     updated_at = Column(String(30), default=now_str, nullable=False)
 

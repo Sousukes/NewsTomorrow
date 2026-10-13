@@ -99,3 +99,17 @@ FEED_CONNECT_TIMEOUT = float(_env("FEED_CONNECT_TIMEOUT", "8"))
 # 旧数据清理：保留天数与最小保留条数
 FEED_KEEP_DAYS = int(_env("FEED_KEEP_DAYS", "30"))
 FEED_KEEP_MIN = int(_env("FEED_KEEP_MIN", "200"))
+# ---- 抓取治理（P1-16）：并发化 + 礼貌抓取 + 告警 ----
+# 并发抓取的线程数。源变多后串行会让一轮耗时线性增长，但并行必须配套下列礼貌控制，
+# 否则等于把压力转嫁给对方站点（也可能被封）。
+FEED_MAX_CONCURRENCY = max(1, int(_env("FEED_MAX_CONCURRENCY", "4")))
+# 同一站点两次请求之间的最小间隔（秒）：同一 host 的多个源串行抓取时的喘息
+FEED_HOST_GAP_SECONDS = max(0.0, float(_env("FEED_HOST_GAP_SECONDS", "1.5")))
+# 单源最小抓取间隔（分钟）：定时任务与手动触发叠加时不重复打同一个源
+FEED_MIN_INTERVAL_MINUTES = max(0, int(_env("FEED_MIN_INTERVAL_MINUTES", "10")))
+# robots.txt 缓存时长（小时）：不应当每轮每源都去取一次
+FEED_ROBOTS_TTL_HOURS = max(1, int(_env("FEED_ROBOTS_TTL_HOURS", "24")))
+# 告警：源超过该时长**未成功抓取**即视为异常；同一源的告警最小间隔（节流，防刷屏）
+FEED_ALERT_ENABLED = _env("FEED_ALERT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+FEED_ALERT_STALE_HOURS = max(1, int(_env("FEED_ALERT_STALE_HOURS", "24")))
+FEED_ALERT_MIN_INTERVAL_HOURS = max(1, int(_env("FEED_ALERT_MIN_INTERVAL_HOURS", "6")))

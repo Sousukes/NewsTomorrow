@@ -48,6 +48,8 @@ function toSource(raw: unknown): RssSourceItem | null {
     lastError: typeof r.lastError === 'string' && r.lastError ? r.lastError : null,
     lastItemCount: typeof r.lastItemCount === 'number' ? r.lastItemCount : null,
     lastFetchedAt: typeof r.lastFetchedAt === 'string' && r.lastFetchedAt ? r.lastFetchedAt : null,
+    // 缺省视为遵守：后端默认 true，字段意外缺失时按更保守的一方兜底
+    respectRobots: r.respectRobots !== false,
   };
 }
 

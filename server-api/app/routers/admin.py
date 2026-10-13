@@ -103,6 +103,8 @@ def _out(row: RssSource) -> dict:
         "lastError": row.last_error,
         "lastItemCount": row.last_item_count,
         "lastFetchedAt": row.last_fetched_at,
+        # P1-16：抓取礼仪（是否遵守对方 robots.txt），逐源可关
+        "respectRobots": bool(row.respect_robots),
     }
 
 
@@ -140,6 +142,7 @@ def create_source(
         url=body.url,
         weight=body.weight,
         enabled=body.enabled,
+        respect_robots=body.respect_robots,
         created_at=now,
         updated_at=now,
     )
@@ -173,14 +176,18 @@ def update_source(
     if body.url is not None:
         _validate_url(body.url)
     before = _out(row)
-    for field in ("name", "channel", "url", "weight", "enabled"):
+    for field in ("name", "channel", "url", "weight", "enabled", "respect_robots"):
         value = getattr(body, field)
         if value is not None:
             setattr(row, field, value)
     row.updated_at = now_str()
     after = _out(row)
     # 只记真正变化的字段：无变化的 PATCH（前端常因表单整体提交而触发）不该灌进时间线
-    changes = {k: [before[k], after[k]] for k in ("name", "channel", "url", "weight", "enabled") if before[k] != after[k]}
+    changes = {
+        k: [before[k], after[k]]
+        for k in ("name", "channel", "url", "weight", "enabled", "respectRobots")
+        if before[k] != after[k]
+    }
     if changes:
         record_audit(db, user.phone, AUDIT_SOURCE_UPDATE, key, {"changes": changes})
     db.commit()

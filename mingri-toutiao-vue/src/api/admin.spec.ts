@@ -39,6 +39,7 @@ const RAW_SOURCE = {
   lastError: null,
   lastItemCount: 20,
   lastFetchedAt: '2026-10-13T07:38:22',
+  respectRobots: true,
 };
 
 beforeEach(() => {
@@ -75,7 +76,29 @@ describe('api/admin', () => {
       lastItemCount: 20,
       lastFetchedAt: '2026-10-13T07:38:22',
       lastError: null,
+      respectRobots: true,
     });
+  });
+
+  it('respectRobots 缺失时按更保守的一方兜底为 true', async () => {
+    // 后端旧版本可能不下发该字段：显式删掉它，模拟「字段缺失」
+    const withoutField: Record<string, unknown> = { ...RAW_SOURCE };
+    delete withoutField.respectRobots;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ list: [withoutField] })),
+    );
+    const [s] = await fetchSources();
+    expect(s.respectRobots).toBe(true);
+  });
+
+  it('respectRobots=false 原样透出（管理员主动破例）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ list: [{ ...RAW_SOURCE, respectRobots: false }] })),
+    );
+    const [s] = await fetchSources();
+    expect(s.respectRobots).toBe(false);
   });
 
   it('缺 key 的行被丢弃而非渲染成空壳', async () => {

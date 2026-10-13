@@ -338,6 +338,19 @@ def metrics():
     for k, v in pool.items():
         if isinstance(v, (int, float)):
             lines.append(f'toutiao_db_pool_{k} {v}')
+    # 源健康（P1-16）：抓取链路的排障入口，-1 表示查询失败（不要假装成"全部健康"）
+    lines.append("# HELP toutiao_sources_unhealthy 异常或超时未成功抓取的信源数")
+    lines.append("# TYPE toutiao_sources_unhealthy gauge")
+    try:
+        from app.database import SessionLocal
+
+        from app.feeds.alert import unhealthy_count
+
+        with SessionLocal() as db:
+            lines.append(f"toutiao_sources_unhealthy {unhealthy_count(db)}")
+    except Exception as e:  # 指标不该因 DB 抖动而 500
+        logger.warning("源健康指标采集失败: %s", e)
+        lines.append("toutiao_sources_unhealthy -1")
     return PlainTextResponse("\n".join(lines) + "\n")
 
 

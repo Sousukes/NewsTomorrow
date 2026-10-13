@@ -27,6 +27,7 @@ const draft = reactive({
   url: '',
   weight: 5,
   enabled: true,
+  respectRobots: true,
 });
 const formError = ref('');
 const saving = ref(false);
@@ -241,7 +242,15 @@ onMounted(load);
 // ------------------------------ 表单 ------------------------------
 
 function openCreate() {
-  Object.assign(draft, { key: '', name: '', channel: 'tech', url: '', weight: 5, enabled: true });
+  Object.assign(draft, {
+    key: '',
+    name: '',
+    channel: 'tech',
+    url: '',
+    weight: 5,
+    enabled: true,
+    respectRobots: true,
+  });
   formError.value = '';
   formMode.value = { kind: 'create' };
 }
@@ -254,6 +263,7 @@ function openEdit(s: RssSourceItem) {
     url: s.url,
     weight: s.weight,
     enabled: s.enabled,
+    respectRobots: s.respectRobots,
   });
   formError.value = '';
   formMode.value = { kind: 'edit', key: s.key };
@@ -295,6 +305,7 @@ async function submitForm() {
         url: draft.url.trim(),
         weight: draft.weight,
         enabled: draft.enabled,
+        respectRobots: draft.respectRobots,
       });
       showToast(`已新增「${draft.name.trim()}」`);
     } else {
@@ -305,6 +316,7 @@ async function submitForm() {
         url: draft.url.trim(),
         weight: draft.weight,
         enabled: draft.enabled,
+        respectRobots: draft.respectRobots,
       });
       showToast(`已更新「${draft.name.trim()}」`);
     }
@@ -559,6 +571,14 @@ function statusText(s: RssSourceItem): string {
             </span>
             <span v-if="s.lastItemCount !== null">最近 {{ s.lastItemCount }} 条</span>
             <span v-if="s.lastFetchedAt">{{ formatTime(s.lastFetchedAt) }}</span>
+            <!-- 关闭 robots 是「主动破例」，必须在列表上可见，否则会悄悄累积成无人记得的特例 -->
+            <span
+              v-if="!s.respectRobots"
+              class="admin__robots-off"
+              title="该源已关闭 robots.txt 检查"
+            >
+              忽略 robots
+            </span>
             <code class="admin__key">{{ s.key }}</code>
           </div>
 
@@ -611,6 +631,10 @@ function statusText(s: RssSourceItem): string {
               <input v-model="draft.enabled" type="checkbox" />
               <span>启用该源</span>
             </label>
+            <label class="admin__check">
+              <input v-model="draft.respectRobots" type="checkbox" />
+              <span>遵守 robots.txt</span>
+            </label>
             <p v-if="formError" class="admin__form-error">{{ formError }}</p>
             <div class="admin__form-actions">
               <Button
@@ -659,8 +683,14 @@ function statusText(s: RssSourceItem): string {
           <input v-model="draft.enabled" type="checkbox" />
           <span>启用该源</span>
         </label>
+        <label class="admin__check">
+          <input v-model="draft.respectRobots" type="checkbox" />
+          <span>遵守 robots.txt</span>
+        </label>
         <p class="admin__form-tip">
-          权重越高，多源转载同一稿件时越先入库。停用优于删除——删掉后健康状态一并丢失。
+          权重越高，多源转载同一稿件时越先入库。停用优于删除——删掉后健康状态一并丢失。<br />
+          「遵守 robots.txt」默认勾选；个别源 robots 写得过严却公开提供 RSS
+          时，可取消勾选让它正常抓取。
         </p>
         <p v-if="formError" class="admin__form-error">{{ formError }}</p>
         <div class="admin__form-actions">
@@ -1035,6 +1065,16 @@ function statusText(s: RssSourceItem): string {
 
 .admin__status.is-none {
   color: var(--color-text-secondary);
+}
+
+/* 「忽略 robots」是主动破例，用琥珀色提示而非红色告警——它不一定代表出错 */
+.admin__robots-off {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #fff4e5;
+  color: #b26a00;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .admin__key {

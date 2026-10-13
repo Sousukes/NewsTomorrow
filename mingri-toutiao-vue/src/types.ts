@@ -113,6 +113,8 @@ export interface RssSourceItem {
   lastItemCount: number | null;
   /** ISO 时间串；null = 从未抓过 */
   lastFetchedAt: string | null;
+  /** 是否遵守对方 robots.txt（P1-16）；个别源 robots 写得过严却公开提供 RSS 时可关 */
+  respectRobots: boolean;
 }
 
 /** 新增 / 更新源的入参（更新时全部可选，未传字段保持原值） */
@@ -122,6 +124,8 @@ export interface SourceInput {
   url?: string;
   weight?: number;
   enabled?: boolean;
+  /** 是否遵守 robots.txt（P1-16）；不传则后端保持原值 */
+  respectRobots?: boolean;
 }
 
 /** 新增源必须自带 key */

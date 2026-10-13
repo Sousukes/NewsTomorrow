@@ -173,9 +173,9 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | POST | `/api/me/history` | ✅ | 记录浏览（同一资讯只刷新时间；资讯不存在时静默忽略） |
 | PUT | `/api/me/history` | ✅ | **并集合并**本地历史，随后按上限裁剪 |
 | DELETE | `/api/me/history` | ✅ | 清空浏览历史 |
-| GET | `/api/admin/sources` | ✅ 管理员 | RSS 源列表（含抓取健康状态），返回 `{ list, total }`；读取前自动播种内置源 |
+| GET | `/api/admin/sources` | ✅ 管理员 | RSS 源列表（含抓取健康状态与 `respectRobots` 开关），返回 `{ list, total }`；读取前自动播种内置源 |
 | POST | `/api/admin/sources` | ✅ 管理员 | 新增源；`key` 冲突 409、非 http(s) 地址 400 |
-| PATCH | `/api/admin/sources/{key}` | ✅ 管理员 | 局部更新（名字/频道/地址/权重/启停），未传字段保持不变；不存在 404 |
+| PATCH | `/api/admin/sources/{key}` | ✅ 管理员 | 局部更新（名字/频道/地址/权重/启停/是否遵守 robots），未传字段保持不变；不存在 404 |
 | DELETE | `/api/admin/sources/{key}` | ✅ 管理员 | 删除源；不存在 404 |
 | POST | `/api/admin/sources/reset` | ✅ 管理员 | 重置为内置源（丢弃自定义源，用于恢复出厂配置） |
 | GET | `/api/admin/users` | ✅ 管理员 | 管理员白名单（`admin_users` 表），返回 `{ list, total, envAdminCount }`；行含 `registered`（已注册/预授权）与 `addedBy`（审计） |
@@ -269,6 +269,59 @@ curl -X POST "http://127.0.0.1:8000/api/news/refresh?channel=tech" \
   启动日志告警、`/api/health.adminBreakGlass` 为 `false`、管理员页整张说明卡转红色——
   库白名单是完整的日常通道，缺的只是"数据库不可用时仍能进后台"这条兜底路径。
 
+### 抓取链路治理（迁移 0017）：并发化 + 礼貌抓取 + 健康告警
+
+抓取链路此前是**串行 + 退避重试**：源变多后一轮耗时线性增长。但"直接开并发"会踩到另一个
+问题——N 个源同时打出去，等于把压力转嫁给对方站点。所以这两件事**必须成对落地**，
+告警则是独立的一小块，搭同一班车（P1-16）。
+
+**① 并发但不失序**：`collect()` 改成两阶段——先线程池**并发抓取**，再按 `srcs`
+（权重降序）**串行合并**。合并之所以不能并发：「同 id 保留先到的一条」是先到先得的语义，
+若合并顺序随机化，"**多源转载同一稿件时权重高者先入库**"这条规则就失效了。同理
+`stats`（健康状态回写顺序）也按权重序而非完成序，避免审计/列表顺序随网络快慢漂移。
+
+**② 按 host 分组**：同站点的多个源归为一组、**组内串行 + 间隙 `FEED_HOST_GAP_SECONDS`**，
+组间才并发。并发的意义是省掉等待时间，不是把同一个站点打 N 遍。
+
+**③ robots.txt**（`respect_robots`，逐源可关）：
+- **取不到就放行**（404 / 不可达 / 格式不认识）——大量站点不提供 robots.txt，
+  把"没有声明"当成"禁止"会让抓取整体停摆；
+- **按 host 缓存**（TTL `FEED_ROBOTS_TTL_HOURS`）：robots 是整站声明，同站多源共享一次解析
+  （取 robots 本身就是一次请求）；缓存带 TTL，对方改规则最多滞后一个周期；
+- **被禁记为异常**（不静默抓取）：`last_status=error`、原因写 `robots.txt 禁止抓取`，
+  在源管理页可见；
+- **逐源开关**：个别源 robots 写得过严（甚至整站 `Disallow`）却实际公开提供 RSS，
+  一刀切会让这些源失去作用，故允许管理侧关掉——**这是主动破例，列表上以琥珀色
+  「忽略 robots」标记可见**，避免悄悄累积成无人记得的特例。
+
+**④ 单源最小抓取间隔**（`FEED_MIN_INTERVAL_MINUTES`）：定时任务与手动触发叠加时，
+不重复打同一个源。**按礼仪跳过的源本轮不刷新健康状态**——刷新会让"多久没成功"永远归零。
+
+**⑤ 健康告警**（`app/feeds/alert.py`）：健康字段此前只落库，源悄悄烂掉没人被通知。
+现在每轮抓取收尾检查一次：
+
+- **判定**：`last_status=error`，或 `last_fetched_at` 为空 / 早于 `FEED_ALERT_STALE_HOURS`
+  （后者覆盖"定时任务根本没跑到这个源"）。**只看启用中的源**——禁用的源不抓是预期行为；
+- **收件人**：管理能力（`ADMIN_PHONES` ∪ `admin_users`）解析成**已注册**用户投递到消息中心；
+  未注册（预授权）的管理员没有账号可收，跳过而不报错；
+- **节流**：同一源两次告警至少间隔 `FEED_ALERT_MIN_INTERVAL_HOURS`，锚点落
+  `rss_sources.last_alerted_at`（**落库而非进程内变量**，多实例共享窗口、重启不失效）；
+- **无收件人时不推进锚点**：没通知到人就不该占用窗口，否则管理员一注册得白等一个周期；
+- **旁路逻辑**：告警失败由调用方吞掉，绝不影响抓取结果。
+
+```bash
+FEED_MAX_CONCURRENCY=4            # 并发抓取的线程数（默认 4）
+FEED_HOST_GAP_SECONDS=1.5         # 同站点两次请求的最小间隔（秒）
+FEED_MIN_INTERVAL_MINUTES=10      # 单源最小抓取间隔（分钟）
+FEED_ROBOTS_TTL_HOURS=24          # robots.txt 缓存时长（小时）
+FEED_ALERT_ENABLED=true           # 源健康告警开关
+FEED_ALERT_STALE_HOURS=24         # 超过该时长未成功抓取即告警
+FEED_ALERT_MIN_INTERVAL_HOURS=6   # 同一源的告警节流窗口
+```
+
+`GET /api/metrics` 暴露 `toutiao_sources_unhealthy`（异常 + 超时未成功计数；`-1` 表示
+查询失败——用一个不可能的计数表达"未知"，而不是假装健康）。
+
 ## 数据库迁移（Alembic）
 
 ```bash
@@ -294,7 +347,8 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0014_comment_likes_and_replies`（点赞关系表 `comment_likes` + 评论父子列
   `parent_id`/`root_id`，移除 `comments.liked_by` JSON 列）、
   `0015_admin_whitelist`（管理员白名单 `admin_users`，应用内管理「指定账号」）、
-  `0016_admin_audit_logs`（运营审计 `admin_audit_logs`，记录谁改了什么）。
+  `0016_admin_audit_logs`（运营审计 `admin_audit_logs`，记录谁改了什么）、
+  `0017_fetch_politeness`（抓取礼仪 `rss_sources.respect_robots` + 告警节流 `last_alerted_at`）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -490,7 +544,7 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 ## 单元测试
 
 ```bash
-pytest -q          # 237 项
+pytest -q          # 307 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -500,10 +554,18 @@ pytest -q          # 237 项
 
 - `tests/test_units.py`（25 项）：限流器（阈值/隔离/窗口过期）、PBKDF2 密码哈希与加盐、JWT 往返、RSS 解析与字段映射（RSS 2.0 / Atom / 图片提取 / 变体判定 / 稳定 id / 相对时间）。
 - `tests/test_hardening.py`（14 项）：受信代理 IP 解析（XFF 采信/忽略/回退）、分页游标编解码与非法输入、**schema 单轨守卫**（缺表时抛错且**不就地建表**、`init_db` 源码不含 `create_all`）。
-- `tests/test_migrations.py`（17 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+- `tests/test_fetch_governance.py`（22 项）：**抓取链路治理**（P1-16）——分组（保持权重序 /
+  异站分组 / 最小间隔判定）、并发与合并顺序（**高权重源在重复稿件上胜出**、
+  stats 顺序不随网络快慢漂移、同站并发峰值恒为 1、异站确实并行）、礼貌抓取
+  （robots 禁止记为异常且**不发正文请求**、取不到 robots 放行、逐源可关、
+  robots 按 host 缓存只取一次、最小间隔跳过且零请求）、超时告警
+  （异常 / 从未成功 / 超时未成功判为不健康、健康与禁用源不报、通知已注册管理员、
+  节流窗口内外、**无收件人不占用节流锚点**、env-only 管理员同样收件、不健康计数）。
+- `tests/test_migrations.py`（18 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
-  与 `ix_news_hot`、`rss_sources` 的列与主键。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
+  与 `ix_news_hot`、`rss_sources` 的列与主键（含 0017 的 `respect_robots` **非空**与
+  `last_alerted_at`）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
   秒级时间戳下**同一条评论同一用户重复点赞只留一行**、悬空/非整数 user_id 被跳过、
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的
