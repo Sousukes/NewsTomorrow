@@ -83,6 +83,21 @@ class TestHealth:
         assert d["status"] == "up"
         assert d["pool"]["dialect"] == "sqlite"
 
+    def test_health_exposes_break_glass_flag(self, client):
+        """应急通道是否配置：只下发布尔值，让运维能一眼自查（不下发号码）。"""
+        d = client.get("/api/health").json()["data"]
+        assert isinstance(d["adminBreakGlass"], bool)
+        # 测试环境 ADMIN_PHONES 非空（conftest 钉死）→ 应急通道在位
+        assert d["adminBreakGlass"] is True
+
+    def test_break_glass_missing_only_when_production_and_env_empty(self, monkeypatch):
+        """软提示的判定：仅「生产 + env 为空」才算缺失，开发环境不打扰。"""
+        assert main.break_glass_missing() is False  # 开发环境恒不告警
+        monkeypatch.setattr(main, "IS_PRODUCTION", True)
+        assert main.break_glass_missing() is False  # 生产但 env 非空
+        monkeypatch.setattr(main, "ADMIN_PHONES", [])
+        assert main.break_glass_missing() is True
+
     def test_request_id_header(self, client):
         """L5：响应回带 X-Request-ID（可自定义，便于全链路追踪）。"""
         r = client.get("/api/health", headers={"X-Request-ID": "trace-123"})

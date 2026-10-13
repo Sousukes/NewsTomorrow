@@ -100,11 +100,27 @@ def client_ip(request: Request) -> str:
     return direct
 
 
+def break_glass_missing() -> bool:
+    """生产环境是否**未配置**应急通道（`ADMIN_PHONES` 为空）。
+
+    只告警、不阻断启动：库白名单（`admin_users`）本身是完整的日常通道，
+    缺的只是"数据库不可用时仍能进后台"的那条路——DB 故障 / 误删行 / 迁移回滚
+    都可能让库白名单整体失效，届时 env 是唯一入口。
+    """
+    return IS_PRODUCTION and not ADMIN_PHONES
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """启动：建表 + 启动定时抓取；关停：停调度 + 释放连接池。"""
     init_db()
     await start_scheduler()
+    if break_glass_missing():
+        logger.warning(
+            "[运维提醒] 生产环境未配置 ADMIN_PHONES，缺少应急通道："
+            "一旦 admin_users 表不可用（DB 故障 / 行被误删 / 迁移回滚），"
+            "管理后台将无人可进。建议至少保留一条 env 管理员。"
+        )
     logger.info(
         "启动完成 | env=%s | docs=%s | rate_limit=%s(%d/min, login %d/min) | "
         "cron=%s(%d分钟) | cors=%s | trusted_proxies=%s | admins=%d",
@@ -285,7 +301,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 def health():
     return JSONResponse(
         status_code=200,
-        content={"code": 0, "message": "ok", "data": {"status": "up", "pool": pool_status()}},
+        content={
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "status": "up",
+                "pool": pool_status(),
+                # 应急通道是否配置：只下发布尔值，不下发号码。
+                # 库白名单可用但 env 为空时，DB 故障/误删/迁移回滚会让后台彻底进不去。
+                "adminBreakGlass": bool(ADMIN_PHONES),
+            },
+        },
     )
 
 

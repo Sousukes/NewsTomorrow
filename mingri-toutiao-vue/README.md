@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **212** 项，覆盖：
+- **单元测试**：Vitest 共 **214** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -43,9 +43,10 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   - `api/admin`（14）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
     `ensureRealBackend` 守卫、行数据归一化（缺 `key` 的脏行丢弃、`lastError` 空串转 null）、
     五个源管理接口的路径/方法/错误透传
-  - `views/AdminUsers`（9）：管理员白名单渲染（含 `registered` 已注册/预授权与 `addedBy`）、
+  - `views/AdminUsers`（11）：管理员白名单渲染（含 `registered` 已注册/预授权与 `addedBy`）、
     env 计数说明、添加成功清空表单并刷新、**手机号格式前端拦截不发请求**、冲突 409 展示服务端文案、
-    移除二次确认、**末位保护 409 保留行并报服务端语义**、加载失败与 403 转无权限态
+    移除二次确认、**末位保护 409 保留行并报服务端语义**、加载失败与 403 转无权限态、
+    **应急通道缺失提示**（env 计数为 0 时整张说明卡转警示态，已配置时不显示）
   - `views/AdminSources`（20）：汇总计数、新增/编辑表单与前端校验、启停乐观更新+失败回滚、
     删除/重置二次确认、健康状态渲染、**非管理员不请求列表直接呈无权限态**（不泄露接口存在性）；
     **搜索与筛选**（名称/地址/标识模糊匹配 + 频道/状态 chips + 无结果清除入口）、
@@ -329,7 +330,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 | `/favorites` | `Favorites` | S7 收藏（S12 空态） |
 | `/history` | `History` | S8 浏览历史（S13 空态） |
 | `/admin/sources` | `AdminSources` | **RSS 源管理**（仅 `isAdmin` 账号可见入口；增删改/启停/重置 + 抓取健康状态 + 搜索筛选 + 异常置顶 + 批量操作） |
-| `/admin/users` | `AdminUsers` | **管理员管理**（P1-14）：应用内增删「指定账号」——双源说明（env break-glass + 库白名单）、添加并支持预授权、注册状态标记、移除确认与末位保护提示 |
+| `/admin/users` | `AdminUsers` | **管理员管理**（P1-14）：应用内增删「指定账号」——双源说明（env break-glass + 库白名单）、添加并支持预授权、注册状态标记、移除确认与末位保护提示、**env 管理员为 0 时提示应急通道缺失** |
 
 > 底部 `TabBar` 仅对带 `meta.tab` 的路由（首页/视频/消息/我的）显示；详情、评论、图集、登录、搜索类整页不显示。
 

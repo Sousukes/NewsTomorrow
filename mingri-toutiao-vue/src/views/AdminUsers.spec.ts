@@ -198,4 +198,31 @@ describe('views/AdminUsers', () => {
     await settle(w);
     expect(w.text()).toContain('无权限管理管理员');
   });
+
+  it('未配置 env 管理员时提示缺少应急通道', async () => {
+    vi.mocked(adminApi.fetchAdminUsers).mockResolvedValue({
+      list: [adminUser()],
+      total: 1,
+      envAdminCount: 0,
+    });
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.text()).toContain('当前未配置环境变量管理员');
+    // 整张双源说明卡转为警示态，不只是加一行字
+    expect(w.find('.admin__notice').classes()).toContain('admin__notice--warn');
+  });
+
+  it('已配置 env 管理员时不显示应急通道提示', async () => {
+    vi.mocked(adminApi.fetchAdminUsers).mockResolvedValue({
+      list: [adminUser()],
+      total: 1,
+      envAdminCount: 2,
+    });
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.text()).not.toContain('当前未配置环境变量管理员');
+    expect(w.find('.admin__notice').classes()).not.toContain('admin__notice--warn');
+  });
 });

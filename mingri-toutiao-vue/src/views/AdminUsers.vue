@@ -145,11 +145,16 @@ function formatTime(iso: string): string {
 
     <template v-else>
       <!-- 双源机制说明：env 是 break-glass，库白名单供日常运营 -->
-      <div class="admin__notice">
+      <div class="admin__notice" :class="{ 'admin__notice--warn': envAdminCount === 0 }">
         <p class="admin__notice-title">管理员来自两个来源</p>
         <p class="admin__notice-text">
           环境变量（ADMIN_PHONES）中的管理员共 {{ envAdminCount }} 位，修改后重启生效，
           作为应急通道保留；下面列表是应用内白名单，增删即时生效。
+        </p>
+        <!-- 应急通道缺失提示：让运营自己看见，而不是等后台真进不去才发现 -->
+        <p v-if="envAdminCount === 0" class="admin__notice-warn">
+          当前未配置环境变量管理员（应急通道）。建议在生产环境至少保留一条——
+          数据库故障、白名单行被误删或迁移回滚时，它是唯一还能进后台的入口。
         </p>
       </div>
 
@@ -290,6 +295,18 @@ function formatTime(iso: string): string {
   font-size: 11px;
   line-height: 1.6;
   color: var(--color-text-secondary);
+}
+
+/* 应急通道缺失：整卡转为警示态，运营打开页面就能看见 */
+.admin__notice--warn {
+  border: 1px solid #d93025;
+}
+
+.admin__notice-warn {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #d93025;
 }
 
 .admin__banner {

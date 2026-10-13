@@ -71,7 +71,7 @@ node scripts/contract-check.mjs
 | `CORS_ORIGINS` | 逗号分隔的允许来源。production 默认**同源**（不跨域），需显式配置 |
 | `RATE_LIMIT_*` | 限流阈值，见下|
 | `TRUSTED_PROXIES` | 逗号分隔的受信代理网段（IP 或 CIDR，如 `10.0.0.0/8,127.0.0.1`）。**仅当直连对端命中该网段时**才采信 `X-Forwarded-For`；留空表示不信任任何代理头，防止伪造 XFF 绕过限流 |
-| `ADMIN_PHONES` | 管理能力白名单（逗号分隔）：`/api/news/refresh`、`/api/admin/*` 与登录响应 `isAdmin` 均按 **`ADMIN_PHONES` ∪ `admin_users` 表** 判定（P1-14）。env 保留为 break-glass（重启即生效）；日常增删管理员在应用内「管理员管理」页操作，无需重启。两边都为空 = 该能力整体禁用（403） |
+| `ADMIN_PHONES` | 管理能力白名单（逗号分隔）：`/api/news/refresh`、`/api/admin/*` 与登录响应 `isAdmin` 均按 **`ADMIN_PHONES` ∪ `admin_users` 表** 判定（P1-14）。env 保留为 break-glass（重启即生效）；日常增删管理员在应用内「管理员管理」页操作，无需重启。两边都为空 = 该能力整体禁用（403）。**生产建议至少保留一条**：DB 故障 / 白名单行被误删 / 迁移回滚都可能让库白名单整体失效，届时 env 是唯一入口（缺失时启动日志告警、`/api/health.adminBreakGlass=false`、管理员页红色提示） |
 | `SEED_SAMPLE_DATA` | 是否播种示例数据（演示账号 + 示例资讯/评论/消息）。**生产默认 `false`**，测试建议置 `false` 保证确定性 |
 | `LOG_LEVEL` | 访问日志级别 |
 
@@ -147,7 +147,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/health` | — | 健康检查（含连接池状态） |
+| GET | `/api/health` | — | 健康检查；返回 `{ status, pool, adminBreakGlass }`——`adminBreakGlass` 是**应急通道是否配置**的布尔标记（只下发真假、不下发号码） |
 | GET | `/api/metrics` | — | Prometheus 文本指标（uptime / 请求数 / 在途 / 状态码 / 路径 / 连接池） |
 | POST | `/api/news/refresh` | ✅ 管理员 | 手动触发抓取（`?channel=&keyword=`）。需管理能力（`ADMIN_PHONES` ∪ `admin_users` 表），**异步执行**返回 202 |
 | GET | `/api/news/search?q=` | — | 服务端搜索（标题/摘要匹配，**按相关度排序**见「搜索与热词」），返回 `{ list, total, page, hasMore }`；**旁路记录**搜索词供热词统计 |
@@ -249,7 +249,10 @@ curl -X POST "http://127.0.0.1:8000/api/news/refresh?channel=tech" \
   `isAdmin` 即为 true；列表行带 `registered` 区分「已注册 / 预授权」；
 - **末位保护**：移除后若任何来源都不再有任何管理员，返回 40904——否则生产环境可能把自己
   锁在门外，只能改环境变量重启来恢复；
-- **审计**：`added_by` 记录操作者手机号，回答「谁能授权」的追问。
+- **审计**：`added_by` 记录操作者手机号，回答「谁能授权」的追问；
+- **应急通道提示（软提示，不阻断启动）**：生产环境 `ADMIN_PHONES` 为空时，
+  启动日志告警、`/api/health.adminBreakGlass` 为 `false`、管理员页整张说明卡转红色——
+  库白名单是完整的日常通道，缺的只是"数据库不可用时仍能进后台"这条兜底路径。
 
 ## 数据库迁移（Alembic）
 
@@ -504,7 +507,7 @@ pytest -q          # 237 项
   **库白名单（非 env）号码同样下发 true**；
   **入参校验**（4 项）——未知频道 422（`errors[0].loc[-1] == 'channel'`）、`key` 格式非法 422、
   更新时同样校验频道。
-- `tests/test_api.py`（86 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
+- `tests/test_api.py`（88 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
   `userId`、`mine` 仅作者为 true、历史评论 `userId` 为 null 且任何人都不是作者；
   **评论删除**（`TestCommentDelete`）——作者可删、他人 403、未登录 401、
   无归属评论不可删、幂等、删后不可点赞、跨文章 404；
