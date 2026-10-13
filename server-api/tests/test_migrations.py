@@ -34,6 +34,7 @@ EXPECTED_TABLES = (
     "user_history",
     "search_logs",
     "rss_sources",
+    "admin_users",
 )
 
 
@@ -159,6 +160,21 @@ class TestMigrationChain:
         # 回复列表按 root_id 查询，索引必须存在
         assert "ix_comments_root_id" in {
             i["name"] for i in insp.get_indexes("comments")
+        }
+
+    def test_admin_users_table(self, chain_db):
+        """0015：管理员白名单入库（应用内管理「指定账号」）。"""
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("admin_users")}
+        assert {"phone", "note", "added_by", "created_at"} <= cols
+        # 手机号即主键：预授权（未注册账号）也能先加入名单，故不设 users 外键
+        pk = insp.get_pk_constraint("admin_users")["constrained_columns"]
+        assert pk == ["phone"]
+        fks = insp.get_foreign_keys("admin_users")
+        assert fks == []  # 无外键是刻意设计（见模型注释）
+        # 列表按添加时间排序，索引必须存在
+        assert "ix_admin_users_created_at" in {
+            i["name"] for i in insp.get_indexes("admin_users")
         }
 
     def test_downgrade_to_base_drops_tables(self, chain_db):

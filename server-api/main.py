@@ -22,6 +22,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy.orm import Session
 
 from app.config import (
     ADMIN_PHONES,
@@ -41,7 +42,7 @@ from app.config import (
     REDOC_URL,
     TRUSTED_PROXIES,
 )
-from app.database import pool_status
+from app.database import get_db, pool_status
 from app.deps import get_current_user
 from app.models import User
 from app.ratelimit import build_limiter
@@ -340,14 +341,15 @@ def refresh_news(
     channel: str | None = None,
     keyword: str | None = None,
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """手动触发一次抓取（需管理员，异步执行）。
 
-    - 鉴权：需登录且手机号在 `ADMIN_PHONES` 白名单内；白名单为空则禁用。
+    - 鉴权：需登录且具备管理能力（`ADMIN_PHONES` ∪ `admin_users` 表）；都为空则禁用。
     - 执行：投递到后台任务，立即返回 202，不阻塞请求。
     """
-    # 复用 admin 模块的判定，避免两处各写一遍 `phone in ADMIN_PHONES` 而漂移
-    if not admin.is_admin(user.phone):
+    # 复用 admin 模块的判定，避免两处各写一遍而漂移
+    if not admin.is_admin(user.phone, db):
         raise HTTPException(status_code=403, detail={"code": 40301, "message": "无权限执行该操作"})
     background.add_task(_run_refresh, channel, keyword)
     return JSONResponse(

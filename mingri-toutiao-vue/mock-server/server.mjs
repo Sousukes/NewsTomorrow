@@ -242,7 +242,19 @@ const CHANNEL_KEYS = ['recommend', 'hot', 'video', 'tech', 'finance', 'sports', 
  * 这里放演示账号，使 `npm run dev:api` 也能完整体验源管理界面。
  */
 const ADMIN_PHONES = ['13800138000'];
-const isAdminPhone = (phone) => ADMIN_PHONES.includes(String(phone ?? ''));
+
+/**
+ * 应用内白名单（P1-14，与后端 admin_users 表对应）：phone → { note, addedBy, createdAt }。
+ * 进程内存储，服务重启即回到初始状态（mock 不持久化，与源配置同理）。
+ */
+const adminWhitelist = new Map();
+
+/** 双源并集判定（与后端 is_admin 一致）：env ∪ 应用内白名单 */
+const isAdminPhone = (phone) =>
+  ADMIN_PHONES.includes(String(phone ?? '')) || adminWhitelist.has(String(phone ?? ''));
+
+/** 登录过的手机号（mock 无注册端点，以此推导白名单行的「已注册」状态） */
+const seenPhones = new Set();
 
 /** 内置源（与后端 BUILTIN_SOURCES 同构；进程内可增删改） */
 const BUILTIN_SOURCES = [
@@ -471,6 +483,7 @@ const server = createServer(async (req, res) => {
       return fail(res, 401, 40101, '手机号或密码错误，请重新输入');
     const token = `tk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     tokens.set(token, { phone });
+    seenPhones.add(String(phone));
     // isAdmin 与后端一致：按白名单判定后随登录响应下发，前端据此展示运营入口
     return ok(res, {
       token,
@@ -785,6 +798,61 @@ const server = createServer(async (req, res) => {
     if (i < 0) return fail(res, 404, 40402, '源不存在');
     const [row] = sources.splice(i, 1);
     return ok(res, { key: row.key });
+  }
+
+  /* --------------------- 管理端：管理员白名单（P1-14） --------------------- */
+
+  const adminUserOut = (phone, row) => ({
+    phone,
+    note: row.note || '',
+    addedBy: row.addedBy || '',
+    createdAt: row.createdAt,
+    registered: seenPhones.has(phone),
+    name: seenPhones.has(phone) ? '明日头条用户' : '',
+  });
+
+  // GET /admin/users
+  if (head === 'admin' && a === 'users' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const list = [...adminWhitelist.entries()]
+      .sort((x, y) => String(x[1].createdAt).localeCompare(String(y[1].createdAt)))
+      .map(([phone, row]) => adminUserOut(phone, row));
+    return ok(res, { list, total: list.length, envAdminCount: ADMIN_PHONES.length });
+  }
+
+  // POST /admin/users
+  if (head === 'admin' && a === 'users' && !b && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const body = await readBody(req);
+    const phone = String(body.phone ?? '');
+    if (!/^1\d{10}$/.test(phone)) {
+      return fail(res, 422, 42200, '参数校验失败：phone 需为 11 位手机号（1 开头）');
+    }
+    if (adminWhitelist.has(phone) || ADMIN_PHONES.includes(phone)) {
+      return fail(res, 409, 40903, '该手机号已是管理员');
+    }
+    const row = {
+      note: String(body.note ?? '')
+        .trim()
+        .slice(0, 100),
+      addedBy: operator,
+      createdAt: new Date().toISOString(),
+    };
+    adminWhitelist.set(phone, row);
+    return ok(res, adminUserOut(phone, row), '已添加管理员');
+  }
+
+  // DELETE /admin/users/:phone
+  if (head === 'admin' && a === 'users' && b && method === 'DELETE') {
+    if (!requireAdmin(req, res)) return;
+    if (!adminWhitelist.has(b)) return fail(res, 404, 40403, '管理员不存在');
+    // 末位保护与后端一致：env 为空且库中仅剩这一条时拒绝
+    if (adminWhitelist.size - 1 <= 0 && ADMIN_PHONES.length === 0) {
+      return fail(res, 409, 40904, '已是最后一位管理员，不能移除');
+    }
+    adminWhitelist.delete(b);
+    return ok(res, { phone: b }, '已移除管理员');
   }
 
   fail(res, 404, 40404, '接口不存在');

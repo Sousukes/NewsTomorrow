@@ -390,7 +390,7 @@ function statusText(s: RssSourceItem): string {
       v-if="noAccess"
       icon="collect"
       title="无权限管理信源"
-      description="该功能仅对管理员开放。如需开通，请把当前账号手机号加入后端 ADMIN_PHONES 白名单。"
+      description="该功能仅对管理员开放。如需开通，请让现有管理员在「管理员管理」中加入你的手机号，或把账号加入后端 ADMIN_PHONES 白名单。"
     >
       <Button variant="primary" label="返回" @click="router.push('/profile')" />
     </EmptyState>
@@ -488,6 +488,7 @@ function statusText(s: RssSourceItem): string {
           :label="selecting ? '退出批量' : '批量管理'"
           @click="toggleSelectMode"
         />
+        <Button variant="secondary" label="管理员" @click="router.push('/admin/users')" />
       </div>
 
       <!-- 批量模式选择条 -->

@@ -33,6 +33,12 @@ const menu = computed(() => {
       desc: '增删启停信源、查看抓取状态',
       to: '/admin/sources',
     });
+    items.push({
+      key: 'admin-users',
+      label: '管理员管理',
+      desc: '指定可访问后台的账号',
+      to: '/admin/users',
+    });
   }
   items.push({ key: 'settings', label: '设置', desc: '账号与安全', to: '' });
   return items;

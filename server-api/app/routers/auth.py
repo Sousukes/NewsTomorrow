@@ -15,16 +15,17 @@ from .admin import is_admin
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _token_payload(user: User) -> dict:
+def _token_payload(user: User, db: Session) -> dict:
     return {
         "token": create_token(user.id, user.token_version or 0),
         # isAdmin 让前端直接决定是否展示管理入口，省掉一次探测请求；
         # 只下发布尔值，不下发白名单本身（避免把配置暴露给客户端）。
+        # 双源判定（env ∪ admin_users 表）需要查库，故 db 必须透传到这里。
         "user": {
             "id": user.id,
             "name": user.name,
             "phone": user.phone,
-            "isAdmin": is_admin(user.phone),
+            "isAdmin": is_admin(user.phone, db),
         },
     }
 
@@ -44,7 +45,7 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
-    return ok(_token_payload(user), message="注册成功")
+    return ok(_token_payload(user, db), message="注册成功")
 
 
 @router.post("/login", response_model=None)
@@ -57,7 +58,7 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=401, detail={"code": 40101, "message": "手机号或密码错误，请重新输入"}
         )
-    return ok(_token_payload(user), message="登录成功")
+    return ok(_token_payload(user, db), message="登录成功")
 
 
 @router.post("/logout", response_model=None)
@@ -69,9 +70,10 @@ def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)
 
 
 @router.post("/refresh", response_model=None)
-def refresh(user: User = Depends(get_current_user)):
+def refresh(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """滑动续期：用当前有效 token 换取一张新 token。
 
     不改变 `token_version`，因此旧 token 在过期前仍可用（标准 access-token 续期语义）。
+    isAdmin 随续期重新判定（P1-14 起白名单可在应用内变动，不能把标志写死在 token 里）。
     """
-    return ok(_token_payload(user), message="已续期")
+    return ok(_token_payload(user, db), message="已续期")

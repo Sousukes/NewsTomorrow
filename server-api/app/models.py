@@ -271,3 +271,24 @@ class RssSource(Base):
     updated_at = Column(String(30), default=now_str, nullable=False)
 
     __table_args__ = (Index("ix_rss_sources_channel_enabled", "channel", "enabled"),)
+
+
+class AdminUser(Base):
+    """管理员白名单（应用内可管理的「指定账号」名单）。
+
+    与 `ADMIN_PHONES` 环境变量是**并集**关系（见 `routers/admin.is_admin`）：
+    - env 保留为 break-glass：改配置重启即生效，不依赖数据库可用；
+    - 本表供日常运营：应用内增删管理员，无需重启服务；
+    - 两边都为空 = 管理能力整体关闭（配置疏漏时不应暴露管理接口）。
+
+    手机号即主键且**不设 users 外键**：支持预授权——账号尚未注册也可
+    先加入名单，其注册/登录时 `isAdmin` 即为 true。列表接口用一次
+    `db.get(User, phone)` 区分「已注册 / 预授权」供界面展示。
+    """
+
+    __tablename__ = "admin_users"
+
+    phone = Column(String(20), primary_key=True)
+    note = Column(String(100), nullable=False, default="")  # 备注（如「运营-张三」）
+    added_by = Column(String(20), nullable=False, default="")  # 操作者手机号（审计用）
+    created_at = Column(String(30), nullable=False, default=now_str, index=True)

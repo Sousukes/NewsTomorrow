@@ -128,3 +128,31 @@ export interface SourceInput {
 export interface SourceCreateInput extends SourceInput {
   key: string;
 }
+
+/** 管理员白名单行（对应 GET /api/admin/users 的条目） */
+export interface AdminUserItem {
+  phone: string;
+  /** 备注（如「运营-张三」） */
+  note: string;
+  /** 添加者手机号（审计用） */
+  addedBy: string;
+  /** ISO 时间串 */
+  createdAt: string;
+  /** 该手机号是否已注册账号；false = 预授权（注册后自动生效） */
+  registered: boolean;
+  /** 已注册时的用户名；未注册为空串 */
+  name: string;
+}
+
+/** 白名单列表信封：库内行 + env 来源的管理员数量（不下发号码） */
+export interface AdminUserList {
+  list: AdminUserItem[];
+  total: number;
+  envAdminCount: number;
+}
+
+/** 添加管理员的入参 */
+export interface AdminUserInput {
+  phone: string;
+  note?: string;
+}

@@ -1,13 +1,16 @@
-"""管理端路由：RSS 源配置（可运行时增删启停）。
+"""管理端路由：RSS 源配置（可运行时增删启停）+ 管理员白名单（P1-14）。
 
-鉴权与 `POST /api/news/refresh` 一致：需登录且手机号在 `ADMIN_PHONES` 白名单内；
-白名单为空表示该能力不可用（403）——避免生产环境因配置疏漏而暴露管理接口。
+鉴权与 `POST /api/news/refresh` 一致：需登录且具备管理能力——
+`ADMIN_PHONES` 环境变量 **∪** `admin_users` 表白名单（P1-14 起）；
+两边都为空表示该能力不可用（403）——避免生产环境因配置疏漏而暴露管理接口。
 
 设计要点：
 - **读取即播种**：列表/抓取前确保内置源已入库，新环境无需手工初始化；
 - **停用而非删除**为默认建议，但删除能力保留（运营确实加错了源时需要）；
 - **URL 协议白名单**：仅允许 http/https，防止注入 `file://` 等被抓取器请求；
-- 健康字段由抓取流程回写，本模块只读不写。
+- 健康字段由抓取流程回写，本模块只读不写；
+- **末位管理员保护**：移除后若任何来源都不再有管理员，拒绝（40904）——
+  否则生产环境可能把自己锁在门外，只能改环境变量重启来恢复。
 """
 import logging
 
@@ -19,9 +22,9 @@ from ..config import ADMIN_PHONES
 from ..database import get_db
 from ..deps import get_current_user
 from ..feeds.sources import BUILTIN_SOURCES, ensure_seeded
-from ..models import RssSource, User, now_str
+from ..models import AdminUser, RssSource, User, now_str
 from ..response import ok
-from ..schemas import SourceIn, SourceUpdateIn
+from ..schemas import AdminIn, SourceIn, SourceUpdateIn
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("toutiao.admin")
@@ -29,20 +32,27 @@ logger = logging.getLogger("toutiao.admin")
 ALLOWED_SCHEMES = ("http", "https")
 
 
-def is_admin(phone: str | None) -> bool:
+def is_admin(phone: str | None, db: Session | None = None) -> bool:
     """是否具备管理能力。
 
-    **白名单为空 = 整体关闭**：配置疏漏时不应暴露管理接口（生产安全）。
+    **双源并集**（P1-14）：
+    - `ADMIN_PHONES` 环境变量保留为 break-glass——改配置重启即生效，不依赖库；
+    - `admin_users` 表供日常运营——应用内增删，无需重启服务；
+    - 两边都为空 = 整体关闭：配置疏漏时不应暴露管理接口（生产安全）。
 
-    抽成独立函数而非在调用处各写一遍 `phone in ADMIN_PHONES`：登录响应也要复用同一判定
-    （前端据此决定是否展示管理入口），两处实现一旦漂移，就会出现"入口看得见、
-    一点就 403"或反之的怪象。
+    抽成独立函数而非在调用处各写一遍：登录响应也要复用同一判定
+    （前端据此决定是否展示管理入口），两处实现一旦漂移，就会出现
+    "入口看得见、一点就 403"或反之的怪象。
     """
-    return bool(ADMIN_PHONES) and phone in ADMIN_PHONES
+    if not phone:
+        return False
+    if ADMIN_PHONES and phone in ADMIN_PHONES:
+        return True
+    return db is not None and db.get(AdminUser, phone) is not None
 
 
-def _require_admin(user: User) -> None:
-    if not is_admin(user.phone):
+def _require_admin(user: User, db: Session) -> None:
+    if not is_admin(user.phone, db):
         raise HTTPException(status_code=403, detail={"code": 40301, "message": "无权限执行该操作"})
 
 
@@ -75,7 +85,7 @@ def list_sources(
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
     """源列表（含抓取健康状态）。"""
-    _require_admin(user)
+    _require_admin(user, db)
     ensure_seeded(db)
     rows = db.query(RssSource).order_by(RssSource.weight.desc(), RssSource.key).all()
     return ok({"list": [_out(r) for r in rows], "total": len(rows)})
@@ -88,7 +98,7 @@ def create_source(
     user: User = Depends(get_current_user),
 ):
     """新增源。key 冲突返回 409。"""
-    _require_admin(user)
+    _require_admin(user, db)
     _validate_url(body.url)
     ensure_seeded(db)
     if db.get(RssSource, body.key) is not None:
@@ -121,7 +131,7 @@ def update_source(
     user: User = Depends(get_current_user),
 ):
     """局部更新源（改权重 / 启停 / 换地址）。"""
-    _require_admin(user)
+    _require_admin(user, db)
     # 先确保内置源已入库：否则在尚未触发过抓取的新环境里，改一个"明明存在"的内置源会 404
     ensure_seeded(db)
     row = db.get(RssSource, key)
@@ -144,7 +154,7 @@ def delete_source(
     key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     """删除源。删除后若表空了，下次读取会重新播种内置源。"""
-    _require_admin(user)
+    _require_admin(user, db)
     ensure_seeded(db)  # 同上：避免删除内置源时因尚未播种而 404
     row = db.get(RssSource, key)
     if row is None:
@@ -160,9 +170,98 @@ def reset_sources(db: Session = Depends(get_db), user: User = Depends(get_curren
 
     用于把运营改坏的配置恢复出厂。会丢弃自定义源，故单独一个端点而非复用删除。
     """
-    _require_admin(user)
+    _require_admin(user, db)
     db.query(RssSource).delete()
     db.commit()
     seeded = ensure_seeded(db)
     logger.info("管理员 %s 重置 RSS 源为内置 %d 个", user.phone, seeded)
     return ok({"seeded": seeded}, message=f"已重置为 {seeded} 个内置源")
+
+
+# ---------------------------------------------------------------- 管理员白名单（P1-14）
+
+
+def _admin_out(row: AdminUser, db: Session) -> dict:
+    """白名单行 → 输出。`registered` 区分「已注册账号 / 预授权」供界面展示。"""
+    # 按 phone 查而非 db.get(User, phone)：User 主键是自增 id，
+    # 拿手机号当主键查会永远查不到（registered 恒为 False）。
+    account = db.query(User).filter(User.phone == row.phone).first()
+    return {
+        "phone": row.phone,
+        "note": row.note or "",
+        "addedBy": row.added_by or "",
+        "createdAt": row.created_at,
+        "registered": account is not None,
+        "name": account.name if account else "",
+    }
+
+
+@router.get("/users", response_model=None)
+def list_admin_users(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """管理员白名单列表（DB 源）。
+
+    附 `envAdminCount`（环境变量来源的管理员**数量**，不下发号码）：
+    界面据此解释「为什么移除最后一位库管理员仍被允许」——env 是 break-glass。
+    """
+    _require_admin(user, db)
+    rows = db.query(AdminUser).order_by(AdminUser.created_at, AdminUser.phone).all()
+    return ok(
+        {
+            "list": [_admin_out(r, db) for r in rows],
+            "total": len(rows),
+            "envAdminCount": len(ADMIN_PHONES),
+        }
+    )
+
+
+@router.post("/users", response_model=None)
+def add_admin_user(
+    body: AdminIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """添加管理员。
+
+    已在**任一来源**（env 或库）中的手机号返回 40903——重复入库只会让
+    界面出现一行"管不了其实也无需管"的冗余记录。
+    """
+    _require_admin(user, db)
+    if db.get(AdminUser, body.phone) is not None or (
+        ADMIN_PHONES and body.phone in ADMIN_PHONES
+    ):
+        raise HTTPException(status_code=409, detail={"code": 40903, "message": "该手机号已是管理员"})
+    row = AdminUser(
+        phone=body.phone,
+        note=body.note.strip(),
+        added_by=user.phone,
+        created_at=now_str(),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    logger.info("管理员 %s 添加管理员 %s（备注：%s）", user.phone, body.phone, row.note or "无")
+    return ok(_admin_out(row, db), message="已添加管理员")
+
+
+@router.delete("/users/{phone}", response_model=None)
+def remove_admin_user(
+    phone: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """移除管理员。
+
+    **末位保护**：移除后若任何来源都不再有任何管理员，拒绝（40904）。
+    注意 env 管理员不受库操作影响——移除一位"同时也在 env 里"的管理员时，
+    env 仍在授权，故只有 env 为空且这是库中最后一条时才拦截。
+    """
+    _require_admin(user, db)
+    row = db.get(AdminUser, phone)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": 40403, "message": "管理员不存在"})
+    if db.query(AdminUser).count() - 1 <= 0 and not ADMIN_PHONES:
+        raise HTTPException(
+            status_code=409, detail={"code": 40904, "message": "已是最后一位管理员，不能移除"}
+        )
+    db.delete(row)
+    db.commit()
+    logger.info("管理员 %s 移除管理员 %s", user.phone, phone)
+    return ok({"phone": phone}, message="已移除管理员")

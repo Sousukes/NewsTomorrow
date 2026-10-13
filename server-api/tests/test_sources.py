@@ -30,7 +30,7 @@ from app.feeds import ingest as ingest_mod  # noqa: E402
 from app.feeds import sources as src_mod  # noqa: E402
 from app.feeds.fetcher import FetchError, RawItem  # noqa: E402
 from app.feeds.ingest import collect  # noqa: E402
-from app.models import RssSource  # noqa: E402
+from app.models import AdminUser, RssSource  # noqa: E402
 
 ADMIN_PHONE = "13900000000"
 
@@ -391,6 +391,153 @@ class TestAdminSources:
         assert r.status_code == 403
 
 
+# ------------------------------------------------- 管理员白名单（P1-14）
+
+
+class TestAdminWhitelist:
+    """应用内管理「指定账号」：env ∪ DB 双源、增删、末位保护。"""
+
+    def test_requires_login(self, client):
+        assert client.get("/api/admin/users").status_code == 401
+
+    def test_non_admin_is_forbidden(self, client):
+        h = _user(client, "13900000001")
+        r = client.get("/api/admin/users", headers=h)
+        assert r.status_code == 403
+        assert r.json()["code"] == 40301
+
+    def test_list_initially_empty_with_env_count(self, client):
+        """库为空时列表为空，但披露 env 来源的**数量**（不下发号码）。
+
+        env 管理员不是库里的行；只给计数是为了让界面能解释
+        「为什么移除最后一位库管理员仍被允许」——env 是 break-glass。
+        """
+        h = _admin(client)
+        data = client.get("/api/admin/users", headers=h).json()["data"]
+        assert data["total"] == 0
+        assert data["list"] == []
+        assert data["envAdminCount"] == 1  # fixture 把 ADMIN_PHONE 装进了 env
+
+    def test_add_admin_grants_access_via_db(self, client):
+        """核心链路：env 管理员把新号加入库白名单 → 该号登录即 isAdmin。"""
+        h = _admin(client)
+        r = client.post(
+            "/api/admin/users", headers=h, json={"phone": "13900000002", "note": "运营-小红"}
+        )
+        assert r.json()["code"] == 0
+        assert r.json()["data"]["phone"] == "13900000002"
+        assert r.json()["data"]["addedBy"] == ADMIN_PHONE
+        assert r.json()["data"]["registered"] is False  # 尚未注册 = 预授权
+        # 新管理员注册后，登录响应直接带 isAdmin（DB 源生效）
+        rr = client.post(
+            "/api/auth/register",
+            json={"phone": "13900000002", "password": "abc123", "name": "小红"},
+        )
+        assert rr.json()["data"]["user"]["isAdmin"] is True
+        # 且该号真的能访问管理接口（不只标志位）
+        h2 = {"Authorization": f"Bearer {rr.json()['data']['token']}"}
+        assert client.get("/api/admin/users", headers=h2).status_code == 200
+
+    def test_add_duplicate_is_409(self, client):
+        h = _admin(client)
+        body = {"phone": "13900000003"}
+        assert client.post("/api/admin/users", headers=h, json=body).json()["code"] == 0
+        r = client.post("/api/admin/users", headers=h, json=body)
+        assert r.status_code == 409
+        # 40903 专指「已是管理员」，与 40901/40902 区分
+        assert r.json()["code"] == 40903
+
+    def test_add_env_admin_phone_is_409(self, client):
+        """env 里的号码不能再入库——重复记录在界面上管不了其实也无需管。"""
+        h = _admin(client)
+        r = client.post("/api/admin/users", headers=h, json={"phone": ADMIN_PHONE})
+        assert r.status_code == 409
+        assert r.json()["code"] == 40903
+
+    def test_invalid_phone_is_422(self, client):
+        """手机号形态必须与注册同源，否则会出现「加得进但永远注册不了」的幽灵账号。"""
+        h = _admin(client)
+        r = client.post("/api/admin/users", headers=h, json={"phone": "12345"})
+        assert r.status_code == 422
+        body = r.json()
+        assert body["code"] == 42200
+        assert isinstance(body["data"]["errors"], list)
+
+    def test_registered_flag_flips_after_register(self, client):
+        h = _admin(client)
+        client.post("/api/admin/users", headers=h, json={"phone": "13900000004"})
+        data = client.get("/api/admin/users", headers=h).json()["data"]
+        assert data["list"][0]["registered"] is False
+        _user(client, "13900000004")  # 该号注册
+        data = client.get("/api/admin/users", headers=h).json()["data"]
+        row = data["list"][0]
+        assert row["registered"] is True
+        assert row["name"] == "路人"  # enriched 用户名，供界面展示
+
+    def test_remove_admin(self, client):
+        h = _admin(client)
+        client.post("/api/admin/users", headers=h, json={"phone": "13900000005"})
+        r = client.delete("/api/admin/users/13900000005", headers=h)
+        assert r.json()["code"] == 0
+        with SessionLocal() as db:
+            assert db.get(AdminUser, "13900000005") is None
+        # 移除后该号不再具备管理能力（登录标志回落）
+        _user(client, "13900000005")
+        rr = client.post(
+            "/api/auth/login", json={"phone": "13900000005", "password": "abc123"}
+        )
+        assert rr.json()["data"]["user"]["isAdmin"] is False
+
+    def test_remove_missing_is_404(self, client):
+        h = _admin(client)
+        r = client.delete("/api/admin/users/13900000006", headers=h)
+        assert r.status_code == 404
+        assert r.json()["code"] == 40403
+
+    def test_cannot_remove_last_admin(self, client, monkeypatch):
+        """末位保护：env 为空且库中仅剩这一条时拒绝移除。
+
+        否则生产环境可能把自己锁在门外，只能改环境变量重启来恢复。
+        """
+        _user(client, "13900000007")
+        h = _admin(client)  # env 管理员（fixture 默认）把新号加入库
+        client.post("/api/admin/users", headers=h, json={"phone": "13900000007"})
+        # env 清空后，唯一的管理员来源就是库中这一条
+        monkeypatch.setattr(admin_mod, "ADMIN_PHONES", [])
+        login = client.post(
+            "/api/auth/login", json={"phone": "13900000007", "password": "abc123"}
+        ).json()
+        h2 = {"Authorization": f"Bearer {login['data']['token']}"}
+        r = client.delete("/api/admin/users/13900000007", headers=h2)
+        assert r.status_code == 409
+        assert r.json()["code"] == 40904
+        with SessionLocal() as db:
+            assert db.get(AdminUser, "13900000007") is not None  # 行仍在
+
+    def test_can_remove_last_db_admin_when_env_present(self, client):
+        """对照面：env 仍有管理员时，库中最后一条可移除（env 是 break-glass）。"""
+        h = _admin(client)
+        client.post("/api/admin/users", headers=h, json={"phone": "13900000008"})
+        r = client.delete("/api/admin/users/13900000008", headers=h)
+        assert r.json()["code"] == 0
+
+    def test_db_admin_can_manage_whitelist(self, client):
+        """DB 来源的管理员拥有完整管理权（能加能撤），不只是个标志位。"""
+        h = _admin(client)
+        client.post("/api/admin/users", headers=h, json={"phone": "13900000009"})
+        _user(client, "13900000009")
+        login = client.post(
+            "/api/auth/login", json={"phone": "13900000009", "password": "abc123"}
+        ).json()
+        h2 = {"Authorization": f"Bearer {login['data']['token']}"}
+        # DB 管理员添加第三位
+        r = client.post("/api/admin/users", headers=h2, json={"phone": "13900000010"})
+        assert r.json()["code"] == 0
+        assert r.json()["data"]["addedBy"] == "13900000009"
+        # 并移除他
+        assert client.delete("/api/admin/users/13900000010", headers=h2).json()["code"] == 0
+
+
 # ------------------------------------------------- 管理能力标志（前端入口用）
 
 
@@ -432,3 +579,15 @@ class TestAdminFlagInAuthPayload:
         assert client.post("/api/auth/refresh", headers=h).json()["data"]["user"]["isAdmin"] is True
         monkeypatch.setattr(admin_mod, "ADMIN_PHONES", [])
         assert client.post("/api/auth/refresh", headers=h).json()["data"]["user"]["isAdmin"] is False
+
+    def test_flag_true_for_db_whitelisted_phone(self, client):
+        """P1-14：库白名单（非 env）中的号码，登录/续期同样下发 isAdmin。"""
+        h = _admin(client)
+        client.post("/api/admin/users", headers=h, json={"phone": "13900000011"})
+        _user(client, "13900000011")
+        r = client.post(
+            "/api/auth/login", json={"phone": "13900000011", "password": "abc123"}
+        )
+        assert r.json()["data"]["user"]["isAdmin"] is True
+        h2 = {"Authorization": f"Bearer {r.json()['data']['token']}"}
+        assert client.post("/api/auth/refresh", headers=h2).json()["data"]["user"]["isAdmin"] is True

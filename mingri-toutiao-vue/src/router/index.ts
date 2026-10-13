@@ -43,11 +43,17 @@ const router = createRouter({
     },
     { path: '/favorites', name: 'favorites', component: () => import('@/views/Favorites.vue') },
     { path: '/history', name: 'history', component: () => import('@/views/History.vue') },
-    // 运营向入口：不在 TabBar 中，仅对管理员在「我的」页展示（后端按 ADMIN_PHONES 判定）
+    // 运营向入口：不在 TabBar 中，仅对管理员在「我的」页展示（后端按白名单判定）
     {
       path: '/admin/sources',
       name: 'admin-sources',
       component: () => import('@/views/AdminSources.vue'),
+    },
+    // 管理员白名单管理（P1-14）：应用内增删「指定账号」
+    {
+      path: '/admin/users',
+      name: 'admin-users',
+      component: () => import('@/views/AdminUsers.vue'),
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

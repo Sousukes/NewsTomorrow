@@ -120,3 +120,15 @@ class SourceUpdateIn(BaseModel):
     enabled: bool | None = None
 
     _channel = field_validator("channel")(_valid_channel)
+
+
+class AdminIn(BaseModel):
+    """管理员白名单：添加入参。
+
+    手机号形态与注册一致（`1` 开头 11 位）——注册入口的校验规则是
+    「什么号能成为账号」的唯一定义，这里必须同源，否则会出现
+    「加得进白名单但永远注册不了」的幽灵账号。
+    """
+
+    phone: str = Field(min_length=11, max_length=11, pattern=r"^1\d{10}$")
+    note: str = Field(default="", max_length=100)

@@ -5,7 +5,7 @@
  * 对 FastAPI 后端（或本地 mock 后端）跑一遍，确认契约完全兼容（字段名、错误码、鉴权头）。
  *
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
- * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理。
+ * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -397,6 +397,80 @@ const run = async () => {
       dupBlocked = true;
     }
     check('重复 key 被拒', dupBlocked);
+  }
+
+  // 11) 管理端：管理员白名单（P1-14）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1 + 后端白名单内含当前手机号）。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const wlData = await request('/admin/users', { token });
+    check(
+      'GET /admin/users 返回 {list,total,envAdminCount}',
+      Array.isArray(wlData.list) &&
+        typeof wlData.total === 'number' &&
+        typeof wlData.envAdminCount === 'number',
+      `库内 ${wlData.total} 位 / env ${wlData.envAdminCount} 位`,
+    );
+
+    const tmpAdmin = '13912345678';
+    // 清理上次异常退出可能留下的残留（失败无妨——env 非空时删除本就允许）
+    try {
+      await request(`/admin/users/${tmpAdmin}`, { method: 'DELETE', token });
+    } catch {
+      /* ignore */
+    }
+
+    const added = await request('/admin/users', {
+      method: 'POST',
+      token,
+      body: { phone: tmpAdmin, note: '契约临时管理员' },
+    });
+    check(
+      'POST /admin/users 添加成功',
+      added.phone === tmpAdmin && added.note === '契约临时管理员',
+    );
+    check('addedBy 记录操作者（审计用）', added.addedBy === phone, String(added.addedBy));
+
+    let dupBlocked = false;
+    try {
+      await request('/admin/users', { method: 'POST', token, body: { phone: tmpAdmin } });
+    } catch {
+      dupBlocked = true;
+    }
+    check('重复添加被拒（409）', dupBlocked);
+
+    // 当前账号自身就在白名单里（CHECK_ADMIN 的前提），再添加自己应被拒
+    let selfBlocked = false;
+    try {
+      await request('/admin/users', { method: 'POST', token, body: { phone } });
+    } catch {
+      selfBlocked = true;
+    }
+    check('添加白名单内已有号码被拒', selfBlocked);
+
+    let badPhoneBlocked = false;
+    try {
+      await request('/admin/users', { method: 'POST', token, body: { phone: '123' } });
+    } catch {
+      badPhoneBlocked = true;
+    }
+    check('非法手机号被拒（422）', badPhoneBlocked);
+
+    const afterAdd = await request('/admin/users', { token });
+    check(
+      '添加后列表含新行',
+      (afterAdd.list ?? []).some((a) => a.phone === tmpAdmin),
+    );
+
+    const removed = await request(`/admin/users/${tmpAdmin}`, { method: 'DELETE', token });
+    check('DELETE /admin/users/:phone 移除成功', removed.phone === tmpAdmin);
+
+    let removeMissing = false;
+    try {
+      await request(`/admin/users/${tmpAdmin}`, { method: 'DELETE', token });
+    } catch {
+      removeMissing = true;
+    }
+    check('重复移除被拒（404）', removeMissing);
   }
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);

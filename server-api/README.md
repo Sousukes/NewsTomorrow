@@ -71,7 +71,7 @@ node scripts/contract-check.mjs
 | `CORS_ORIGINS` | 逗号分隔的允许来源。production 默认**同源**（不跨域），需显式配置 |
 | `RATE_LIMIT_*` | 限流阈值，见下|
 | `TRUSTED_PROXIES` | 逗号分隔的受信代理网段（IP 或 CIDR，如 `10.0.0.0/8,127.0.0.1`）。**仅当直连对端命中该网段时**才采信 `X-Forwarded-For`；留空表示不信任任何代理头，防止伪造 XFF 绕过限流 |
-| `ADMIN_PHONES` | 可调用 `/api/news/refresh` 的管理员手机号白名单（逗号分隔）。留空则生产环境禁用该接口（返回 403） |
+| `ADMIN_PHONES` | 管理能力白名单（逗号分隔）：`/api/news/refresh`、`/api/admin/*` 与登录响应 `isAdmin` 均按 **`ADMIN_PHONES` ∪ `admin_users` 表** 判定（P1-14）。env 保留为 break-glass（重启即生效）；日常增删管理员在应用内「管理员管理」页操作，无需重启。两边都为空 = 该能力整体禁用（403） |
 | `SEED_SAMPLE_DATA` | 是否播种示例数据（演示账号 + 示例资讯/评论/消息）。**生产默认 `false`**，测试建议置 `false` 保证确定性 |
 | `LOG_LEVEL` | 访问日志级别 |
 
@@ -149,11 +149,11 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | --- | --- | --- | --- |
 | GET | `/api/health` | — | 健康检查（含连接池状态） |
 | GET | `/api/metrics` | — | Prometheus 文本指标（uptime / 请求数 / 在途 / 状态码 / 路径 / 连接池） |
-| POST | `/api/news/refresh` | ✅ 管理员 | 手动触发抓取（`?channel=&keyword=`）。需 `ADMIN_PHONES` 白名单，**异步执行**返回 202 |
+| POST | `/api/news/refresh` | ✅ 管理员 | 手动触发抓取（`?channel=&keyword=`）。需管理能力（`ADMIN_PHONES` ∪ `admin_users` 表），**异步执行**返回 202 |
 | GET | `/api/news/search?q=` | — | 服务端搜索（标题/摘要匹配，**按相关度排序**见「搜索与热词」），返回 `{ list, total, page, hasMore }`；**旁路记录**搜索词供热词统计 |
 | GET | `/api/news/search/hot?limit=&days=` | — | 热搜词（近 `days` 天真实统计），返回 `{ list: [{ term, count }], days }`；无数据时为空数组 |
 | POST | `/api/auth/register` | — | 注册（手机号 + 密码 ≥6 位），返回 token |
-| POST | `/api/auth/login` | — | 登录，成功返回 `{ token, user }`；`user` 含 `isAdmin`（布尔值，按 `ADMIN_PHONES` 白名单判定后下发，前端据此决定是否展示管理入口，**不下发白名单本身**） |
+| POST | `/api/auth/login` | — | 登录，成功返回 `{ token, user }`；`user` 含 `isAdmin`（布尔值，按 `ADMIN_PHONES` ∪ `admin_users` 表白名单判定后下发，前端据此决定是否展示管理入口，**不下发白名单本身**） |
 | POST | `/api/auth/logout` | ✅ | 退出（无状态 JWT，前端清本地 token） |
 | GET | `/api/news?channel=&sort=&page=&pageSize=&cursor=` | — | 资讯列表。**推荐游标分页**：传 `cursor` 走 keyset，返回 `{ list, nextCursor, hasMore }`；不传则 offset 分页并附 `total`。`sort` 取 `latest`（默认）/ `hot` / `for-you`（见「排序与个性化」），非法值 422 |
 | GET | `/api/news/{id}` | — | 资讯详情 |
@@ -178,6 +178,9 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | PATCH | `/api/admin/sources/{key}` | ✅ 管理员 | 局部更新（名字/频道/地址/权重/启停），未传字段保持不变；不存在 404 |
 | DELETE | `/api/admin/sources/{key}` | ✅ 管理员 | 删除源；不存在 404 |
 | POST | `/api/admin/sources/reset` | ✅ 管理员 | 重置为内置源（丢弃自定义源，用于恢复出厂配置） |
+| GET | `/api/admin/users` | ✅ 管理员 | 管理员白名单（`admin_users` 表），返回 `{ list, total, envAdminCount }`；行含 `registered`（已注册/预授权）与 `addedBy`（审计） |
+| POST | `/api/admin/users` | ✅ 管理员 | 添加管理员（支持**预授权**：手机号无需先注册）；已在任一来源 40903、形态非法 422 |
+| DELETE | `/api/admin/users/{phone}` | ✅ 管理员 | 移除管理员；不存在 40403；**末位保护**：移除后任何来源都不再有管理员时 40904 |
 
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
@@ -231,9 +234,22 @@ curl -X POST "http://127.0.0.1:8000/api/news/refresh?channel=tech" \
 **单个源失败不影响其他源**，整轮抓取也不会因此抛错。`NotModified`（304，内容未变更）
 是**唯一**返回空列表的正常路径。
 
-**管理判定单一来源**：`admin.is_admin(phone)` 是唯一判定（白名单为空 = 整体关闭），
+**管理判定单一来源**：`admin.is_admin(phone, db)` 是唯一判定（**`ADMIN_PHONES` ∪ `admin_users` 表**，两边都为空 = 整体关闭），
 `/api/news/refresh`、`/api/admin/*` 与**登录/注册/续期响应里的 `isAdmin` 字段**共用它——
 曾出现 `main.py` 自己复制一份 `if not ADMIN_PHONES or ...` 判断，两处逻辑迟早漂移。
+
+### 管理员白名单（迁移 0015）
+
+「指定账号才能访问后台」此前只由 `ADMIN_PHONES` 环境变量承载——加/撤一名管理员要改部署配置
+并重启服务，运营无法自助。现在白名单落入 `admin_users` 表，应用内（「管理员管理」页）可增删：
+
+- **双源并集**：env 保留为 break-glass（改配置重启即生效、不依赖库），库白名单供日常运营
+  （增删即时生效）；两边都为空 = 管理能力整体关闭，生产安全语义不变；
+- **预授权**：手机号即主键且不设 `users` 外键——账号尚未注册也可先加入名单，其注册/登录时
+  `isAdmin` 即为 true；列表行带 `registered` 区分「已注册 / 预授权」；
+- **末位保护**：移除后若任何来源都不再有任何管理员，返回 40904——否则生产环境可能把自己
+  锁在门外，只能改环境变量重启来恢复；
+- **审计**：`added_by` 记录操作者手机号，回答「谁能授权」的追问。
 
 ## 数据库迁移（Alembic）
 
@@ -258,7 +274,8 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0011_news_hot_score`（热度分落库与 `ix_news_hot` 索引）、`0012_search_logs`（搜索词日志）、
   `0013_rss_sources`（RSS 源可配置化 + 抓取健康字段与 `ix_rss_sources_channel_enabled`）、
   `0014_comment_likes_and_replies`（点赞关系表 `comment_likes` + 评论父子列
-  `parent_id`/`root_id`，移除 `comments.liked_by` JSON 列）。
+  `parent_id`/`root_id`，移除 `comments.liked_by` JSON 列）、
+  `0015_admin_whitelist`（管理员白名单 `admin_users`，应用内管理「指定账号」）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -464,22 +481,27 @@ pytest -q          # 237 项
 
 - `tests/test_units.py`（25 项）：限流器（阈值/隔离/窗口过期）、PBKDF2 密码哈希与加盐、JWT 往返、RSS 解析与字段映射（RSS 2.0 / Atom / 图片提取 / 变体判定 / 稳定 id / 相对时间）。
 - `tests/test_hardening.py`（14 项）：受信代理 IP 解析（XFF 采信/忽略/回退）、分页游标编解码与非法输入、**schema 单轨守卫**（缺表时抛错且**不就地建表**、`init_db` 源码不含 `create_all`）。
-- `tests/test_migrations.py`（14 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
-  `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes`）、
-  `comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score` 与 `ix_news_hot`、
-  `rss_sources` 的列与主键。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
+- `tests/test_migrations.py`（15 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+  `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
+  `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
+  与 `ix_news_hot`、`rss_sources` 的列与主键。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
   秒级时间戳下**同一条评论同一用户重复点赞只留一行**、悬空/非整数 user_id 被跳过、
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的
   `sqlalchemy.url`，进程内直接调 `command.upgrade()` 会作用到**真实数据库**。
-- `tests/test_sources.py`（36 项）：**RSS 源可配置化**——播种只在空表时发生（不覆盖运营配置）、
+- `tests/test_sources.py`（50 项）：**RSS 源可配置化**——播种只在空表时发生（不覆盖运营配置）、
   内置源含 `aihot_picks`、按权重降序、频道无专属源时回退全部、无库会话回退内置源；
   健康状态回写（成功 / 失败 / 错误截断 / 未知 key 静默）；
   **抓取健壮性**（坏源不拖垮好源、真实不可达地址记为 `ok=False` 且带原因、显式传入的源去重并按权重降序）；
   管理接口（未登录 401 / 非管理员 403 / 白名单为空整体关闭 / 列表 / 新增 / **重复 key 40902** /
   **非 http(s) 地址 40004** / 局部更新不清空未传字段 / 启停 / 删除 / 不存在 404 / 重置恢复内置源）；
-  **`isAdmin` 下发**（`TestAdminFlagInAuthPayload`，5 项）——白名单账号登录/注册/续期响应
-  `user.isAdmin=true`、普通账号为 false、白名单变动后标志跟随（只下发布尔值，不下发白名单）；
+  **管理员白名单**（`TestAdminWhitelist`，13 项）——env ∪ DB 双源判定、库管理员登录即 `isAdmin`
+  且可完整管理（预授权链路）、重复/env 内号码 40903、形态非法 422、`added_by` 审计、
+  `registered` 随注册翻转、移除后标志回落、不存在 40403、**末位管理员 40904**（env 为空时），
+  以及「env 非空时库中最后一条可移除」的对照面；
+  **`isAdmin` 下发**（`TestAdminFlagInAuthPayload`，6 项）——白名单账号登录/注册/续期响应
+  `user.isAdmin=true`、普通账号为 false、白名单变动后标志跟随（只下发布尔值，不下发白名单）、
+  **库白名单（非 env）号码同样下发 true**；
   **入参校验**（4 项）——未知频道 422（`errors[0].loc[-1] == 'channel'`）、`key` 格式非法 422、
   更新时同样校验频道。
 - `tests/test_api.py`（86 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
@@ -509,7 +531,8 @@ pytest -q          # 237 项
 
 > 前端契约自检：`node scripts/contract-check.mjs`（**47 项**，含 18 项二级评论契约，需传 `DEMO_PASSWORD` 登录）。
 > 加 `CHECK_ADMIN=1` 且在 `ADMIN_PHONES` 内的账号登录，可额外校验 `/api/admin/sources`
-> 的增删改与协议白名单（共 56 项；mock 后端同样支持，见前端 README）。
+> 的增删改与协议白名单，以及 `/api/admin/users` 的白名单增删、重复/自添加拦截、
+> `addedBy` 与 404（共 65 项；mock 后端同样支持，见前端 README）。
 
 ## 错误码
 
@@ -522,13 +545,15 @@ pytest -q          # 237 项
 | 401 | 40101 | 手机号或密码错误 |
 | 403 | 40301 | 无权限（非管理员调用 `/api/news/refresh`、`/api/admin/*`；白名单为空时该能力整体关闭） |
 | 403 | 40302 | 只能删除自己发表的评论 |
-| 404 | 40400 / 40401 / 40402 | 资讯不存在 / 评论不存在 / RSS 源不存在 |
+| 404 | 40400 / 40401 / 40402 / 40403 | 资讯不存在 / 评论不存在 / RSS 源不存在 / 管理员不存在 |
 | 409 | 40901 | 手机号已注册 |
 | 409 | 40902 | RSS 源标识（`key`）已存在 |
+| 409 | 40903 | 该手机号已是管理员（含 env 与库两个来源） |
+| 409 | 40904 | 已是最后一位管理员，不能移除（末位保护） |
 | 422 | 42200 / 42201 | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持 |
 | 429 | 42900 / 42901 | 触发限流（普通 / 登录） |
 
-> 注：`40902` 与 `40901` 刻意分开——同一错误码承载两种语义会让前端文案错配。
+> 注：`40901`–`40904` 刻意分开——同一错误码承载多种语义会让前端文案错配。
 
 ## 技术说明
 
@@ -559,7 +584,7 @@ server-api/
 └── app/
     ├── config.py        # 环境配置（生产加固 + 连接池 + 抓取参数）
     ├── database.py      # 引擎/会话/Base + 连接池策略与观测
-    ├── models.py        # User / News / Comment / Message / SearchLog / RssSource 等
+    ├── models.py        # User / News / Comment / Message / SearchLog / RssSource / AdminUser 等
     ├── schemas.py       # Pydantic 模型
     ├── security.py      # PBKDF2 + JWT
     ├── deps.py          # 鉴权依赖
