@@ -273,6 +273,34 @@ class RssSource(Base):
     __table_args__ = (Index("ix_rss_sources_channel_enabled", "channel", "enabled"),)
 
 
+class AdminAuditLog(Base):
+    """运营审计：谁在什么时候改了什么（P1-15）。
+
+    权限体系只回答了「谁能进后台」，没回答「谁干了什么」——源被停掉、地址被换、
+    管理员被加进来，此前都无痕迹，事后只能靠猜。
+
+    - `action` 用 `对象.动作` 命名（如 `source.update`），前端据此映射中文标签；
+    - `detail` 存 **JSON 字符串**：更新存 `{"changes": {字段: [旧, 新]}}`，
+      增删存 `{"snapshot": {...}}`；
+    - 与业务变更**同事务写入**（调用方 `record_audit` 后一并 commit）——
+      「改成功了但没留痕」比「改失败」更糟，所以不做 try/except 静默。
+    """
+
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_phone = Column(String(20), nullable=False, index=True)
+    action = Column(String(40), nullable=False, index=True)
+    target = Column(String(120), nullable=False, default="")  # 源 key / 手机号等对象标识
+    detail = Column(String(1000), nullable=False, default="")  # JSON 串
+    created_at = Column(String(30), nullable=False, default=now_str, index=True)
+
+    __table_args__ = (
+        # 「这个源被谁动过」按 target 查，且要按时间倒序
+        Index("ix_admin_audit_target_id", "target", "id"),
+    )
+
+
 class AdminUser(Base):
     """管理员白名单（应用内可管理的「指定账号」名单）。
 

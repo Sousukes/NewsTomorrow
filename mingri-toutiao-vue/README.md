@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **214** 项，覆盖：
+- **单元测试**：Vitest 共 **221** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -47,6 +47,10 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     env 计数说明、添加成功清空表单并刷新、**手机号格式前端拦截不发请求**、冲突 409 展示服务端文案、
     移除二次确认、**末位保护 409 保留行并报服务端语义**、加载失败与 403 转无权限态、
     **应急通道缺失提示**（env 计数为 0 时整张说明卡转警示态，已配置时不显示）
+  - `views/AdminAudit`（7）：时间线渲染（中文动作 / 对象 / 操作者 / 时间）、
+    **字段级变更渲染**（权重 9→3、enabled 翻成启用→停用而非 true→false）、
+    **加载更多按游标追加且不重复**、带 `target` 进入时只查该对象并提供查看全部、
+    加载失败与 403 转无权限态、**非管理员不请求**
   - `views/AdminSources`（20）：汇总计数、新增/编辑表单与前端校验、启停乐观更新+失败回滚、
     删除/重置二次确认、健康状态渲染、**非管理员不请求列表直接呈无权限态**（不泄露接口存在性）；
     **搜索与筛选**（名称/地址/标识模糊匹配 + 频道/状态 chips + 无结果清除入口）、
@@ -331,6 +335,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 | `/history` | `History` | S8 浏览历史（S13 空态） |
 | `/admin/sources` | `AdminSources` | **RSS 源管理**（仅 `isAdmin` 账号可见入口；增删改/启停/重置 + 抓取健康状态 + 搜索筛选 + 异常置顶 + 批量操作） |
 | `/admin/users` | `AdminUsers` | **管理员管理**（P1-14）：应用内增删「指定账号」——双源说明（env break-glass + 库白名单）、添加并支持预授权、注册状态标记、移除确认与末位保护提示、**env 管理员为 0 时提示应急通道缺失** |
+| `/admin/audit` | `AdminAudit` | **运营审计**（P1-15）：时间线展示谁改了什么——中文动作标签、对象、操作者、字段级变更（旧→新）、游标分页「加载更多」；带 `?target=` 进入时只看该对象 |
 
 > 底部 `TabBar` 仅对带 `meta.tab` 的路由（首页/视频/消息/我的）显示；详情、评论、图集、登录、搜索类整页不显示。
 
@@ -371,6 +376,8 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   另含管理员白名单三接口：`fetchAdminUsers` / `addAdminUser` / `removeAdminUser` → `/admin/users`（P1-14，同样只有真实后端），
   列表额外返回 `envAdminCount`（环境变量来源管理员**数量**，不下发号码）用于在界面解释双源机制；
   行数据经 `toAdminUser()` 归一化，**形态非法的手机号直接丢弃**（删除按 phone 定位，脏行无法操作）。
+  另含审计时间线 `fetchAuditPage({ limit, cursor, target })` → `/admin/audit`（P1-15，同样只有真实后端），
+  游标由服务端下发（自增 id）、客户端不解析；行数据经 `toAudit()` 归一化。
 
 > store 采用**离线优先**：本地先更新并持久化，真实模式下再后台与服务端同步（失败静默，不影响交互）。
 
@@ -404,7 +411,7 @@ npm run dev:api     # 终端 2（把 .env.api 指向 3001 即切换）
 
 ```bash
 node scripts/contract-check.mjs    # 需后端已启动 + DEMO_PASSWORD（47 项，含 18 项二级评论契约）
-# 追加校验管理端接口（当前账号须具备管理能力，共 65 项：9 项源管理 + 9 项管理员白名单）
+# 追加校验管理端接口（当前账号须具备管理能力，共 72 项：源管理 9 + 白名单 9 + 审计 7）
 DEMO_PASSWORD=123456 CHECK_ADMIN=1 node scripts/contract-check.mjs
 ```
 
@@ -501,7 +508,10 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **管理员白名单应用内管理**（P1-14）：新增 `/admin/users` 页面（添加/移除指定账号、
   支持**预授权**（手机号无需先注册）、注册状态标记、移除二次确认、**末位保护**由服务端 409
   兜住）；后端 `admin_users` 表（迁移 0015）与 `ADMIN_PHONES` 环境变量**双源并集**判定，
-  env 保留为 break-glass；`IS_ADMIN` 入口在个人中心与源管理页两处可达；mock 后端同步支持
+  env 保留为 break-glass；入口在个人中心与源管理页两处可达；mock 后端同步支持
+- [x] **运营审计日志**（P1-15）：新增 `/admin/audit` 时间线（谁改了什么，含字段级变更
+  旧→新、游标分页「加载更多」）；源管理页每行「历史」直达该源、管理员页审计入口；
+  后端 `admin_audit_logs` 表（迁移 0016）与业务**同事务写入**；mock 后端同步支持
 
 ### 待完成 / 依赖后端
 

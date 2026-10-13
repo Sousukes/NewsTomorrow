@@ -156,3 +156,28 @@ export interface AdminUserInput {
   phone: string;
   note?: string;
 }
+
+/** 运营审计行（对应 GET /api/admin/audit 的条目） */
+export interface AdminAuditItem {
+  id: number;
+  /** 操作者手机号 */
+  actorPhone: string;
+  /** 动作：`对象.动作`（如 source.update），前端据此映射中文标签 */
+  action: string;
+  /** 对象标识（源 key / 手机号）；全局动作（如重置）为空串 */
+  target: string;
+  /**
+   * 变更明细：更新为 `{ changes: { 字段: [旧, 新] } }`，
+   * 增删为 `{ snapshot: {...} }`，重置为 `{ seeded: number }`。
+   */
+  detail: Record<string, unknown>;
+  /** ISO 时间串 */
+  createdAt: string;
+}
+
+/** 审计时间线信封（游标分页，新的在前） */
+export interface AdminAuditPage {
+  list: AdminAuditItem[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}

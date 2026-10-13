@@ -12,9 +12,10 @@
 - **末位管理员保护**：移除后若任何来源都不再有管理员，拒绝（40904）——
   否则生产环境可能把自己锁在门外，只能改环境变量重启来恢复。
 """
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse
 
@@ -22,7 +23,7 @@ from ..config import ADMIN_PHONES
 from ..database import get_db
 from ..deps import get_current_user
 from ..feeds.sources import BUILTIN_SOURCES, ensure_seeded
-from ..models import AdminUser, RssSource, User, now_str
+from ..models import AdminAuditLog, AdminUser, RssSource, User, now_str
 from ..response import ok
 from ..schemas import AdminIn, SourceIn, SourceUpdateIn
 
@@ -30,6 +31,14 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("toutiao.admin")
 
 ALLOWED_SCHEMES = ("http", "https")
+
+# 审计动作：`对象.动作` 命名，前端据此映射中文标签（无需再维护一份枚举表）
+AUDIT_SOURCE_CREATE = "source.create"
+AUDIT_SOURCE_UPDATE = "source.update"
+AUDIT_SOURCE_DELETE = "source.delete"
+AUDIT_SOURCE_RESET = "source.reset"
+AUDIT_ADMIN_ADD = "admin.add"
+AUDIT_ADMIN_REMOVE = "admin.remove"
 
 
 def is_admin(phone: str | None, db: Session | None = None) -> bool:
@@ -54,6 +63,23 @@ def is_admin(phone: str | None, db: Session | None = None) -> bool:
 def _require_admin(user: User, db: Session) -> None:
     if not is_admin(user.phone, db):
         raise HTTPException(status_code=403, detail={"code": 40301, "message": "无权限执行该操作"})
+
+
+def record_audit(db: Session, actor: str, action: str, target: str = "", detail=None) -> None:
+    """写一条审计（**不提交**，由调用方与业务变更一起 commit）。
+
+    刻意不做 try/except 静默：「改成功了但没留痕」比「改失败」更糟——
+    前者会让事后排查误以为没人动过。同事务还能保证两者要么都成、要么都不成。
+    """
+    db.add(
+        AdminAuditLog(
+            actor_phone=actor,
+            action=action,
+            target=target or "",
+            detail=json.dumps(detail or {}, ensure_ascii=False, default=str),
+            created_at=now_str(),
+        )
+    )
 
 
 def _validate_url(url: str) -> None:
@@ -118,6 +144,13 @@ def create_source(
         updated_at=now,
     )
     db.add(row)
+    record_audit(
+        db,
+        user.phone,
+        AUDIT_SOURCE_CREATE,
+        body.key,
+        {"snapshot": _out(row)},
+    )
     db.commit()
     db.refresh(row)
     return ok(_out(row), message="已新增源")
@@ -139,11 +172,17 @@ def update_source(
         raise HTTPException(status_code=404, detail={"code": 40402, "message": "源不存在"})
     if body.url is not None:
         _validate_url(body.url)
+    before = _out(row)
     for field in ("name", "channel", "url", "weight", "enabled"):
         value = getattr(body, field)
         if value is not None:
             setattr(row, field, value)
     row.updated_at = now_str()
+    after = _out(row)
+    # 只记真正变化的字段：无变化的 PATCH（前端常因表单整体提交而触发）不该灌进时间线
+    changes = {k: [before[k], after[k]] for k in ("name", "channel", "url", "weight", "enabled") if before[k] != after[k]}
+    if changes:
+        record_audit(db, user.phone, AUDIT_SOURCE_UPDATE, key, {"changes": changes})
     db.commit()
     db.refresh(row)
     return ok(_out(row), message="已更新源")
@@ -159,6 +198,8 @@ def delete_source(
     row = db.get(RssSource, key)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": 40402, "message": "源不存在"})
+    # 删除后行就没了，快照必须在 delete 之前取
+    record_audit(db, user.phone, AUDIT_SOURCE_DELETE, key, {"snapshot": _out(row)})
     db.delete(row)
     db.commit()
     return ok({"key": key}, message="已删除源")
@@ -174,6 +215,8 @@ def reset_sources(db: Session = Depends(get_db), user: User = Depends(get_curren
     db.query(RssSource).delete()
     db.commit()
     seeded = ensure_seeded(db)
+    record_audit(db, user.phone, AUDIT_SOURCE_RESET, "", {"seeded": seeded})
+    db.commit()
     logger.info("管理员 %s 重置 RSS 源为内置 %d 个", user.phone, seeded)
     return ok({"seeded": seeded}, message=f"已重置为 {seeded} 个内置源")
 
@@ -237,6 +280,7 @@ def add_admin_user(
         created_at=now_str(),
     )
     db.add(row)
+    record_audit(db, user.phone, AUDIT_ADMIN_ADD, body.phone, {"note": row.note or ""})
     db.commit()
     db.refresh(row)
     logger.info("管理员 %s 添加管理员 %s（备注：%s）", user.phone, body.phone, row.note or "无")
@@ -261,7 +305,62 @@ def remove_admin_user(
         raise HTTPException(
             status_code=409, detail={"code": 40904, "message": "已是最后一位管理员，不能移除"}
         )
+    record_audit(db, user.phone, AUDIT_ADMIN_REMOVE, phone, {"note": row.note or ""})
     db.delete(row)
     db.commit()
     logger.info("管理员 %s 移除管理员 %s", user.phone, phone)
     return ok({"phone": phone}, message="已移除管理员")
+
+
+# ---------------------------------------------------------------- 运营审计（P1-15）
+
+
+def _audit_out(row: AdminAuditLog) -> dict:
+    """detail 存的是 JSON 串；解析失败降级为空对象（宁可少显示，也不要整页报错）。"""
+    try:
+        detail = json.loads(row.detail) if row.detail else {}
+        if not isinstance(detail, dict):
+            detail = {}
+    except (ValueError, TypeError):
+        detail = {}
+    return {
+        "id": row.id,
+        "actorPhone": row.actor_phone,
+        "action": row.action,
+        "target": row.target or "",
+        "detail": detail,
+        "createdAt": row.created_at,
+    }
+
+
+@router.get("/audit", response_model=None)
+def list_audit(
+    limit: int = Query(20, ge=1, le=100),
+    cursor: str | None = Query(None, description="上一页末条的 id"),
+    target: str | None = Query(None, description="按对象筛选（源 key / 手机号）"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """审计时间线（新的在前，游标分页）。
+
+    游标用**自增 id** 而非时间戳：created_at 是秒级精度，同秒多条会让 keyset 比较
+    出现重复/遗漏（评论分页踩过同一个坑）。
+    """
+    _require_admin(user, db)
+    q = db.query(AdminAuditLog)
+    if target:
+        q = q.filter(AdminAuditLog.target == target)
+    if cursor:
+        if not cursor.isdigit():
+            raise HTTPException(status_code=400, detail={"code": 40003, "message": "分页游标无效"})
+        q = q.filter(AdminAuditLog.id < int(cursor))
+    rows = q.order_by(AdminAuditLog.id.desc()).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    return ok(
+        {
+            "list": [_audit_out(r) for r in items],
+            "hasMore": has_more,
+            "nextCursor": str(items[-1].id) if has_more and items else None,
+        }
+    )

@@ -489,6 +489,7 @@ function statusText(s: RssSourceItem): string {
           @click="toggleSelectMode"
         />
         <Button variant="secondary" label="管理员" @click="router.push('/admin/users')" />
+        <Button variant="secondary" label="审计" @click="router.push('/admin/audit')" />
       </div>
 
       <!-- 批量模式选择条 -->
@@ -567,6 +568,14 @@ function statusText(s: RssSourceItem): string {
 
           <div v-if="!selecting" class="admin__item-actions">
             <button type="button" @click="openEdit(s)">编辑</button>
+            <!-- 「这个源被谁动过」：带 target 进审计页，只看该源的历史 -->
+            <button
+              type="button"
+              :aria-label="`查看 ${s.name} 的变更历史`"
+              @click="router.push(`/admin/audit?target=${s.key}`)"
+            >
+              历史
+            </button>
             <button type="button" class="is-danger" @click="pendingDelete = s">删除</button>
           </div>
 

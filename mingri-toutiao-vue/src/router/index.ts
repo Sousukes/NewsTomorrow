@@ -55,6 +55,12 @@ const router = createRouter({
       name: 'admin-users',
       component: () => import('@/views/AdminUsers.vue'),
     },
+    // 运营审计时间线（P1-15）：谁在什么时候改了什么
+    {
+      path: '/admin/audit',
+      name: 'admin-audit',
+      component: () => import('@/views/AdminAudit.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });

@@ -144,6 +144,10 @@ function formatTime(iso: string): string {
     </EmptyState>
 
     <template v-else>
+      <div class="admin__actions">
+        <Button variant="secondary" label="审计记录" @click="router.push('/admin/audit')" />
+      </div>
+
       <!-- 双源机制说明：env 是 break-glass，库白名单供日常运营 -->
       <div class="admin__notice" :class="{ 'admin__notice--warn': envAdminCount === 0 }">
         <p class="admin__notice-title">管理员来自两个来源</p>
@@ -272,6 +276,12 @@ function formatTime(iso: string): string {
   background: var(--color-card-bg);
   color: var(--color-primary);
   font-size: 13px;
+}
+
+.admin__actions {
+  display: flex;
+  gap: 10px;
+  padding: 10px 16px;
 }
 
 /* 双源机制说明卡 */

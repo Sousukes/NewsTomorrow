@@ -35,6 +35,7 @@ EXPECTED_TABLES = (
     "search_logs",
     "rss_sources",
     "admin_users",
+    "admin_audit_logs",
 )
 
 
@@ -161,6 +162,19 @@ class TestMigrationChain:
         assert "ix_comments_root_id" in {
             i["name"] for i in insp.get_indexes("comments")
         }
+
+    def test_admin_audit_logs_table(self, chain_db):
+        """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("admin_audit_logs")}
+        assert {"id", "actor_phone", "action", "target", "detail", "created_at"} <= cols
+        # 自增 id 同时充当游标（单调，规避秒级时间戳同值导致的排序抖动）
+        pk = insp.get_pk_constraint("admin_audit_logs")["constrained_columns"]
+        assert pk == ["id"]
+        names = {i["name"] for i in insp.get_indexes("admin_audit_logs")}
+        # 全局时间线按时间倒序；「这个对象被谁动过」按 target + id
+        assert "ix_admin_audit_logs_created_at" in names
+        assert "ix_admin_audit_target_id" in names
 
     def test_admin_users_table(self, chain_db):
         """0015：管理员白名单入库（应用内管理「指定账号」）。"""

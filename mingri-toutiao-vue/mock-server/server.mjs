@@ -256,6 +256,23 @@ const isAdminPhone = (phone) =>
 /** 登录过的手机号（mock 无注册端点，以此推导白名单行的「已注册」状态） */
 const seenPhones = new Set();
 
+/**
+ * 运营审计（P1-15，与后端 admin_audit_logs 对应）：进程内数组，服务重启即清零。
+ * `id` 自增且单调——与后端一致用作游标，避免秒级时间戳同值导致的排序抖动。
+ */
+const auditLog = [];
+let auditSeq = 0;
+function audit(actor, action, target, detail) {
+  auditLog.push({
+    id: ++auditSeq,
+    actorPhone: actor,
+    action,
+    target: target || '',
+    detail: detail ?? {},
+    createdAt: new Date().toISOString(),
+  });
+}
+
 /** 内置源（与后端 BUILTIN_SOURCES 同构；进程内可增删改） */
 const BUILTIN_SOURCES = [
   {
@@ -718,8 +735,10 @@ const server = createServer(async (req, res) => {
 
   // POST /admin/sources/reset
   if (head === 'admin' && a === 'sources' && b === 'reset' && method === 'POST') {
-    if (!requireAdmin(req, res)) return;
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
     sources = freshSources();
+    audit(operator, 'source.reset', '', { seeded: sources.length });
     return ok(res, { seeded: sources.length });
   }
 
@@ -732,7 +751,8 @@ const server = createServer(async (req, res) => {
 
   // POST /admin/sources
   if (head === 'admin' && a === 'sources' && !b && method === 'POST') {
-    if (!requireAdmin(req, res)) return;
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
     const body = await readBody(req);
     const { key, name, channel, url } = body;
     if (!/^[a-z0-9_]+$/.test(String(key ?? ''))) {
@@ -765,12 +785,14 @@ const server = createServer(async (req, res) => {
       lastFetchedAt: null,
     };
     sources.push(row);
+    audit(operator, 'source.create', key, { snapshot: sourceOut(row) });
     return ok(res, sourceOut(row));
   }
 
   // PATCH /admin/sources/:key
   if (head === 'admin' && a === 'sources' && b && method === 'PATCH') {
-    if (!requireAdmin(req, res)) return;
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
     const row = sources.find((s) => s.key === b);
     if (!row) return fail(res, 404, 40402, '源不存在');
     const body = await readBody(req);
@@ -785,17 +807,28 @@ const server = createServer(async (req, res) => {
     if (body.url !== undefined && !/^https?:\/\/\S+$/i.test(String(body.url))) {
       return fail(res, 400, 40004, '源地址必须为 http/https URL');
     }
+    const before = sourceOut(row);
     for (const f of ['name', 'channel', 'url', 'weight', 'enabled']) {
       if (body[f] !== undefined) row[f] = body[f];
     }
+    const after = sourceOut(row);
+    // 与后端一致：只记真正变化的字段，无变化的 PATCH 不留痕
+    const changes = {};
+    for (const f of ['name', 'channel', 'url', 'weight', 'enabled']) {
+      if (before[f] !== after[f]) changes[f] = [before[f], after[f]];
+    }
+    if (Object.keys(changes).length) audit(operator, 'source.update', b, { changes });
     return ok(res, sourceOut(row));
   }
 
   // DELETE /admin/sources/:key
   if (head === 'admin' && a === 'sources' && b && method === 'DELETE') {
-    if (!requireAdmin(req, res)) return;
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
     const i = sources.findIndex((s) => s.key === b);
     if (i < 0) return fail(res, 404, 40402, '源不存在');
+    // 快照必须在 splice 之前取：删完就没了
+    audit(operator, 'source.delete', b, { snapshot: sourceOut(sources[i]) });
     const [row] = sources.splice(i, 1);
     return ok(res, { key: row.key });
   }
@@ -840,19 +873,46 @@ const server = createServer(async (req, res) => {
       createdAt: new Date().toISOString(),
     };
     adminWhitelist.set(phone, row);
+    audit(operator, 'admin.add', phone, { note: row.note || '' });
     return ok(res, adminUserOut(phone, row), '已添加管理员');
   }
 
   // DELETE /admin/users/:phone
   if (head === 'admin' && a === 'users' && b && method === 'DELETE') {
-    if (!requireAdmin(req, res)) return;
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
     if (!adminWhitelist.has(b)) return fail(res, 404, 40403, '管理员不存在');
     // 末位保护与后端一致：env 为空且库中仅剩这一条时拒绝
     if (adminWhitelist.size - 1 <= 0 && ADMIN_PHONES.length === 0) {
       return fail(res, 409, 40904, '已是最后一位管理员，不能移除');
     }
+    audit(operator, 'admin.remove', b, { note: adminWhitelist.get(b)?.note || '' });
     adminWhitelist.delete(b);
     return ok(res, { phone: b }, '已移除管理员');
+  }
+
+  /* --------------------- 管理端：运营审计（P1-15） --------------------- */
+
+  // GET /admin/audit
+  if (head === 'admin' && a === 'audit' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    const cursor = q.get('cursor');
+    const target = q.get('target');
+    let rows = [...auditLog].sort((x, y) => y.id - x.id); // 新的在前
+    if (target) rows = rows.filter((r) => r.target === target);
+    if (cursor) {
+      if (!/^\d+$/.test(cursor)) return fail(res, 400, 40003, '分页游标无效');
+      rows = rows.filter((r) => r.id < Number(cursor));
+    }
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit);
+    return ok(res, {
+      list: items,
+      hasMore,
+      nextCursor: hasMore && items.length ? String(items[items.length - 1].id) : null,
+    });
   }
 
   fail(res, 404, 40404, '接口不存在');

@@ -473,6 +473,70 @@ const run = async () => {
     check('重复移除被拒（404）', removeMissing);
   }
 
+  // 12) 管理端：运营审计（P1-15）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const auditKey = '__contract_audit';
+    try {
+      await request(`/admin/sources/${auditKey}`, { method: 'DELETE', token });
+    } catch {
+      /* ignore：本就不存在 */
+    }
+    await request('/admin/sources', {
+      method: 'POST',
+      token,
+      body: {
+        key: auditKey,
+        name: '契约审计源',
+        channel: 'tech',
+        url: 'https://example.com/audit.xml',
+        weight: 4,
+      },
+    });
+    await request(`/admin/sources/${auditKey}`, {
+      method: 'PATCH',
+      token,
+      body: { weight: 6, enabled: false },
+    });
+
+    const page = await request('/admin/audit?limit=50', { token });
+    check(
+      'GET /admin/audit 返回 {list,hasMore,nextCursor}',
+      Array.isArray(page.list) && typeof page.hasMore === 'boolean' && 'nextCursor' in page,
+      `${page.list.length} 条`,
+    );
+    const acts = (page.list ?? []).map((a) => `${a.action}:${a.target}`);
+    check('新增源留痕（source.create）', acts.includes(`source.create:${auditKey}`));
+    check('修改源留痕（source.update）', acts.includes(`source.update:${auditKey}`));
+
+    const upd = (page.list ?? []).find(
+      (a) => a.action === 'source.update' && a.target === auditKey,
+    );
+    check(
+      '更新记录含字段级 diff（旧→新）',
+      !!upd?.detail?.changes &&
+        Array.isArray(upd.detail.changes.weight) &&
+        upd.detail.changes.weight[1] === 6,
+      JSON.stringify(upd?.detail?.changes?.weight ?? null),
+    );
+    check(
+      '审计行含操作者与时间',
+      (page.list ?? []).every((a) => !!a.actorPhone && !!a.createdAt),
+    );
+
+    const filtered = await request(`/admin/audit?target=${auditKey}`, { token });
+    check(
+      'target 过滤只看该对象',
+      (filtered.list ?? []).length > 0 && (filtered.list ?? []).every((a) => a.target === auditKey),
+    );
+
+    // 收尾
+    await request(`/admin/sources/${auditKey}`, { method: 'DELETE', token });
+    const afterDelete = await request(`/admin/audit?target=${auditKey}`, { token });
+    const acts2 = (afterDelete.list ?? []).map((a) => a.action);
+    check('删除源留痕（source.delete）', acts2.includes('source.delete'));
+  }
+
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);
   process.exit(fail === 0 ? 0 : 1);
 };

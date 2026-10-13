@@ -11,6 +11,8 @@ import { USE_MOCK } from './config';
 import { request } from './http';
 import { toChannel } from '@/constants/channels';
 import type {
+  AdminAuditItem,
+  AdminAuditPage,
   AdminUserInput,
   AdminUserItem,
   AdminUserList,
@@ -111,6 +113,23 @@ function toAdminUser(raw: unknown): AdminUserItem | null {
   };
 }
 
+function toAudit(raw: unknown): AdminAuditItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = Number(r.id);
+  const action = typeof r.action === 'string' ? r.action : '';
+  // 没有 id（游标锚点）或 action（标签依据）的行无法定位也不好展示，丢弃
+  if (!Number.isFinite(id) || !action) return null;
+  return {
+    id,
+    actorPhone: typeof r.actorPhone === 'string' ? r.actorPhone : '',
+    action,
+    target: typeof r.target === 'string' ? r.target : '',
+    detail: r.detail && typeof r.detail === 'object' ? (r.detail as Record<string, unknown>) : {},
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
+  };
+}
+
 /** GET /admin/users —— 管理员白名单（库内行 + env 来源计数） */
 export async function fetchAdminUsers(): Promise<AdminUserList> {
   ensureRealBackend();
@@ -138,4 +157,33 @@ export async function addAdminUser(input: AdminUserInput): Promise<AdminUserItem
 export async function removeAdminUser(phone: string): Promise<void> {
   ensureRealBackend();
   await request<unknown>(`/admin/users/${encodeURIComponent(phone)}`, { method: 'DELETE' });
+}
+
+/**
+ * GET /admin/audit —— 运营审计时间线（游标分页，新的在前）。
+ *
+ * `cursor` 由服务端下发（自增 id），客户端不解析——与评论/消息分页同款约定。
+ */
+export async function fetchAuditPage(
+  options: {
+    limit?: number;
+    cursor?: string | null;
+    target?: string;
+  } = {},
+): Promise<AdminAuditPage> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.target) params.set('target', options.target);
+  const qs = params.toString();
+  const data = await request<{ list?: unknown; hasMore?: boolean; nextCursor?: string | null }>(
+    `/admin/audit${qs ? `?${qs}` : ''}`,
+  );
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toAudit).filter((a): a is AdminAuditItem => a !== null),
+    hasMore: data?.hasMore === true,
+    nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : null,
+  };
 }

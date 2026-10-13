@@ -181,6 +181,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | GET | `/api/admin/users` | ✅ 管理员 | 管理员白名单（`admin_users` 表），返回 `{ list, total, envAdminCount }`；行含 `registered`（已注册/预授权）与 `addedBy`（审计） |
 | POST | `/api/admin/users` | ✅ 管理员 | 添加管理员（支持**预授权**：手机号无需先注册）；已在任一来源 40903、形态非法 422 |
 | DELETE | `/api/admin/users/{phone}` | ✅ 管理员 | 移除管理员；不存在 40403；**末位保护**：移除后任何来源都不再有管理员时 40904 |
+| GET | `/api/admin/audit?limit=&cursor=&target=` | ✅ 管理员 | **运营审计时间线**（P1-15）：返回 `{ list, hasMore, nextCursor }`，新的在前；游标为自增 `id`，可 `target` 过滤（"这个对象被谁动过"） |
 
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
@@ -238,6 +239,20 @@ curl -X POST "http://127.0.0.1:8000/api/news/refresh?channel=tech" \
 `/api/news/refresh`、`/api/admin/*` 与**登录/注册/续期响应里的 `isAdmin` 字段**共用它——
 曾出现 `main.py` 自己复制一份 `if not ADMIN_PHONES or ...` 判断，两处逻辑迟早漂移。
 
+### 运营审计（迁移 0016）
+
+权限体系回答「谁能进后台」，审计回答「**谁干了什么**」——源被停用 / 换地址 / 删除、
+管理员被加入或移除，此前全部无痕迹，多管理员共用后台时事后只能靠猜。
+
+- **动作命名**：`对象.动作`（`source.create` / `source.update` / `source.delete` /
+  `source.reset` / `admin.add` / `admin.remove`），前端据此映射中文标签；
+- **明细**：更新记字段级 `changes`（旧→新），**只记真正变化的字段**（前端表单常整体提交，
+  全量记录会灌满时间线）；增删记 `snapshot`（删完行就没了，快照必须在删除前取）；
+- **同事务写入**：`record_audit()` 不提交，由调用方与业务变更一起 commit——
+  「改成功了但没留痕」比「改失败」更糟，故刻意不做 try/except 静默；
+- **游标用自增 `id` 而非时间戳**：`created_at` 是秒级精度，同秒多条会让 keyset 比较
+  出现重复/遗漏（评论分页踩过同一个坑）。
+
 ### 管理员白名单（迁移 0015）
 
 「指定账号才能访问后台」此前只由 `ADMIN_PHONES` 环境变量承载——加/撤一名管理员要改部署配置
@@ -278,7 +293,8 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0013_rss_sources`（RSS 源可配置化 + 抓取健康字段与 `ix_rss_sources_channel_enabled`）、
   `0014_comment_likes_and_replies`（点赞关系表 `comment_likes` + 评论父子列
   `parent_id`/`root_id`，移除 `comments.liked_by` JSON 列）、
-  `0015_admin_whitelist`（管理员白名单 `admin_users`，应用内管理「指定账号」）。
+  `0015_admin_whitelist`（管理员白名单 `admin_users`，应用内管理「指定账号」）、
+  `0016_admin_audit_logs`（运营审计 `admin_audit_logs`，记录谁改了什么）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -484,7 +500,7 @@ pytest -q          # 237 项
 
 - `tests/test_units.py`（25 项）：限流器（阈值/隔离/窗口过期）、PBKDF2 密码哈希与加盐、JWT 往返、RSS 解析与字段映射（RSS 2.0 / Atom / 图片提取 / 变体判定 / 稳定 id / 相对时间）。
 - `tests/test_hardening.py`（14 项）：受信代理 IP 解析（XFF 采信/忽略/回退）、分页游标编解码与非法输入、**schema 单轨守卫**（缺表时抛错且**不就地建表**、`init_db` 源码不含 `create_all`）。
-- `tests/test_migrations.py`（15 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+- `tests/test_migrations.py`（17 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
   与 `ix_news_hot`、`rss_sources` 的列与主键。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
@@ -492,6 +508,10 @@ pytest -q          # 237 项
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的
   `sqlalchemy.url`，进程内直接调 `command.upgrade()` 会作用到**真实数据库**。
+- `tests/test_audit.py`（13 项）：**运营审计**（P1-15）——鉴权（401/403）、
+  源增删/重置留痕、更新只记变化字段（无变化不留痕）、删除快照在删前取、
+  管理员增删留痕且顺序为「移除在前」、时间线倒序、游标分页无重复无遗漏、
+  `target` 过滤、非法游标 40003、审计与业务同事务。
 - `tests/test_sources.py`（50 项）：**RSS 源可配置化**——播种只在空表时发生（不覆盖运营配置）、
   内置源含 `aihot_picks`、按权重降序、频道无专属源时回退全部、无库会话回退内置源；
   健康状态回写（成功 / 失败 / 错误截断 / 未知 key 静默）；
@@ -535,7 +555,8 @@ pytest -q          # 237 项
 > 前端契约自检：`node scripts/contract-check.mjs`（**47 项**，含 18 项二级评论契约，需传 `DEMO_PASSWORD` 登录）。
 > 加 `CHECK_ADMIN=1` 且在 `ADMIN_PHONES` 内的账号登录，可额外校验 `/api/admin/sources`
 > 的增删改与协议白名单，以及 `/api/admin/users` 的白名单增删、重复/自添加拦截、
-> `addedBy` 与 404（共 65 项；mock 后端同样支持，见前端 README）。
+> `addedBy` 与 404、`/api/admin/audit` 的留痕与游标分页
+> （共 72 项；mock 后端同样支持，见前端 README）。
 
 ## 错误码
 
