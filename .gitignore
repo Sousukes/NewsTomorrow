@@ -1,0 +1,19 @@
+# ---- 根级忽略（子目录另有各自的 .gitignore）----
+
+# OCR 委派审查的临时产物
+.tmp/
+
+# Agent 记忆与工作目录（非项目内容，不参与代码审查）
+.workbuddy/
+.workbuddy-ai/
+
+# Python 运行时缓存
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

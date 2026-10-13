@@ -1,0 +1,20 @@
+# 本地环境配置（含数据库密码，务必排除）
+.env
+.env.*
+!.env.example
+
+# 依赖与缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# SQLite 运行时数据库（PG 为默认数据源，此文件仅迁移来源/回退用）
+*.db
+*.db-journal
+*.sqlite3
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,98 @@
+"""搜索词统计：记录、热词聚合、日志清理。
+
+设计要点：
+    1. **记原始日志**（`search_logs`）而非聚合计数，热词才能表达"近期热度"；
+       代价是需要定期清理（日志会持续增长）。
+    2. **同一用户短时间内同词去重**：否则反复搜同一个词就能把它刷上热榜。
+       未登录无 `user_id`，去重窗口无法施加，故此类记录权重天然较低（每次都记，
+       但单人重复搜索的绝对量远小于真实群体行为）。
+    3. **时间可注入**：热词窗口与清理阈值都接受 `now`，测试不依赖真实时钟。
+"""
+import logging
+import uuid
+from datetime import datetime, timedelta
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from .models import SearchLog, now_str
+
+logger = logging.getLogger("toutiao.search_stats")
+
+# 同一用户同一词的去重窗口（秒）：窗口内重复搜索不重复计数
+DEDUP_WINDOW_SECONDS = 60
+# 热词默认统计窗口（天）
+HOT_WINDOW_DAYS = 7
+# 日志保留天数：超出即清理，避免表无限增长
+LOG_KEEP_DAYS = 30
+# 词长上限（与模型 String(50) 对齐，防御性截断）
+TERM_MAX = 50
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat(timespec="seconds")
+
+
+def record_search(db: Session, term: str, user_id: int | None = None, now=None) -> bool:
+    """记录一次搜索。返回是否真的写入（去重命中时为 False）。
+
+    旁路调用：失败由调用方决定是否忽略（搜索结果不应因统计失败而不可用）。
+    """
+    clean = (term or "").strip()[:TERM_MAX]
+    if not clean:
+        return False
+    now = now or datetime.now()
+
+    if user_id is not None:
+        cutoff = _iso(now - timedelta(seconds=DEDUP_WINDOW_SECONDS))
+        dup = (
+            db.query(SearchLog.id)
+            .filter(
+                SearchLog.user_id == user_id,
+                SearchLog.term == clean,
+                SearchLog.created_at >= cutoff,
+            )
+            .first()
+        )
+        if dup is not None:
+            return False
+
+    db.add(
+        SearchLog(
+            # 必须随机：同一秒内同一词（如未登录连续搜索）若用确定性 ID 会撞主键
+            id=f"s_{uuid.uuid4().hex[:16]}",
+            user_id=user_id,
+            term=clean,
+            created_at=_iso(now),
+        )
+    )
+    db.commit()
+    return True
+
+
+def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=None) -> list[dict]:
+    """近 `days` 天热词，按搜索次数倒序；同次数按词升序（保证顺序稳定）。"""
+    now = now or datetime.now()
+    cutoff = _iso(now - timedelta(days=days))
+    rows = (
+        db.query(SearchLog.term, func.count(SearchLog.id).label("c"))
+        .filter(SearchLog.created_at >= cutoff)
+        .group_by(SearchLog.term)
+        .order_by(func.count(SearchLog.id).desc(), SearchLog.term.asc())
+        .limit(limit)
+        .all()
+    )
+    return [{"term": t, "count": int(c)} for t, c in rows]
+
+
+def prune_search_logs(db: Session, keep_days: int = LOG_KEEP_DAYS, now=None) -> int:
+    """清理超过保留期的搜索日志，返回删除条数。"""
+    now = now or datetime.now()
+    cutoff = _iso(now - timedelta(days=keep_days))
+    deleted = (
+        db.query(SearchLog)
+        .filter(SearchLog.created_at < cutoff)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return int(deleted or 0)

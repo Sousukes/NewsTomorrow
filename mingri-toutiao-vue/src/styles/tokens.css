@@ -1,0 +1,53 @@
+:root {
+  /* 品牌 / 基础色 */
+  --color-primary: #2d6cff;
+  --color-page-bg: #f4f5f6;
+  --color-card-bg: #ffffff;
+  --color-text-primary: #222222;
+  --color-text-secondary: #9a9fa8;
+  --color-divider: #f0f1f2;
+
+  /* 语义色（仅用于表单报错 / 错误提示） */
+  --color-error: #e5484d;
+  --color-error-bg: #fceded;
+
+  /* 描边 / 占位 */
+  --color-border: #e5e6e8;
+
+  /* 圆角 */
+  --radius-card: 6px;
+  --radius-button: 24px;
+  --radius-tabbar: 36px;
+  --radius-avatar: 50%;
+
+  /* 字体 */
+  --font-cn:
+    'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-num: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* 层级 */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-phone: 0 12px 40px rgba(17, 24, 39, 0.18);
+}
+
+/*
+ * 深色模式：仅覆盖颜色类令牌，组件一律通过 var(--color-*) 取色。
+ *
+ * 由 JS 在 <html> 上写 `data-theme="light|dark"`：
+ * - `system` 时由 `composables/useTheme.ts` 解析 `prefers-color-scheme` 后写入
+ * - `light` / `dark` 时直接写入，覆盖系统偏好
+ * 因此「跟随系统」与「手动指定」共用同一套令牌，
+ * 不必在 CSS 里把媒体查询与属性选择器各写一遍（避免两处不一致）。
+ */
+:root[data-theme='dark'] {
+  --color-primary: #4d86ff;
+  --color-page-bg: #121316;
+  --color-card-bg: #1c1e22;
+  --color-text-primary: #e8eaed;
+  --color-text-secondary: #9aa0a6;
+  --color-divider: #2a2d33;
+  --color-border: #33373d;
+  --color-error: #ff6b6f;
+  --color-error-bg: #3a2224;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+}

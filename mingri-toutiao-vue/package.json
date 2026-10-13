@@ -1,0 +1,47 @@
+{
+  "name": "mingri-toutiao-vue",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"src/**/*.{ts,vue}\" \"scripts/**/*.mjs\" \"mock-server/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.{ts,vue}\" \"scripts/**/*.mjs\" \"mock-server/**/*.mjs\"",
+    "verify": "npm run type-check && npm run lint && npm run format:check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "contract-check": "node scripts/contract-check.mjs",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "mock:api": "node mock-server/server.mjs",
+    "dev:api": "vite --mode api"
+  },
+  "dependencies": {
+    "pinia": "^2.3.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@storybook/vue3-vite": "^10.6.1",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.5.1",
+    "eslint": "^10.12.0",
+    "eslint-plugin-vue": "^10.11.1",
+    "globals": "^17.13.0",
+    "jsdom": "^30.1.2",
+    "prettier": "^3.9.9",
+    "storybook": "^10.6.1",
+    "typescript": "~5.6.3",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^6.0.5",
+    "vitest": "^5.0.3",
+    "vue-eslint-parser": "^10.4.1",
+    "vue-tsc": "^2.1.10"
+  }
+}
