@@ -5,7 +5,8 @@
  * 对 FastAPI 后端（或本地 mock 后端）跑一遍，确认契约完全兼容（字段名、错误码、鉴权头）。
  *
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
- * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单。
+ * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
+ * 源健康历史与趋势（P1-19）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -535,6 +536,101 @@ const run = async () => {
     const afterDelete = await request(`/admin/audit?target=${auditKey}`, { token });
     const acts2 = (afterDelete.list ?? []).map((a) => a.action);
     check('删除源留痕（source.delete）', acts2.includes('source.delete'));
+  }
+
+  // 13) 管理端：源健康历史与趋势（P1-19）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //     列表回答"哪个源值得点进去"（health 摘要），单源回答"它到底怎么了"
+  //     （summary 总览 / points 按天序列 / failures 失败原文）。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const listData = await request('/admin/sources', { token });
+    check(
+      'GET /admin/sources 附 healthDays（列表摘要窗口）',
+      typeof listData.healthDays === 'number' && listData.healthDays > 0,
+      `healthDays=${listData.healthDays}`,
+    );
+    check(
+      '每行附 health 摘要（null 或 {attempts,rate,avgItems}）',
+      (listData.list ?? []).every(
+        (s) =>
+          s.health === null ||
+          (typeof s.health === 'object' &&
+            typeof s.health.attempts === 'number' &&
+            (s.health.rate === null || typeof s.health.rate === 'number')),
+      ),
+    );
+
+    const firstKey = (listData.list ?? [])[0]?.key;
+    check('列表非空可取到首个源', !!firstKey, String(firstKey));
+    if (firstKey) {
+      const trend = await request(`/admin/sources/${firstKey}/health`, { token });
+      check(
+        'GET /admin/sources/{key}/health 形状（key/days/keepDays/summary/points/failures）',
+        trend.key === firstKey &&
+          typeof trend.days === 'number' &&
+          typeof trend.keepDays === 'number' &&
+          !!trend.summary &&
+          Array.isArray(trend.points) &&
+          Array.isArray(trend.failures),
+      );
+      check(
+        'summary 含 attempts/ok/failed/rate/avgItems',
+        typeof trend.summary.attempts === 'number' &&
+          typeof trend.summary.ok === 'number' &&
+          typeof trend.summary.failed === 'number' &&
+          (trend.summary.rate === null || typeof trend.summary.rate === 'number') &&
+          (trend.summary.avgItems === null || typeof trend.summary.avgItems === 'number'),
+      );
+      check(
+        'days 收敛到保留期内（window_days：超窗口只会得到一片空白）',
+        trend.days <= trend.keepDays,
+        `days=${trend.days} <= keepDays=${trend.keepDays}`,
+      );
+      check(
+        'points 按天分桶且字段完整（缺天不补零，空白=没抓）',
+        (trend.points ?? []).every(
+          (p) =>
+            typeof p.date === 'string' &&
+            typeof p.total === 'number' &&
+            typeof p.ok === 'number' &&
+            typeof p.failed === 'number' &&
+            typeof p.items === 'number',
+        ),
+      );
+      check(
+        'failures 只列失败且带性质（transient/permanent）',
+        (trend.failures ?? []).every(
+          (f) =>
+            typeof f.at === 'string' &&
+            typeof f.items === 'number' &&
+            (f.kind === null || f.kind === 'transient' || f.kind === 'permanent'),
+        ),
+      );
+
+      let zeroDays = false;
+      try {
+        await request(`/admin/sources/${firstKey}/health?days=0`, { token });
+      } catch {
+        zeroDays = true;
+      }
+      check('days=0 被拒（ge=1）', zeroDays);
+
+      let bigDays = false;
+      try {
+        await request(`/admin/sources/${firstKey}/health?days=9999`, { token });
+      } catch {
+        bigDays = true;
+      }
+      check('days 越界被拒（le=365）', bigDays);
+    }
+
+    let missing = false;
+    try {
+      await request('/admin/sources/__no_such_source__/health', { token });
+    } catch {
+      missing = true;
+    }
+    check('未知源的趋势 404', missing);
   }
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);

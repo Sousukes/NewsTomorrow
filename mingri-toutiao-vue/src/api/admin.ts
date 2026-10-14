@@ -18,7 +18,13 @@ import type {
   AdminUserList,
   RssSourceItem,
   SourceCreateInput,
+  SourceHealth,
+  SourceHealthBrief,
+  SourceHealthFailure,
+  SourceHealthPoint,
+  SourceHealthSummary,
   SourceInput,
+  SourceListResult,
 } from '@/types';
 
 /** 当前构建是否具备源管理能力（mock 模式未连接后端，恒为 false） */
@@ -28,6 +34,60 @@ function ensureRealBackend(): void {
   if (USE_MOCK) {
     throw new Error('当前为 mock 模式（未连接后端），RSS 源管理不可用');
   }
+}
+
+function num(raw: unknown): number | null {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 近期健康摘要（P1-19）。
+ *
+ * 缺失一律回落 `null` 而不是"全零摘要"：**"没抓过"和"抓了全挂"必须能区分**——
+ * 前者通常说明源没启用或服务没跑，后者才是要处理的问题。
+ */
+function toHealthBrief(raw: unknown): SourceHealthBrief | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const attempts = num(r.attempts);
+  if (attempts === null) return null;
+  const rate = num(r.rate);
+  return {
+    attempts,
+    rate: rate === null ? null : Math.min(1, Math.max(0, rate)),
+    avgItems: num(r.avgItems),
+  };
+}
+
+function toHealthPoint(raw: unknown): SourceHealthPoint | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const date = typeof r.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.date) ? r.date : '';
+  if (!date) return null; // 没有日期的点无法落位
+  const total = num(r.total);
+  const rate = num(r.rate);
+  return {
+    date,
+    total: total ?? 0,
+    ok: num(r.ok) ?? 0,
+    failed: num(r.failed) ?? 0,
+    items: num(r.items) ?? 0,
+    rate: rate === null ? null : Math.min(1, Math.max(0, rate)),
+  };
+}
+
+function toHealthFailure(raw: unknown): SourceHealthFailure | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const at = typeof r.at === 'string' && r.at ? r.at : '';
+  if (!at) return null; // 没有时间的失败无法排障，丢弃
+  return {
+    at,
+    error: typeof r.error === 'string' && r.error ? r.error : null,
+    kind: r.kind === 'permanent' || r.kind === 'transient' ? r.kind : null,
+    items: num(r.items) ?? 0,
+  };
 }
 
 function toSource(raw: unknown): RssSourceItem | null {
@@ -58,6 +118,8 @@ function toSource(raw: unknown): RssSourceItem | null {
     failureKind:
       r.failureKind === 'permanent' || r.failureKind === 'transient' ? r.failureKind : null,
     nextRetryAt: typeof r.nextRetryAt === 'string' && r.nextRetryAt ? r.nextRetryAt : null,
+    // P1-19：近期健康摘要。字段缺失时是 `null` 而不是全零——"没抓过"要能看出来
+    health: toHealthBrief(r.health),
   };
 }
 
@@ -66,11 +128,69 @@ function normalizeList(raw: unknown): RssSourceItem[] {
   return raw.map(toSource).filter((s): s is RssSourceItem => s !== null);
 }
 
-/** GET /admin/sources —— 源列表（含抓取健康状态），按权重降序 */
-export async function fetchSources(): Promise<RssSourceItem[]> {
+/**
+ * GET /admin/sources —— 源列表（含抓取健康状态与**近期成功率**），按权重降序。
+ *
+ * 返回 `healthDays`：成功率必须带时间范围，否则"88%"这个数字无法解读。
+ */
+export async function fetchSources(): Promise<SourceListResult> {
   ensureRealBackend();
-  const data = await request<{ list?: unknown }>('/admin/sources');
-  return normalizeList(data?.list);
+  const data = await request<{ list?: unknown; healthDays?: unknown }>('/admin/sources');
+  const days = Number(data?.healthDays);
+  return {
+    list: normalizeList(data?.list),
+    healthDays: Number.isFinite(days) && days > 0 ? days : 7,
+  };
+}
+
+/**
+ * GET /admin/sources/:key/health —— 单源健康趋势（P1-19）。
+ *
+ * 与列表页的分工：列表回答"哪个源值得点进来"，这里回答"**它到底怎么了**"。
+ * 三段数据各有分工——总览看"抖动还是持续恶化"、按天序列看"是不是每天固定挂"、
+ * 失败原文看"要不要改 URL / 换源"。
+ */
+export async function fetchSourceHealth(key: string, days?: number): Promise<SourceHealth> {
+  ensureRealBackend();
+  const query = days && days > 0 ? `?days=${Math.floor(days)}` : '';
+  const data = await request<{
+    key?: unknown;
+    days?: unknown;
+    keepDays?: unknown;
+    summary?: unknown;
+    points?: unknown;
+    failures?: unknown;
+  }>(`/admin/sources/${encodeURIComponent(key)}/health${query}`);
+
+  const summary = (data?.summary ?? {}) as Record<string, unknown>;
+  const ok = num(summary.ok) ?? 0;
+  const attempts = num(summary.attempts) ?? 0;
+  const rate = num(summary.rate);
+  const brief: SourceHealthSummary = {
+    attempts,
+    ok,
+    failed: num(summary.failed) ?? Math.max(0, attempts - ok),
+    rate: rate === null ? null : Math.min(1, Math.max(0, rate)),
+    items: num(summary.items) ?? 0,
+    avgItems: num(summary.avgItems),
+    lastOkAt: typeof summary.lastOkAt === 'string' && summary.lastOkAt ? summary.lastOkAt : null,
+    lastFailAt:
+      typeof summary.lastFailAt === 'string' && summary.lastFailAt ? summary.lastFailAt : null,
+  };
+
+  const rawPoints = Array.isArray(data?.points) ? data.points : [];
+  const rawFailures = Array.isArray(data?.failures) ? data.failures : [];
+  const win = Number(data?.days);
+  const keep = Number(data?.keepDays);
+  return {
+    key: typeof data?.key === 'string' && data.key ? data.key : key,
+    days: Number.isFinite(win) && win > 0 ? win : 30,
+    keepDays: Number.isFinite(keep) && keep > 0 ? keep : 30,
+    summary: brief,
+    // 逐点/逐条丢弃坏行，而不是整段失效：一个日期串坏了不该让整个趋势图消失
+    points: rawPoints.map(toHealthPoint).filter((p): p is SourceHealthPoint => p !== null),
+    failures: rawFailures.map(toHealthFailure).filter((f): f is SourceHealthFailure => f !== null),
+  };
 }
 
 /** POST /admin/sources —— 新增源（key 冲突 409，非法频道/地址 422/400） */

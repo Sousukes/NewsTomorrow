@@ -392,9 +392,13 @@ const BUILTIN_SOURCES = [
 /**
  * 演示用的故障态种子：少量源带失败分级数据，便于在 mock 下看到
  * 「永久性（需人工处理）」与「可重试」两种 UI 分支。key 不存在即按健康兜底。
+ *
+ * **key 必须在上面的 BUILTIN_SOURCES 里**：早前这里写的是 `sina_tech` / `cnbeta`，
+ * 两个都不属于内置源，于是这份种子从来没生效过——mock 下永远看不到那两种分支，
+ * 而单测（用的是固定 fixture）照样全绿。改 key 时请回头对照内置源列表。
  */
 const SEEDED_FAILURES = {
-  sina_tech: {
+  chinanews_finance: {
     lastStatus: 503,
     lastError: 'HTTP 503',
     lastItemCount: null,
@@ -402,7 +406,7 @@ const SEEDED_FAILURES = {
     failureKind: 'transient',
     nextRetryAt: null,
   },
-  cnbeta: {
+  zaobao: {
     lastStatus: 404,
     lastError: 'HTTP 404',
     lastItemCount: null,
@@ -411,6 +415,25 @@ const SEEDED_FAILURES = {
     nextRetryAt: null,
   },
 };
+
+/**
+ * 演示用的近期健康摘要（P1-19），key 与 SEEDED_FAILURES 对齐。
+ *
+ * 另加两个**只有历史才看得见**的样本，好让趋势面板真正有东西可讲：
+ * - `people_scitech`：成功率 100%，但条数从 30 掉到 4——一直绿着的废源；
+ * - `xinhua_fortune`：失败集中在每天凌晨 3 点——对方维护窗口，不是我们的锅。
+ */
+const SEEDED_HEALTH = {
+  chinanews_finance: { attempts: 24, rate: 0.75, avgItems: 18.4 },
+  zaobao: { attempts: 24, rate: 0, avgItems: null },
+  people_scitech: { attempts: 14, rate: 1, avgItems: 16.1 },
+  xinhua_fortune: { attempts: 28, rate: 0.5, avgItems: 22 },
+};
+
+/** 列表摘要的窗口天数，与后端 FEED_HEALTH_LIST_DAYS 默认值一致 */
+const HEALTH_LIST_DAYS = 7;
+/** 健康记录保留期，与后端 FEED_HEALTH_KEEP_DAYS 默认值一致 */
+const HEALTH_KEEP_DAYS = 30;
 
 const freshSources = () =>
   BUILTIN_SOURCES.map((s) => ({
@@ -443,6 +466,125 @@ function sourceOut(row) {
     consecutiveFailures: row.consecutiveFailures ?? 0,
     failureKind: row.failureKind ?? null,
     nextRetryAt: row.nextRetryAt ?? null,
+    // P1-19：近期健康摘要。没种子的源是 null 而不是全零——
+    // "没抓过"和"抓了全挂"在界面上是两种完全不同的状态
+    health: SEEDED_HEALTH[row.key] ?? null,
+  };
+}
+
+/** 两位补零 */
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** 取 `YYYY-MM-DD` */
+function dayKey(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/**
+ * 演示用的单源健康趋势（P1-19）：按 key 复现四类形态。
+ *
+ * 刻意让样本覆盖**列表上看不出来**的两种情况（条数下滑、规律抖动），
+ * 否则趋势面板在 mock 下只会显示一堆毫无信息量的绿格子。
+ */
+function mockSourceHealth(row, requestedDays) {
+  const win =
+    Number(requestedDays) > 0
+      ? Math.min(Number(requestedDays), HEALTH_KEEP_DAYS)
+      : HEALTH_KEEP_DAYS;
+  const base = 20 + ((row.weight ?? 5) % 5) * 3;
+  const points = [];
+  const failures = [];
+  let ok = 0;
+  let total = 0;
+  let items = 0;
+  let lastOkAt = null;
+  let lastFailAt = null;
+
+  const push = (i, hour, okFlag, count, err, kind) => {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    d.setHours(hour, 0, 0, 0);
+    const at = d.toISOString();
+    total += 1;
+    if (okFlag) {
+      ok += 1;
+      items += count;
+      lastOkAt = at;
+    } else {
+      lastFailAt = at;
+      failures.push({ at, error: err, kind, items: 0 });
+    }
+  };
+
+  for (let i = win - 1; i >= 0; i -= 1) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const date = dayKey(d);
+    const round = { date, total: 0, ok: 0, failed: 0, items: 0 };
+
+    if (row.key === 'zaobao') {
+      // 永久性失败：每天两轮都是 404
+      for (const hour of [3, 15]) {
+        push(i, hour, false, 0, 'HTTP 404', 'permanent');
+        round.total += 1;
+        round.failed += 1;
+      }
+    } else if (row.key === 'people_scitech') {
+      // 一直成功，但条数从 30 掉到 4：列表上是满分绿，其实已经废了
+      const n = Math.max(4, Math.round(30 - ((win - 1 - i) / Math.max(1, win - 1)) * 26));
+      push(i, 9, true, n);
+      round.total += 1;
+      round.ok += 1;
+      round.items += n;
+    } else if (row.key === 'xinhua_fortune') {
+      // 规律抖动：每天凌晨 3 点固定挂一次，下午正常
+      push(i, 3, false, 0, 'ReadTimeout: 读取超时', 'transient');
+      push(i, 15, true, base);
+      round.total += 2;
+      round.ok += 1;
+      round.failed += 1;
+      round.items += base;
+    } else if (row.key === 'chinanews_finance') {
+      // 可重试失败：四分之一轮次挂 503
+      for (const hour of [6, 18]) {
+        const bad = (i + hour) % 4 === 0;
+        if (bad) {
+          push(i, hour, false, 0, 'HTTP 503', 'transient');
+          round.total += 1;
+          round.failed += 1;
+        } else {
+          push(i, hour, true, base);
+          round.total += 1;
+          round.ok += 1;
+          round.items += base;
+        }
+      }
+    } else {
+      push(i, 9, true, base + (i % 3));
+      round.total += 1;
+      round.ok += 1;
+      round.items += base + (i % 3);
+    }
+    round.rate = round.total ? Math.round((round.ok / round.total) * 1e4) / 1e4 : null;
+    points.push(round);
+  }
+
+  return {
+    key: row.key,
+    days: win,
+    keepDays: HEALTH_KEEP_DAYS,
+    summary: {
+      attempts: total,
+      ok,
+      failed: total - ok,
+      rate: total ? Math.round((ok / total) * 1e4) / 1e4 : null,
+      items,
+      avgItems: ok ? Math.round((items / ok) * 10) / 10 : null,
+      lastOkAt,
+      lastFailAt,
+    },
+    points,
+    failures: failures.reverse().slice(0, 20),
   };
 }
 
@@ -776,7 +918,27 @@ const server = createServer(async (req, res) => {
   if (head === 'admin' && a === 'sources' && !b && method === 'GET') {
     if (!requireAdmin(req, res)) return;
     const list = [...sources].sort((x, y) => y.weight - x.weight || x.key.localeCompare(y.key));
-    return ok(res, { list: list.map(sourceOut), total: list.length });
+    // healthDays 随列表下发：成功率不带时间范围就是个无法解读的数字
+    return ok(res, {
+      list: list.map(sourceOut),
+      total: list.length,
+      healthDays: HEALTH_LIST_DAYS,
+    });
+  }
+
+  // GET /admin/sources/:key/health —— 单源健康趋势（P1-19）
+  if (head === 'admin' && a === 'sources' && b && c === 'health' && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const row = sources.find((s) => s.key === b);
+    if (!row) return fail(res, 404, 40402, '源不存在');
+    // days 校验与真实后端 Query(ge=1, le=365) 对齐：非整数 / 0 / 越界一律 422。
+    // 不能让 days=0 在 mock 上静默回落成保留期——两个后端口径不一致时，
+    // 契约检查会在一个后端绿、另一个后端红，排查半天以为是回归
+    const raw = url.searchParams.get('days');
+    const bad = raw !== null && (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 365);
+    if (bad) return fail(res, 422, 42200, '参数校验失败：days 须为 1~365 的整数');
+    const days = raw === null ? 0 : Number(raw);
+    return ok(res, mockSourceHealth(row, days));
   }
 
   // POST /admin/sources

@@ -125,6 +125,77 @@ export interface RssSourceItem {
   failureKind: 'permanent' | 'transient' | null;
   /** 熔断到期时间（ISO 串，P1-18）；null = 未熔断 */
   nextRetryAt: string | null;
+  /**
+   * 近期健康摘要（P1-19）。`null` = 这段时间内没抓过它，
+   * 与"抓了但全失败"（`rate === 0`）是两回事——前者通常说明源没启用或服务没跑。
+   */
+  health: SourceHealthBrief | null;
+}
+
+/**
+ * 列表页用的近期摘要（P1-19）：只放"值不值得点进去看细节"所需的信息。
+ * 趋势图放在单源页，列表上复刻一遍只会让首屏变吵。
+ */
+export interface SourceHealthBrief {
+  /** 窗口内的抓取轮次 */
+  attempts: number;
+  /** 成功率 0–1；`null` = 窗口内没有尝试 */
+  rate: number | null;
+  /** **成功**轮次的平均条数；`null` = 没有成功轮。看"源是不是在变空"用这个 */
+  avgItems: number | null;
+}
+
+/** 单源趋势页的完整汇总 */
+export interface SourceHealthSummary extends SourceHealthBrief {
+  ok: number;
+  failed: number;
+  /** 窗口内抓到的总条数 */
+  items: number;
+  lastOkAt: string | null;
+  lastFailAt: string | null;
+}
+
+/**
+ * 按天分桶的一个点（P1-19）。
+ * **缺的天不补零**：空白表示"那天没抓它"，补零会伪装成"抓了但全失败"。
+ */
+export interface SourceHealthPoint {
+  /** `YYYY-MM-DD` */
+  date: string;
+  total: number;
+  ok: number;
+  failed: number;
+  items: number;
+  /** 当天没有尝试时为 null */
+  rate: number | null;
+}
+
+/** 一次失败的原文（P1-19） */
+export interface SourceHealthFailure {
+  at: string;
+  error: string | null;
+  /** 失败性质，与 P1-18 同义 */
+  kind: 'permanent' | 'transient' | null;
+  items: number;
+}
+
+/** GET /api/admin/sources/:key/health 的响应（P1-19） */
+export interface SourceHealth {
+  key: string;
+  /** **实际生效**的窗口天数：请求 90 天而只留 30 天时会被收敛 */
+  days: number;
+  /** 服务端保留期，用于解释"为什么最多只能看这么久" */
+  keepDays: number;
+  summary: SourceHealthSummary;
+  points: SourceHealthPoint[];
+  failures: SourceHealthFailure[];
+}
+
+/** GET /api/admin/sources 的响应（P1-19 起带窗口天数） */
+export interface SourceListResult {
+  list: RssSourceItem[];
+  /** 摘要统计的窗口天数：不带它，成功率这个数字就没有时间范围 */
+  healthDays: number;
 }
 
 /** 新增 / 更新源的入参（更新时全部可选，未传字段保持原值） */

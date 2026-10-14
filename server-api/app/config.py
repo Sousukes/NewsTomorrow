@@ -133,3 +133,9 @@ FEED_CIRCUIT_COOLDOWN_MINUTES = max(1, int(_env("FEED_CIRCUIT_COOLDOWN_MINUTES",
 # 刻意默认关闭：源临时 404 一周就被静默关掉、且没人记得重新打开，比一直重试更糟。
 # 开启后每次触发都必须留痕（审计 + 告警），绝不静默。
 FEED_AUTO_DISABLE_PERMANENT = max(0, int(_env("FEED_AUTO_DISABLE_PERMANENT", "0")))
+# ---- 健康历史（P1-19）----
+# 逐轮抓取事件的保留天数。趋势窗口的上限——想看 90 天趋势就调大它。
+FEED_HEALTH_KEEP_DAYS = max(1, int(_env("FEED_HEALTH_KEEP_DAYS", "30")))
+# 源列表上「近期成功率」的统计窗口（天）。它回答的不是"现在挂没挂"，
+# 而是"这个源最近靠不靠谱"——7 天足以看出退化，又不至于被一次偶发抖动带偏。
+FEED_HEALTH_LIST_DAYS = max(1, int(_env("FEED_HEALTH_LIST_DAYS", "7")))

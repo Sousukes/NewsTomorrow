@@ -5,14 +5,24 @@ import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import { CHANNELS, channelLabel, type Channel } from '@/constants/channels';
-import { createSource, deleteSource, fetchSources, resetSources, updateSource } from '@/api/admin';
+import {
+  createSource,
+  deleteSource,
+  fetchSourceHealth,
+  fetchSources,
+  resetSources,
+  updateSource,
+} from '@/api/admin';
+import SourceHealthTrend from '@/components/SourceHealthTrend.vue';
 import { useUserStore } from '@/stores/user';
-import type { RssSourceItem } from '@/types';
+import type { RssSourceItem, SourceHealth } from '@/types';
 
 const router = useRouter();
 const user = useUserStore();
 
 const list = ref<RssSourceItem[]>([]);
+/** 列表摘要的统计窗口（P1-19，由后端下发） */
+const healthDays = ref(7);
 const loading = ref(false);
 const error = ref('');
 /** 403：当前账号不在白名单内（入口被隐藏后仍可能手敲网址到达） */
@@ -221,7 +231,10 @@ async function load() {
   error.value = '';
   denied.value = false;
   try {
-    const rows = await fetchSources();
+    const page = await fetchSources();
+    const rows = page.list;
+    // 窗口天数随列表一起下发：成功率不带时间范围就是个无法解读的数字
+    healthDays.value = page.healthDays;
     list.value = rows;
     // 选择态去枯：刚拉到的列表里已不存在的 key 不再算选中（可能被他人删除）
     if (selected.value.size) {
@@ -417,6 +430,66 @@ function cooldownText(s: RssSourceItem): string {
   if (Number.isNaN(t) || t <= Date.now()) return '';
   return `冷却至 ${formatTime(until)}`;
 }
+
+// ------------------------------ 健康趋势（P1-19） ------------------------------
+
+/**
+ * 趋势**就地展开**，与内联编辑同一套路：为一个只读面板引入弹层不值得。
+ * 一次只展开一个——同时铺三张 30 天的序列，页面会变成一堵墙。
+ */
+const trendKey = ref('');
+const trendHealth = ref<SourceHealth | null>(null);
+const trendLoading = ref(false);
+const trendError = ref('');
+
+async function toggleTrend(s: RssSourceItem) {
+  if (trendKey.value === s.key) {
+    trendKey.value = '';
+    trendHealth.value = null;
+    trendError.value = '';
+    return;
+  }
+  trendKey.value = s.key;
+  trendHealth.value = null;
+  trendError.value = '';
+  trendLoading.value = true;
+  try {
+    trendHealth.value = await fetchSourceHealth(s.key);
+  } catch (e) {
+    // 趋势是排障辅助：它挂了不该把整个源列表页变成错误页
+    trendError.value = message(e, '加载健康趋势失败');
+  } finally {
+    trendLoading.value = false;
+  }
+}
+
+/**
+ * 列表上的近期成功率（P1-19）。
+ *
+ * `health` 为 null（窗口内没抓过）时整段不显示，而不是显示 0%——
+ * "没抓过"多半说明源停用或服务没跑，和"抓了全挂"的处置完全不同。
+ */
+function healthText(s: RssSourceItem): string {
+  const h = s.health;
+  if (!h || !h.attempts || h.rate === null) return '';
+  return `近 ${healthDays.value} 天 ${Math.round(h.rate * 100)}%`;
+}
+
+/** 成功率越低越显眼：列表上要能一眼挑出"该点进去看细节"的那个源 */
+function healthTone(s: RssSourceItem): string {
+  const r = s.health?.rate;
+  if (r === null || r === undefined) return '';
+  if (r < 0.5) return 'is-bad';
+  if (r < 0.9) return 'is-warn';
+  return '';
+}
+
+function healthTitle(s: RssSourceItem): string {
+  const h = s.health;
+  if (!h) return '';
+  const avg = h.avgItems === null ? '—' : `${h.avgItems} 条`;
+  return `近 ${healthDays.value} 天：${h.attempts} 次尝试，成功轮均 ${avg}。点击查看完整趋势`;
+}
 </script>
 
 <template>
@@ -598,6 +671,15 @@ function cooldownText(s: RssSourceItem): string {
               {{ statusText(s) }}
             </span>
             <span v-if="s.lastItemCount !== null">最近 {{ s.lastItemCount }} 条</span>
+            <!-- P1-19：近期成功率。"一直绿但条数在掉"这类退化，只有这个能看出来 -->
+            <span
+              v-if="healthText(s)"
+              class="admin__health"
+              :class="healthTone(s)"
+              :title="healthTitle(s)"
+            >
+              {{ healthText(s) }}
+            </span>
             <span v-if="s.lastFetchedAt">{{ formatTime(s.lastFetchedAt) }}</span>
             <!-- 关闭 robots 是「主动破例」，必须在列表上可见，否则会悄悄累积成无人记得的特例 -->
             <span
@@ -645,7 +727,25 @@ function cooldownText(s: RssSourceItem): string {
             >
               历史
             </button>
+            <!-- P1-19：健康趋势。列表只给"近 N 天成功率"，细节在这里就地展开 -->
+            <button
+              type="button"
+              :aria-label="`查看 ${s.name} 的健康趋势`"
+              :aria-expanded="trendKey === s.key"
+              @click="toggleTrend(s)"
+            >
+              {{ trendKey === s.key ? '收起趋势' : '趋势' }}
+            </button>
             <button type="button" class="is-danger" @click="pendingDelete = s">删除</button>
+          </div>
+
+          <div v-if="trendKey === s.key" class="admin__trend">
+            <p v-if="trendLoading" class="admin__hint">趋势加载中…</p>
+            <p v-else-if="trendError" class="admin__banner" role="alert">
+              <span>{{ trendError }}</span>
+              <button type="button" aria-label="关闭提示" @click="trendError = ''">×</button>
+            </p>
+            <SourceHealthTrend v-else-if="trendHealth" :health="trendHealth" />
           </div>
 
           <!-- 内联编辑：就地展开，避免为一个小表单引入弹层 -->
@@ -1149,6 +1249,35 @@ function cooldownText(s: RssSourceItem): string {
   color: #2f6690;
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* P1-19：近期成功率。默认中性——绝大多数源是健康的，不该满屏告警色 */
+.admin__health {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--color-page-bg);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin__health.is-warn {
+  background: #fdf3e6;
+  color: #8a5a13;
+}
+
+.admin__health.is-bad {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.admin__trend {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-page-bg);
 }
 
 .admin__key {

@@ -173,7 +173,8 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | POST | `/api/me/history` | ✅ | 记录浏览（同一资讯只刷新时间；资讯不存在时静默忽略） |
 | PUT | `/api/me/history` | ✅ | **并集合并**本地历史，随后按上限裁剪 |
 | DELETE | `/api/me/history` | ✅ | 清空浏览历史 |
-| GET | `/api/admin/sources` | ✅ 管理员 | RSS 源列表（含抓取健康状态与 `respectRobots` 开关），返回 `{ list, total }`；读取前自动播种内置源 |
+| GET | `/api/admin/sources` | ✅ 管理员 | RSS 源列表（含抓取健康状态、`respectRobots` 开关与**近期健康摘要**），返回 `{ list, total, healthDays }`；读取前自动播种内置源。`list[].health` 为 `{ attempts, rate, avgItems }` 或 `null`（窗口内没抓过），`rate` 为 `null` 表示**没有尝试**而非"全失败" |
+| GET | `/api/admin/sources/{key}/health?days=` | ✅ 管理员 | **单源健康趋势**（P1-19）：返回 `{ key, days, keepDays, summary, points, failures }`。`days` 会被收敛到保留期；`points` 按天分桶且**缺的天不补零**（空白 = 那天没抓它）；`failures` 只列失败并带 `kind` |
 | POST | `/api/admin/sources` | ✅ 管理员 | 新增源；`key` 冲突 409、非 http(s) 地址 400 |
 | PATCH | `/api/admin/sources/{key}` | ✅ 管理员 | 局部更新（名字/频道/地址/权重/启停/是否遵守 robots），未传字段保持不变；不存在 404 |
 | DELETE | `/api/admin/sources/{key}` | ✅ 管理员 | 删除源；不存在 404 |
@@ -403,6 +404,62 @@ FEED_AUTO_DISABLE_PERMANENT=0     # 连续「永久性」失败达此次数则�
 `连续 3 次失败：ReadTimeout（可重试，系统会自动继续尝试）`。
 老数据没有 `failure_kind` 时退化为 `连续 N 次失败`，不猜。
 
+### 源健康历史与趋势（迁移 0019）
+
+P1-16~P1-18 把「当前状态」做到了位，但那始终只是**一个点**：
+`last_status` 只有"现在挂没挂"，`last_item_count` 只有"最近一次抓到几条"，
+`consecutive_failures` 只有"连着挂了几次"。没有时间维度，这几个问题就都答不了：
+
+| 问题 | 为什么当前字段答不了 |
+| --- | --- |
+| 它是今天才开始烂的，还是已经烂了两周？ | 没有历史，只有最后一次的结果 |
+| 是不是每天凌晨固定抖？ | 单点看不出规律，只会以为是随机抖动 |
+| 上次改了地址/权重，有好转吗？ | 改动前的基线没有留存 |
+| **一直返回成功，但条数从 30 掉到 3 条？** | **它永远是绿的——结构性看不见** |
+
+**① 存原始事件，不存每日聚合**（`rss_source_health_events`，每轮一行）。
+理由与 `SearchLog` 同源：聚合表只能表达"历史累计"，事后想换个窗口（7 天 / 30 天）
+重看就没数据了。代价是需要清理，见 ③。
+
+**② 只记真实尝试**。按礼仪或熔断跳过的源本轮根本没发请求，
+给它记一行会伪造出"尝试过"的痕迹——与「跳过的源不刷新健康状态」是**同一条口径**
+（`run_ingest` 的 `finally` 里与 `record_fetch_result` 相邻，两处各自提交、各自吞异常）。
+因此趋势图上的空白 = 那时没抓它，**不是失败**；前端据此铺格子，缺的天不补零
+（补零会把"没抓"伪装成"抓了但全失败"）。
+
+**③ 按时间清理，不设条数保底**（`FEED_HEALTH_KEEP_DAYS`，默认 30 天）。
+与 `prune_old_news` 的 `keep_min` 刻意不同：健康历史是排障取证用的，
+保底条数只会留下一堆最旧的噪音，而"最近 N 天"就是它的全部价值。
+同样刻意不建 `at` 单列索引——清理查询在两万行量级上全表扫描只要几毫秒，
+不值得为此拖慢每轮十几次写入；只建复合索引 `(source_key, at)`。
+
+**④ `avgItems` 取成功轮次的平均**，不是全部轮次：失败轮天然 0 条，
+混进来会让"条数退化"被失败率掩盖——而这正是本批要抓的第二类隐形故障。
+`rate` 在无尝试时返回 **None 而不是 0**：`0` 会把"没抓过"伪装成"全挂了"，
+运营会去排查一个根本没跑过的源。
+
+**⑤ 列表只放摘要，趋势放单源**。`GET /api/admin/sources` 每行附 `health`
+（`attempts` / `rate` / `avgItems`，一条 GROUP BY 查全部源，避免 N+1）与
+`healthDays`；列表回答"哪个源值得点进去"，`GET /api/admin/sources/{key}/health`
+才回答"**它到底怎么了**"——三段数据各有分工：
+
+```
+summary  窗口总览（成功率 / 成功轮均条数）  → 是抖动，还是持续恶化？
+points   按天序列                            → 是不是每天固定挂（对方维护窗口）
+failures 最近失败原文 + kind                 → 要不要去改 URL / 换源
+```
+
+`days` 由 `window_days()` 收敛到保留期：请求 90 天而只留 30 天，只会得到 60 个空格子。
+响应回传实际生效的 `days` 与 `keepDays`，前端才能正确标注时间范围、
+并向运营解释"为什么最多只能看这么久"。
+
+**⑥ 环境变量**（默认 `30` / `7`）：
+
+```bash
+FEED_HEALTH_KEEP_DAYS=30   # 健康事件保留天数；过期即无意义，按时间删不保底
+FEED_HEALTH_LIST_DAYS=7    # 列表页摘要窗口（短于趋势窗口：列表看"最近怎么样"）
+```
+
 ## 数据库迁移（Alembic）
 
 ```bash
@@ -431,7 +488,9 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0016_admin_audit_logs`（运营审计 `admin_audit_logs`，记录谁改了什么）、
   `0017_fetch_politeness`（抓取礼仪 `rss_sources.respect_robots` + 告警节流 `last_alerted_at`）、
   `0018_fetch_failure_grading`（失败分级与熔断 `consecutive_failures` / `failure_kind` /
-  `next_retry_at`）。
+  `next_retry_at`）、
+  `0019_source_health_events`（源健康历史 `rss_source_health_events`，每轮抓取一行 +
+  复合索引 `ix_rss_health_key_at`，随源级联删除）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -627,7 +686,7 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 ## 单元测试
 
 ```bash
-pytest -q          # 321 项
+pytest -q          # 385 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -651,11 +710,26 @@ pytest -q          # 321 项
   永久失败**不消耗重试次数**、成功即清零、阈值前后 `next_retry_at` 有无、
   冷却期内不抓且不刷新健康、到期自愈、自动禁用默认关闭且开启时**必写审计**、
   告警文案区分永久/临时并带连续次数）。
-- `tests/test_migrations.py`（18 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+- `tests/test_health_history.py`（43 项）：**源健康历史与趋势**（P1-19）——记录（成败都记、
+  **错误截断到列宽 300**、纯空白存 null、**写失败不抛**、清理失败返回 0）、
+  窗口汇总（**无尝试时 `rate` 为 `None` 而非 0**、`avgItems` 只算成功轮次、
+  最后一次成功/失败分开记、窗口外事件不计入）、按天分桶（升序、同天合并、
+  **缺的天不补零**、无事件返空）、最近失败（只列失败且新的在前、limit、
+  `kind` 透传）、清理（只删过期的、`keep_days` 参数、无删除返 0）、
+  窗口收敛（默认/超出/合法/垃圾天数）、多源一次查（单条 GROUP BY、
+  **无事件的源不出现在结果里**、空入参短路）、
+  **两类隐形故障**（成功率满分但条数 30→3 单调下滑、
+  失败集中在同一钟点的规律抖动）、接口（三段数据齐全、`days` 收敛、
+  显式 `days` 生效、未知源 404、非管理员 403、匿名 401）、
+  列表（带 `health` 与 `healthDays`、**新源 `health` 为 null**、列表窗口短于趋势窗口）、
+  写入侧集成（**每个真实尝试写一行**、礼仪跳过与熔断跳过**都不写**）。
+- `tests/test_migrations.py`（19 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
   与 `ix_news_hot`、`rss_sources` 的列与主键（含 0017 的 `respect_robots` **非空**与
-  `last_alerted_at`、0018 的 `consecutive_failures` **非空**与 `failure_kind` / `next_retry_at`）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
+  `last_alerted_at`、0018 的 `consecutive_failures` **非空**与 `failure_kind` / `next_retry_at`）、
+  `rss_source_health_events` 的列与 `item_count` 非空、复合索引 `ix_rss_health_key_at`
+  与外键（0019）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
   秒级时间戳下**同一条评论同一用户重复点赞只留一行**、悬空/非整数 user_id 被跳过、
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的
@@ -708,9 +782,10 @@ pytest -q          # 321 项
 
 > 前端契约自检：`node scripts/contract-check.mjs`（**47 项**，含 18 项二级评论契约，需传 `DEMO_PASSWORD` 登录）。
 > 加 `CHECK_ADMIN=1` 且在 `ADMIN_PHONES` 内的账号登录，可额外校验 `/api/admin/sources`
-> 的增删改与协议白名单，以及 `/api/admin/users` 的白名单增删、重复/自添加拦截、
-> `addedBy` 与 404、`/api/admin/audit` 的留痕与游标分页
-> （共 72 项；mock 后端同样支持，见前端 README）。
+> 的增删改与协议白名单，`/api/admin/users` 的白名单增删、重复/自添加拦截、
+> `addedBy` 与 404、`/api/admin/audit` 的留痕与游标分页，
+> 以及 `/api/admin/sources/{key}/health` 的趋势形状、`days` 收敛与越界 422、未知源 404
+> （共 83 项；mock 后端同样支持，见前端 README）。
 
 ## 错误码
 

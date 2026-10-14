@@ -36,6 +36,7 @@ EXPECTED_TABLES = (
     "rss_sources",
     "admin_users",
     "admin_audit_logs",
+    "rss_source_health_events",
 )
 
 
@@ -186,6 +187,28 @@ class TestMigrationChain:
             c for c in insp.get_columns("rss_sources") if c["name"] == "consecutive_failures"
         )
         assert col["nullable"] is False
+
+    def test_source_health_events_table(self, chain_db):
+        """0019：源健康历史（P1-19）。
+
+        钉住三件容易在后续改动里悄悄丢掉的事：
+        - `ok` 与 `item_count` **分开**存——失败轮次天然 0 条，混在一起会让
+          "成功但条数持续下滑"这唯一的退化信号被失败率掩盖；
+        - 复合索引 `(source_key, at)`——主查询是「某源最近 N 天」；
+        - 外键 CASCADE——源删了，它的历史也失去可解释的对象。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("rss_source_health_events")}
+        assert {"id", "source_key", "ok", "item_count", "error", "kind", "at"} <= cols
+        col = next(
+            c for c in insp.get_columns("rss_source_health_events") if c["name"] == "item_count"
+        )
+        assert col["nullable"] is False  # 缺失会被当成"0 条"，与"没抓到"混淆
+        names = {i["name"] for i in insp.get_indexes("rss_source_health_events")}
+        # 刻意不建 at 单列索引：清理查询全表扫描只要几毫秒，不值得拖慢每轮写入
+        assert "ix_rss_health_key_at" in names
+        fks = insp.get_foreign_keys("rss_source_health_events")
+        assert any(fk["referred_table"] == "rss_sources" for fk in fks)
 
     def test_admin_audit_logs_table(self, chain_db):
         """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""

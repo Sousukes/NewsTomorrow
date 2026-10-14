@@ -13,6 +13,10 @@ P1-18 失败分级：
 - 连续失败**落库计数**（`consecutive_failures`），达阈值进入**熔断**
   （冷却期内整轮跳过，且不动健康状态）；
 - 失败**性质**（`failure_kind`）一路带回主线程——异常跨线程常被 `str(e)` 抹平。
+
+P1-19 健康历史：
+- 每轮为每个**真实尝试过**的源写一行 `rss_source_health_events`（跳过的源不记）；
+- 历史是唯一能看见「规律性抖动」与「成功但条数持续下滑」的地方。
 """
 import logging
 import random
@@ -46,6 +50,7 @@ from .fetcher import (
     fetch_source,
     robots_check,
 )
+from .health import record_event as record_health_event
 from .sources import all_enabled_sources, record_fetch_result, sources_for_channel
 
 logger = logging.getLogger("toutiao.ingest")
@@ -457,6 +462,12 @@ def run_ingest(
                 continue
             record_fetch_result(
                 db, st["key"], st["ok"], st["count"], st["error"], kind=st.get("kind")
+            )
+            # P1-19 健康历史：与上面**同口径**——跳过的源本轮没发请求，不记事件
+            #（否则趋势图会伪造出"尝试过"的痕迹）。两者各自提交、各自吞异常：
+            # 都是旁路排障信息，一条写不进去不该连累另一条。
+            record_health_event(
+                db, st["key"], st["ok"], st["count"], st.get("error"), st.get("kind")
             )
         # 告警是本轮的收尾动作：源挂了要有人被通知，而不是等人去翻列表。
         # 放在 finally 里，抓取阶段异常时也能基于已有健康状态发出告警。

@@ -19,9 +19,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse
 
-from ..config import ADMIN_PHONES
+from ..config import ADMIN_PHONES, FEED_HEALTH_KEEP_DAYS, FEED_HEALTH_LIST_DAYS
 from ..database import get_db
 from ..deps import get_current_user
+from ..feeds.health import daily_points, recent_failures, summarize, summarize_many, window_days
 from ..feeds.sources import BUILTIN_SOURCES, ensure_seeded
 from ..models import AdminAuditLog, AdminUser, RssSource, User, now_str
 from ..response import ok
@@ -91,7 +92,7 @@ def _validate_url(url: str) -> None:
         )
 
 
-def _out(row: RssSource) -> dict:
+def _out(row: RssSource, health: dict | None = None) -> dict:
     return {
         "key": row.key,
         "name": row.name,
@@ -110,6 +111,11 @@ def _out(row: RssSource) -> dict:
         "consecutiveFailures": row.consecutive_failures or 0,
         "failureKind": row.failure_kind,
         "nextRetryAt": row.next_retry_at,
+        # P1-19：近期成功率。`rate` 为 None 表示"窗口内没抓过"，
+        # 与"抓了但全失败"是两回事——前端据此才能区分「近期无数据」与「近期全挂」。
+        # 单源趋势页用的也是同一份数据，这里只放摘要：列表页的核心问题是
+        # "该点进哪个源看细节"，而不是复刻趋势图。
+        "health": health,
     }
 
 
@@ -117,11 +123,61 @@ def _out(row: RssSource) -> dict:
 def list_sources(
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
-    """源列表（含抓取健康状态）。"""
+    """源列表（含抓取健康状态 + **近期成功率**）。
+
+    成功率取自 P1-19 的健康历史（一次 GROUP BY 查全部源，避免 N+1）：
+    「现在挂没挂」是 P1-16 就有的信息，列表上真正缺的是
+    "**哪个源在悄悄退化**"——一个源可以一直绿着，但条数在持续下滑。
+    """
     _require_admin(user, db)
     ensure_seeded(db)
     rows = db.query(RssSource).order_by(RssSource.weight.desc(), RssSource.key).all()
-    return ok({"list": [_out(r) for r in rows], "total": len(rows)})
+    health = summarize_many(db, [r.key for r in rows], FEED_HEALTH_LIST_DAYS)
+    return ok(
+        {
+            "list": [_out(r, health.get(r.key)) for r in rows],
+            "total": len(rows),
+            # 前端要标出"近 N 天"，否则 96% 这个数字没有时间范围就是误导
+            "healthDays": FEED_HEALTH_LIST_DAYS,
+        }
+    )
+
+
+@router.get("/sources/{key}/health", response_model=None)
+def source_health(
+    key: str,
+    days: int | None = Query(None, ge=1, le=365, description="回溯天数，默认取保留期"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """单源健康趋势（P1-19）：汇总 + 按天序列 + 最近失败明细。
+
+    与列表页的区别：列表回答"哪个源值得点进来"，这里回答"**它到底怎么了**"。
+    三段数据各有分工，缺一段就答不全：
+
+    - `summary`——窗口总览（成功率 / 成功轮均条数），判断"是抖动还是持续恶化"；
+    - `points`——按天序列，判断"是不是每天凌晨固定挂"（对方维护窗口，别乱改配置）；
+    - `failures`——失败原文，判断"要不要去改 URL / 换源"。
+
+    `days` 会被收敛到保留期：请求 90 天而只留 30 天，只会得到 60 个空格子。
+    响应里回传实际生效的 `days`，前端才能正确标注时间范围。
+    """
+    _require_admin(user, db)
+    ensure_seeded(db)
+    if db.get(RssSource, key) is None:
+        raise HTTPException(status_code=404, detail={"code": 40402, "message": "源不存在"})
+    win = window_days(days)
+    return ok(
+        {
+            "key": key,
+            "days": win,
+            # 保留期一并发给前端：窗口被收敛时，界面要能解释"为什么最多只能看 30 天"
+            "keepDays": FEED_HEALTH_KEEP_DAYS,
+            "summary": summarize(db, key, win),
+            "points": daily_points(db, key, win),
+            "failures": recent_failures(db, key, win),
+        }
+    )
 
 
 @router.post("/sources", response_model=None)

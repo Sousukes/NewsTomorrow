@@ -289,6 +289,48 @@ class RssSource(Base):
     __table_args__ = (Index("ix_rss_sources_channel_enabled", "channel", "enabled"),)
 
 
+class RssSourceHealthEvent(Base):
+    """源健康历史（P1-19）：**每轮抓取一行**，回答"它是什么时候开始烂的"。
+
+    P1-16~P1-18 把「当前状态」做到了位（robots / 告警 / 失败分级 / 熔断），
+    但健康字段只有"最近一次"——**没有时间维度**，于是这几个问题都答不了：
+
+    - "这个源是今天才开始挂的，还是已经烂了两周？"（决定要不要现在处理）
+    - "是不是每天凌晨固定抖？"（规律性 = 对方维护窗口，不是我们的锅）
+    - "上次改了地址/权重，有好转吗？"（改动效果无从验证）
+    - **"源一直返回成功，但条数从 30 条掉到 3 条"**——
+      它永远是绿的，其实已经废了。这是当前设计**结构性看不见**的一类故障。
+
+    存**原始事件**而非每日聚合表，理由与 `SearchLog` 同源：聚合表只能算出
+    "历史累计"，无法回答"近期趋势"，也无法事后换窗口重新看。代价是需要清理。
+
+    **只记录真实尝试**：按礼仪/熔断跳过的源本轮根本没发请求，
+    留一行会伪造出"尝试过"的痕迹——与「跳过的源不刷新健康状态」同一条口径。
+    因此趋势图上的空白 = 我们那时没抓它，不是失败。
+    """
+
+    __tablename__ = "rss_source_health_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 源被删除时其历史一并删除：留着没有可解释的对象，只会越积越多
+    source_key = Column(
+        String(64), ForeignKey("rss_sources.key", ondelete="CASCADE"), nullable=False
+    )
+    ok = Column(Boolean, nullable=False)
+    # 本轮入库条数。**重点看它的长期趋势**——"成功但越来越少"是半死不活的典型
+    item_count = Column(Integer, nullable=False, default=0)
+    error = Column(String(300))
+    # 失败性质（transient / permanent），与 P1-18 `failure_kind` 同义，成功时为空
+    kind = Column(String(20))
+    # 绝对 ISO 时间（与其它表的字符串时间口径一致）
+    at = Column(String(30), nullable=False, default=now_str)
+
+    __table_args__ = (
+        # 主查询是「某源最近 N 天」，复合索引让范围扫描落在索引上
+        Index("ix_rss_health_key_at", "source_key", "at"),
+    )
+
+
 class AdminAuditLog(Base):
     """运营审计：谁在什么时候改了什么（P1-15）。
 

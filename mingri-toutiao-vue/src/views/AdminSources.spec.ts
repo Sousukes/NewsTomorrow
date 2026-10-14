@@ -3,7 +3,9 @@ import { mount } from '@vue/test-utils';
 
 // 源管理没有 mock 短路：整条链路都打桩在 api 层，与 `stores/comments.spec.ts` 同思路
 vi.mock('@/api/admin', () => ({
-  fetchSources: vi.fn(async () => []),
+  // P1-19 起列表接口返回 { list, healthDays }：成功率必须带时间范围
+  fetchSources: vi.fn(async () => ({ list: [], healthDays: 7 })),
+  fetchSourceHealth: vi.fn(async () => ({})),
   createSource: vi.fn(async () => ({})),
   updateSource: vi.fn(async () => ({})),
   deleteSource: vi.fn(async () => undefined),
@@ -21,7 +23,7 @@ vi.mock('vue-router', () => ({
 
 import AdminSources from './AdminSources.vue';
 import * as adminApi from '@/api/admin';
-import type { RssSourceItem } from '@/types';
+import type { RssSourceItem, SourceHealth } from '@/types';
 
 const source = (over: Partial<RssSourceItem> = {}): RssSourceItem => ({
   key: 'aihot_picks',
@@ -39,6 +41,38 @@ const source = (over: Partial<RssSourceItem> = {}): RssSourceItem => ({
   consecutiveFailures: 0,
   failureKind: null,
   nextRetryAt: null,
+  // P1-19：默认"近期没有抓取记录"（与"抓了全挂"是两回事，需要覆盖的用例自行给值）
+  health: null,
+  ...over,
+});
+
+/** 列表接口现在返回 { list, healthDays }；多数用例只关心列表本身，这里包一层 */
+const mockList = (rows: RssSourceItem[]) =>
+  vi.mocked(adminApi.fetchSources).mockResolvedValue({ list: rows, healthDays: 7 });
+
+/** 单源健康趋势（P1-19）：默认"一直成功但条数在下滑"——最能体现趋势页价值的一类 */
+const HEALTH = (over: Partial<SourceHealth> = {}): SourceHealth => ({
+  key: 'aihot_picks',
+  days: 30,
+  keepDays: 30,
+  summary: {
+    attempts: 10,
+    ok: 10,
+    failed: 0,
+    rate: 1,
+    items: 170,
+    avgItems: 17,
+    lastOkAt: '2026-10-15T09:00:00',
+    lastFailAt: null,
+  },
+  points: [
+    { date: '2026-10-11', total: 1, ok: 1, failed: 0, items: 30, rate: 1 },
+    { date: '2026-10-12', total: 1, ok: 1, failed: 0, items: 24, rate: 1 },
+    { date: '2026-10-13', total: 1, ok: 1, failed: 0, items: 18, rate: 1 },
+    { date: '2026-10-14', total: 1, ok: 1, failed: 0, items: 9, rate: 1 },
+    { date: '2026-10-15', total: 1, ok: 1, failed: 0, items: 4, rate: 1 },
+  ],
+  failures: [],
   ...over,
 });
 
@@ -61,11 +95,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   userState.isLoggedIn = true;
   userState.isAdmin = true;
-  vi.mocked(adminApi.fetchSources).mockResolvedValue([]);
+  mockList([]);
   vi.mocked(adminApi.updateSource).mockResolvedValue(source());
   vi.mocked(adminApi.createSource).mockResolvedValue(source({ key: 'demo' }));
   vi.mocked(adminApi.deleteSource).mockResolvedValue(undefined);
   vi.mocked(adminApi.resetSources).mockResolvedValue(14);
+  vi.mocked(adminApi.fetchSourceHealth).mockResolvedValue(HEALTH());
 });
 
 describe('views/AdminSources', () => {
@@ -78,7 +113,7 @@ describe('views/AdminSources', () => {
   });
 
   it('管理员加载后渲染源列表与抓取健康状态', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source(),
       source({
         key: 'people_politics',
@@ -106,7 +141,7 @@ describe('views/AdminSources', () => {
   });
 
   it('开关切换走 PATCH 局部更新，只传 enabled', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    mockList([source()]);
     const w = mountPage();
     await settle(w);
 
@@ -115,7 +150,7 @@ describe('views/AdminSources', () => {
   });
 
   it('开关失败时回滚本地状态，避免界面与服务端不一致', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    mockList([source()]);
     vi.mocked(adminApi.updateSource).mockRejectedValue(new Error('启停失败'));
     const w = mountPage();
     await settle(w);
@@ -130,7 +165,7 @@ describe('views/AdminSources', () => {
   });
 
   it('删除需二次确认，确认后才真正调用接口', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    mockList([source()]);
     const w = mountPage();
     await settle(w);
 
@@ -184,7 +219,7 @@ describe('views/AdminSources', () => {
   });
 
   it('新增表单合法时提交并刷新列表', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([]);
+    mockList([]);
     const w = mountPage();
     await new Promise((r) => setTimeout(r, 0));
     await w
@@ -219,7 +254,7 @@ describe('views/AdminSources', () => {
   });
 
   it('恢复内置源需二次确认', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    mockList([source()]);
     const w = mountPage();
     await settle(w);
 
@@ -244,7 +279,7 @@ describe('views/AdminSources', () => {
 
 describe('views/AdminSources 搜索与筛选', () => {
   it('搜索按名称 / 地址 / 标识过滤，无结果时给出清除入口', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source(),
       source({
         key: 'people_politics',
@@ -285,7 +320,7 @@ describe('views/AdminSources 搜索与筛选', () => {
   });
 
   it('按频道筛选：只显示该频道的源', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source(),
       source({ key: 'people_politics', name: '人民网·时政', channel: 'recommend' }),
     ]);
@@ -305,7 +340,7 @@ describe('views/AdminSources 搜索与筛选', () => {
   });
 
   it('按状态筛选：只看异常源', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source(),
       source({ key: 'bad_feed', name: '坏源', lastStatus: 'error', lastError: 'timeout' }),
     ]);
@@ -329,7 +364,7 @@ describe('views/AdminSources 搜索与筛选', () => {
 
 describe('views/AdminSources 健康汇总', () => {
   it('汇总四计数正确，点数字即筛选、再点取消', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source({ key: 'a' }),
       source({ key: 'bad_feed', name: '坏源', lastStatus: 'error' }),
       source({ key: 'fresh_one', name: '新源', lastStatus: null }),
@@ -357,7 +392,7 @@ describe('views/AdminSources 健康汇总', () => {
   });
 
   it('异常源置顶显示，组内保持权重降序', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source({ key: 'k_high', name: '高权重正常源', weight: 10, lastStatus: 'ok' }),
       source({ key: 'k_low', name: '低权重正常源', weight: 2, lastStatus: 'ok' }),
       source({ key: 'k_bad', name: '异常源', weight: 1, lastStatus: 'error' }),
@@ -380,7 +415,7 @@ describe('views/AdminSources 批量操作', () => {
   ];
 
   it('进入批量模式出现多选与操作条，全选只作用于当前可见项', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue(three());
+    mockList(three());
     const w = mountPage();
     await settle(w);
 
@@ -420,7 +455,7 @@ describe('views/AdminSources 批量操作', () => {
   });
 
   it('批量启用：逐个调用接口、本地状态更新、成功后清空选择', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue(three());
+    mockList(three());
     const w = mountPage();
     await settle(w);
 
@@ -445,7 +480,7 @@ describe('views/AdminSources 批量操作', () => {
   });
 
   it('批量启停部分失败：失败项回滚并汇总提示', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue(three());
+    mockList(three());
     vi.mocked(adminApi.updateSource).mockImplementation(async (key: string) => {
       if (key === 'b') throw new Error('network');
       return source();
@@ -478,7 +513,7 @@ describe('views/AdminSources 批量操作', () => {
   });
 
   it('批量删除：二次确认后逐个删除并移出列表', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue(three());
+    mockList(three());
     const w = mountPage();
     await settle(w);
 
@@ -509,7 +544,7 @@ describe('views/AdminSources 批量操作', () => {
   });
 
   it('批量模式下不渲染单项编辑/删除与开关（交互不叠加）', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue(three());
+    mockList(three());
     const w = mountPage();
     await settle(w);
 
@@ -531,23 +566,21 @@ describe('views/AdminSources 批量操作', () => {
 
 describe('views/AdminSources robots 开关', () => {
   it('默认遵守时列表不出现「忽略 robots」标记', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    mockList([source()]);
     const w = mountPage();
     await settle(w);
     expect(w.find('.admin__robots-off').exists()).toBe(false);
   });
 
   it('关闭遵守的源在列表上留下可见标记', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
-      source({ key: 'strict_feed', name: '严格源', respectRobots: false }),
-    ]);
+    mockList([source({ key: 'strict_feed', name: '严格源', respectRobots: false })]);
     const w = mountPage();
     await settle(w);
     expect(w.find('.admin__robots-off').text()).toContain('忽略 robots');
   });
 
   it('编辑表单取消勾选后 PATCH 带上 respectRobots=false', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([source()]);
+    mockList([source()]);
     const w = mountPage();
     await settle(w);
 
@@ -597,7 +630,7 @@ describe('views/AdminSources robots 开关', () => {
 // 而是"我是该等它自己恢复，还是得去改配置"——这两类必须看起来不一样。
 describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
   it('连续失败 + 永久性 → 红色标签写明次数与性质', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source({
         key: 'dead_src',
         name: '死源',
@@ -616,7 +649,7 @@ describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
   });
 
   it('可重试失败用中性样式，且不带 is-permanent', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source({
         lastStatus: 'error',
         lastError: 'ReadTimeout',
@@ -633,9 +666,7 @@ describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
   });
 
   it('只失败一次且无性质时不出标签：偶发抖动多显示一格就是噪音', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
-      source({ lastStatus: 'error', lastError: 'HTTP 500', consecutiveFailures: 1 }),
-    ]);
+    mockList([source({ lastStatus: 'error', lastError: 'HTTP 500', consecutiveFailures: 1 })]);
     const w = mountPage();
     await settle(w);
     // 状态仍然是"异常"，只是不再追加失败性质标签
@@ -644,9 +675,7 @@ describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
   });
 
   it('正常的源不出现任何失败标签', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
-      source({ lastStatus: 'ok', consecutiveFailures: 5, failureKind: 'transient' }),
-    ]);
+    mockList([source({ lastStatus: 'ok', consecutiveFailures: 5, failureKind: 'transient' })]);
     const w = mountPage();
     await settle(w);
     expect(w.find('.admin__failure').exists()).toBe(false);
@@ -654,9 +683,7 @@ describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
 
   it('熔断冷却期内显示恢复时间，过期后不再显示', async () => {
     const future = new Date(Date.now() + 25 * 60 * 1000).toISOString();
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
-      source({ key: 'cb', lastStatus: 'error', nextRetryAt: future }),
-    ]);
+    mockList([source({ key: 'cb', lastStatus: 'error', nextRetryAt: future })]);
     const w = mountPage();
     await settle(w);
 
@@ -665,7 +692,7 @@ describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
     expect(tag.text()).toMatch(/^冷却至 \d{2}-\d{2} \d{2}:\d{2}$/);
 
     // 同一个源过了冷却点：再显示"冷却至…"就是在骗人
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+    mockList([
       source({
         key: 'cb',
         lastStatus: 'error',
@@ -678,12 +705,103 @@ describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
   });
 
   it('冷却时间是垃圾字符串时静默跳过，不渲染 NaN', async () => {
-    vi.mocked(adminApi.fetchSources).mockResolvedValue([
-      source({ key: 'cb', lastStatus: 'error', nextRetryAt: '不是时间' }),
-    ]);
+    mockList([source({ key: 'cb', lastStatus: 'error', nextRetryAt: '不是时间' })]);
     const w = mountPage();
     await settle(w);
     expect(w.find('.admin__cooldown').exists()).toBe(false);
     expect(w.text()).not.toContain('NaN');
+  });
+});
+
+// P1-19：近期成功率 + 就地展开的趋势面板。
+describe('views/AdminSources（健康历史与趋势，P1-19）', () => {
+  /** 找到某一行的「趋势」按钮（未展开时文案为"趋势"，展开后为"收起趋势"） */
+  const trendBtn = (w: ReturnType<typeof mountPage>) =>
+    w.findAll('button').find((b) => b.text() === '趋势');
+
+  it('有近期摘要的源显示成功率，并标注窗口天数', async () => {
+    mockList([source({ key: 's1', health: { attempts: 12, rate: 0.4, avgItems: 8 } })]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.text()).toContain('近 7 天 40%');
+    expect(w.find('.admin__health').classes()).toContain('is-bad');
+  });
+
+  it('成功率在 0.5–0.9 之间用警示色，满分为中性色', async () => {
+    mockList([
+      source({ key: 'a', health: { attempts: 12, rate: 0.8, avgItems: 8 } }),
+      source({ key: 'b', health: { attempts: 12, rate: 1, avgItems: 8 } }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+    const rows = w.findAll('.admin__health');
+    expect(rows[0].classes()).toContain('is-warn');
+    expect(rows[1].classes()).not.toContain('is-warn');
+    expect(rows[1].classes()).not.toContain('is-bad');
+  });
+
+  it('health 为 null（没抓过）时整段不显示，而不是显示 0%', async () => {
+    mockList([source({ key: 's1', health: null })]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__health').exists()).toBe(false);
+    expect(w.text()).not.toContain('近 7 天');
+  });
+
+  it('attempts 为 0 时同样不显示（与 rate===0 的"全挂"区分）', async () => {
+    mockList([source({ key: 's1', health: { attempts: 0, rate: null, avgItems: null } })]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__health').exists()).toBe(false);
+  });
+
+  it('点击「趋势」就地展开并请求单源健康数据', async () => {
+    mockList([source()]);
+    const w = mountPage();
+    await settle(w);
+    await trendBtn(w)!.trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(adminApi.fetchSourceHealth).toHaveBeenCalledWith('aihot_picks');
+    expect(w.find('.mt-health').exists()).toBe(true);
+    expect(w.text()).toContain('近 30 天成功率');
+  });
+
+  it('再次点击收起趋势面板', async () => {
+    mockList([source()]);
+    const w = mountPage();
+    await settle(w);
+    await trendBtn(w)!.trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(w.find('.mt-health').exists()).toBe(true);
+
+    const collapse = w.findAll('button').find((b) => b.text() === '收起趋势')!;
+    await collapse.trigger('click');
+    await w.vm.$nextTick();
+    expect(w.find('.mt-health').exists()).toBe(false);
+  });
+
+  it('趋势请求失败只在这一行内报错，不掀翻整个页面', async () => {
+    vi.mocked(adminApi.fetchSourceHealth).mockRejectedValue(new Error('网络错误'));
+    mockList([source()]);
+    const w = mountPage();
+    await settle(w);
+    await trendBtn(w)!.trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(w.find('.admin__trend .admin__banner').exists()).toBe(true);
+    // 列表本身还在
+    expect(w.find('.admin__list').exists()).toBe(true);
+  });
+
+  it('一次只展开一个源的趋势', async () => {
+    mockList([source({ key: 'a' }), source({ key: 'b', name: '源乙' })]);
+    const w = mountPage();
+    await settle(w);
+    await trendBtn(w)!.trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(w.findAll('.mt-health')).toHaveLength(1);
   });
 });

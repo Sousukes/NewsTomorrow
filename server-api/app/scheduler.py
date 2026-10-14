@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from .config import FEED_CRON_ENABLED, FEED_CRON_INTERVAL_MINUTES
 from .database import SessionLocal, dispose
+from .feeds.health import prune as prune_health_events
 from .feeds.ingest import FetchReport, prune_old_news, run_ingest
 from .ranking import recompute_hot_scores
 from .search_stats import prune_search_logs
@@ -92,6 +93,11 @@ def _run_once(channel: str | None = None, keyword: str | None = None) -> FetchRe
                 logs = prune_search_logs(db)
                 if logs:
                     logger.info("清理过期搜索日志：%d 条", logs)
+                # P1-19：健康历史按时间清理（不设保底条数——"最近 N 天"
+                # 就是它的全部价值，过期即无意义）
+                events = prune_health_events(db)
+                if events:
+                    logger.info("清理过期源健康事件：%d 条", events)
             except Exception as e:
                 logger.warning("清理失败（不影响抓取结果）: %s", e)
                 db.rollback()
