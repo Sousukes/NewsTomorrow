@@ -17,3 +17,8 @@ __pycache__/
 Thumbs.db
 .idea/
 .vscode/
+
+# 本地跑服务/契约检查时的临时日志（排查用，不该进仓库）
+mock-run.log
+contract-run.log
+*-run.log
