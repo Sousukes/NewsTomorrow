@@ -14,7 +14,12 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.ratelimit import FixedWindowLimiter, build_limiter  # noqa: E402
-from app.scheduler import _release_lock, _try_lock  # noqa: E402
+from app.scheduler import (  # noqa: E402
+    _ADVISORY_LOCK_KEY,
+    _HOT_ADVISORY_LOCK_KEY,
+    _release_lock,
+    _try_lock,
+)
 
 
 class TestBuildLimiter:
@@ -31,5 +36,17 @@ class TestAdvisoryLock:
     def test_sqlite_treats_as_acquired(self):
         engine = create_engine("sqlite:///:memory:")
         with sessionmaker(bind=engine)() as db:
-            assert _try_lock(db) is True
-            _release_lock(db)  # 非 PG 应为 no-op，不应抛错
+            assert _try_lock(db, _ADVISORY_LOCK_KEY) is True
+            _release_lock(db, _ADVISORY_LOCK_KEY)  # 非 PG 应为 no-op，不应抛错
+
+    def test_two_crons_use_distinct_lock_keys(self):
+        """P1-21：抓取锁与热度锁**键不同**。
+
+        两把锁键相同会让热度任务因为另一实例正在抓取而整轮跳过——
+        那等于把拆回寄生关系。SQLite 下都视为获取，故这里只钉键的区分。
+        """
+        assert _ADVISORY_LOCK_KEY != _HOT_ADVISORY_LOCK_KEY
+        engine = create_engine("sqlite:///:memory:")
+        with sessionmaker(bind=engine)() as db:
+            assert _try_lock(db, _HOT_ADVISORY_LOCK_KEY) is True
+            _release_lock(db, _HOT_ADVISORY_LOCK_KEY)

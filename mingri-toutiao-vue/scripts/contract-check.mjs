@@ -692,6 +692,14 @@ const run = async () => {
     const victim = (visibleNews.list ?? []).find((n) => n.id);
     check('取到一条可见资讯作为演示条', !!victim, victim?.title);
     if (victim) {
+      // 审计计数只数**本次运行新增**：持久库（PG）上审计日志跨运行累积
+      // （P1-20 首跑就留过 1 hide + 1 restore + 2 update，mock 端因审计日志
+      // 在内存、重启清零，永远暴露不了这个问题——绝对计数必挂）。用「id 大于
+      // 快照最新 id」划窗口：审计列表按 id 倒序，本次新条目恒在最前，既不怕
+      // 历史累积，也不怕 limit 截断（截掉的都是更旧条目）。
+      const auditSnap = await request(`/admin/audit?target=${victim.id}&limit=100`, { token });
+      const baseAuditId = auditSnap.list?.[0]?.id ?? 0;
+
       // 下架前公开可访问（恢复后要能原样回来）
       const pubBefore = await request(`/news/${victim.id}`);
       check('下架前公开详情可访问', pubBefore.id === victim.id);
@@ -759,8 +767,10 @@ const run = async () => {
       });
       check('重复下架不覆盖原理由', again.hiddenReason === '契约检查下架理由');
 
-      const auditHide = await request(`/admin/audit?target=${victim.id}&limit=50`, { token });
-      const hides = (auditHide.list ?? []).filter((a) => a.action === 'news.hide');
+      const auditHide = await request(`/admin/audit?target=${victim.id}&limit=100`, { token });
+      const hides = (auditHide.list ?? []).filter(
+        (a) => a.action === 'news.hide' && a.id > baseAuditId,
+      );
       check('重复下架只记一条审计', hides.length === 1, `${hides.length} 条`);
       check(
         '下架审计含理由与标题（运营认标题不认 id）',
@@ -784,10 +794,11 @@ const run = async () => {
         token,
       });
       check('重复恢复不报错', restoredAgain.hidden === false);
-      const auditRestore = await request(`/admin/audit?target=${victim.id}&limit=50`, { token });
+      const auditRestore = await request(`/admin/audit?target=${victim.id}&limit=100`, { token });
       check(
         '恢复只记一条审计',
-        (auditRestore.list ?? []).filter((a) => a.action === 'news.restore').length === 1,
+        (auditRestore.list ?? []).filter((a) => a.action === 'news.restore' && a.id > baseAuditId)
+          .length === 1,
       );
 
       // 置顶：驼峰生效、蛇形被忽略、无变化不记审计。
@@ -814,8 +825,10 @@ const run = async () => {
       });
       check('PATCH 切回原值生效', flip2.isTop === startTop);
 
-      const auditTop = await request(`/admin/audit?target=${victim.id}&limit=50`, { token });
-      const updates = (auditTop.list ?? []).filter((a) => a.action === 'news.update');
+      const auditTop = await request(`/admin/audit?target=${victim.id}&limit=100`, { token });
+      const updates = (auditTop.list ?? []).filter(
+        (a) => a.action === 'news.update' && a.id > baseAuditId,
+      );
       check('两次变化只记两条 news.update', updates.length === 2, `${updates.length} 条`);
       check(
         'update 审计含字段级 diff 与标题',

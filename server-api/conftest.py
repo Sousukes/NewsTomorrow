@@ -25,5 +25,10 @@ os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["SEED_SAMPLE_DATA"] = "false"
 # 关掉定时抓取：TestClient 触发 lifespan → 启动调度 → **真的去抓网络**
 os.environ["FEED_CRON_ENABLED"] = "false"
+# 关掉热度重算（P1-21）：同理——lifespan 启动即执行首轮增量重算，
+# 与测试主线程的建行/写分并发，会把用例显式设定的 hot_score 重算掉，
+# 表现为排序断言随机失败（race，非逻辑错）。调度器自身行为在
+# tests/test_scheduler.py 里用桩隔离验证，不依赖这里的开关。
+os.environ["HOT_CRON_ENABLED"] = "false"
 # 默认管理员号段（与 test_api.py 一致；需要别的号段的文件自行覆盖）
 os.environ["ADMIN_PHONES"] = "13800138000"

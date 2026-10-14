@@ -58,6 +58,11 @@ class News(Base):
     # 热度分（落库而非查询时计算）：评论/收藏/播放加权后乘时间衰减。
     # 落库才能建索引并被游标作为标量比较；由 ranking.recompute_hot_scores 周期重算。
     hot_score = Column(Float, nullable=False, default=0.0, server_default="0")
+    # 热度分最近一次重算的时间（P1-21，naive 本地 ISO，秒精度）。
+    # 增量重算的锚点：只有早于 staleness 窗口（或为 NULL）的行才参与本轮，
+    # 避免无变动也全表重写。互动 bump 与全量重算都会刷新它。
+    # **不建索引**：表有 prune 上限（保留天数 + 最小条数），每轮扫一遍找过期行足够便宜。
+    hot_score_at = Column(String(30))
     # ---- P1-20 软下架 ----
     # **软下架而非硬删**：评论的 is_deleted 是同一处方——合规要求「保存记录」，
     # 误下架也要能一键恢复。公开查询（列表/详情/搜索/相关推荐）统一过滤 hidden，

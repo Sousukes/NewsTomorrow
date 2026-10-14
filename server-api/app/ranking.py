@@ -9,12 +9,12 @@
        排序键仍是单一标量，游标语义不变。
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from .models import News, UserFavorite, UserHistory
+from .models import News, UserFavorite, UserHistory, now_str
 
 logger = logging.getLogger("toutiao.ranking")
 
@@ -67,6 +67,15 @@ def _to_naive_utc(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _iso_seconds(dt: datetime) -> str:
+    """锚点时间串：与 `now_str()` 同格式（naive、秒精度）。
+
+    同格式 ISO 的字典序即时间序，`hot_score_at` 可直接与 cutoff 字符串比较。
+    传入 tz-aware 也先归一，避免拼出带偏移的串破坏比较。
+    """
+    return _to_naive_utc(dt).isoformat(timespec="seconds")
 
 
 def time_decay(published_at: str | None, now: datetime) -> float:
@@ -125,6 +134,8 @@ def bump_hot_score(db: Session, news_id: str) -> None:
     if news is None:
         return
     news.hot_score = score_for(db, news)
+    # 刷新锚点：刚算过的行不该被下一轮增量重算重复扫到
+    news.hot_score_at = now_str()
     try:
         db.commit()
     except Exception as e:  # 热度是派生数据，失败不得影响主流程（评论/收藏）
@@ -132,14 +143,30 @@ def bump_hot_score(db: Session, news_id: str) -> None:
         db.rollback()
 
 
-def recompute_hot_scores(db: Session, now: datetime | None = None) -> int:
-    """全量重算热度分（含时间衰减），供定时任务调用。返回更新条数。
+def recompute_hot_scores(
+    db: Session,
+    now: datetime | None = None,
+    *,
+    only_stale: bool = False,
+    stale_minutes: float = 60.0,
+) -> int:
+    """重算热度分（含时间衰减），供定时任务调用。返回更新条数。
 
     用 `bulk_update_mappings` 批量提交，避免逐行 UPDATE。
+
+    `only_stale=True` 时**只重算过期行**：`hot_score_at` 为 NULL（迁移前存量 /
+    新入库未算分）或早于 `now - stale_minutes` 的行。互动 bump 会即时刷新锚点，
+    周期任务只需负责时间衰减的缓慢推进——无变动也全表重写是纯写入放大
+    （dead tuple / WAL），而衰减半衰期 48h，分钟级的分数陈旧对排序无感。
     """
     now = now or datetime.now()
     fav_counts = _favorite_counts(db)
-    rows = db.query(News.id, News.comment_count, News.play_count, News.published_at).all()
+    q = db.query(News.id, News.comment_count, News.play_count, News.published_at)
+    if only_stale:
+        cutoff = _iso_seconds(now - timedelta(minutes=stale_minutes))
+        q = q.where((News.hot_score_at.is_(None)) | (News.hot_score_at < cutoff))
+    rows = q.all()
+    at = _iso_seconds(now)
     mappings = [
         {
             "id": nid,
@@ -150,6 +177,7 @@ def recompute_hot_scores(db: Session, now: datetime | None = None) -> int:
                 published_at,
                 now,
             ),
+            "hot_score_at": at,
         }
         for nid, comment_count, play_count, published_at in rows
     ]

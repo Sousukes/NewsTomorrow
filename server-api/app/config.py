@@ -91,6 +91,18 @@ ADMIN_PHONES: list[str] = [p.strip() for p in _env("ADMIN_PHONES").split(",") if
 # 定时抓取开关与周期
 FEED_CRON_ENABLED = _env("FEED_CRON_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 FEED_CRON_INTERVAL_MINUTES = int(_env("FEED_CRON_INTERVAL_MINUTES", "30"))
+# ---- 热度重算（P1-21）：独立于抓取的 cron ----
+# 此前热度重算寄生在抓取任务里：抓取被关停（FEED_CRON_ENABLED=false）时热度
+# 永不衰减，hot / for-you 排序冻结；重算节奏也被抓取周期绑定。
+# 现在它是独立任务——抓取停不停，衰减都按时推进。
+HOT_CRON_ENABLED = _env("HOT_CRON_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+# 重算周期。互动（评论/收藏）发生时是即时 bump 的，周期任务只负责时间衰减的
+# 缓慢推进，无需跟抓取同频。
+HOT_CRON_INTERVAL_MINUTES = max(1, int(_env("HOT_CRON_INTERVAL_MINUTES", "15")))
+# staleness 窗口：只重算锚点（hot_score_at）早于该窗口的行。窗口大于周期时，
+# 每行每窗口最多被重写一次，避免无变动也全表重写（写入放大）；
+# 代价是分数最多陈旧一个窗口——半衰期 48h 下 60 分钟约 2% 衰减，排序无感。
+HOT_STALE_MINUTES = max(1, int(_env("HOT_STALE_MINUTES", "60")))
 # 单源抓取条数上限
 FEED_LIMIT_PER_SOURCE = int(_env("FEED_LIMIT_PER_SOURCE", "30"))
 # HTTP 超时（读/写）与连接超时

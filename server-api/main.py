@@ -30,6 +30,7 @@ from app.config import (
     DOCS_URL,
     FEED_CRON_ENABLED,
     FEED_CRON_INTERVAL_MINUTES,
+    HOT_CRON_ENABLED,
     IS_PRODUCTION,
     JWT_SECRET_IS_DEFAULT,
     LOG_LEVEL,
@@ -47,7 +48,7 @@ from app.deps import get_current_user
 from app.models import User
 from app.ratelimit import build_limiter
 from app.routers import admin, auth, comments, me, messages, news
-from app.scheduler import start_scheduler, stop_scheduler
+from app.scheduler import hot_status, start_scheduler, stop_scheduler
 from app.seed import init_db
 
 # 生产环境强制校验：默认密钥必须拒绝启动
@@ -299,6 +300,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.get("/api/health", response_model=None)
 def health():
+    hot = hot_status()
     return JSONResponse(
         status_code=200,
         content={
@@ -310,6 +312,15 @@ def health():
                 # 应急通道是否配置：只下发布尔值，不下发号码。
                 # 库白名单可用但 env 为空时，DB 故障/误删/迁移回滚会让后台彻底进不去。
                 "adminBreakGlass": bool(ADMIN_PHONES),
+                # 热度重算（P1-21）：独立 cron 的进程内状态。
+                # 运维据此判断「衰减还在推进吗」——尤其抓取被关停时，
+                # 这条是热度任务仍活着的唯一信号。lastError 非空即上轮失败。
+                "hotRecompute": {
+                    "enabled": bool(HOT_CRON_ENABLED),
+                    "lastAt": hot["last_at"],
+                    "lastCount": hot["last_count"],
+                    "lastError": hot["last_error"],
+                },
             },
         },
     )

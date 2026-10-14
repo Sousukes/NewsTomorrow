@@ -135,7 +135,7 @@ PostgreSQL 走 SQLAlchemy `QueuePool`，参数全部可用环境变量覆盖（�
 ```bash
 # 观测连接池
 curl -s http://127.0.0.1:8000/api/health
-# {"code":0,"data":{"status":"up","pool":{"dialect":"postgresql","size":5,"checked_in":1,"checked_out":0,"overflow":-4}}}
+# {"code":0,"data":{"status":"up","pool":{"dialect":"postgresql","size":5,"checked_in":1,"checked_out":0,"overflow":-4},"adminBreakGlass":true,"hotRecompute":{"enabled":true,"lastAt":"2026-10-15T09:30:00","lastCount":12,"lastError":null}}}
 
 # 在 PG 侧查看本应用的连接
 psql -c "select pid, state, application_name from pg_stat_activity where application_name='toutiao-api';"
@@ -147,7 +147,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/health` | — | 健康检查；返回 `{ status, pool, adminBreakGlass }`——`adminBreakGlass` 是**应急通道是否配置**的布尔标记（只下发真假、不下发号码） |
+| GET | `/api/health` | — | 健康检查；返回 `{ status, pool, adminBreakGlass, hotRecompute }`——`adminBreakGlass` 是**应急通道是否配置**的布尔标记（只下发真假、不下发号码）；`hotRecompute` 是热度重算 cron 的进程内状态（`enabled`/`lastAt`/`lastCount`/`lastError`），抓取关停时据此判断衰减仍在推进 |
 | GET | `/api/metrics` | — | Prometheus 文本指标（uptime / 请求数 / 在途 / 状态码 / 路径 / 连接池） |
 | POST | `/api/news/refresh` | ✅ 管理员 | 手动触发抓取（`?channel=&keyword=`）。需管理能力（`ADMIN_PHONES` ∪ `admin_users` 表），**异步执行**返回 202 |
 | GET | `/api/news/search?q=` | — | 服务端搜索（标题/摘要匹配，**按相关度排序**见「搜索与热词」），返回 `{ list, total, page, hasMore }`；**旁路记录**搜索词供热词统计 |
@@ -506,6 +506,39 @@ FEED_HEALTH_LIST_DAYS=7    # 列表页摘要窗口（短于趋势窗口：列表
 静默丢弃，表现为"开关永不生效"且前后端各自单测都不红，已用
 「HTTP 入参 → 数据库」断言焊死。
 
+### 热度重算独立调度（迁移 0021）
+
+热度分的时间衰减此前**寄生在抓取 cron 里**（`_run_once` 抓完顺带全量重算）。
+三个后果：`FEED_CRON_ENABLED=false` 时衰减永不推进（hot / for-you 排序冻结）；
+重算节奏被抓取周期绑定（抓取 30 分钟一轮，衰减也只剩 30 分钟粒度）；
+`run_ingest` 抛异常时重算被连带跳过。P1-21 把它拆成**独立 cron**。
+
+**① 独立开关 / 周期 / 第二把 advisory lock**：
+
+```bash
+HOT_CRON_ENABLED=true           # 热度重算开关（独立于 FEED_CRON_ENABLED）
+HOT_CRON_INTERVAL_MINUTES=15    # 重算周期
+HOT_STALE_MINUTES=60            # staleness 窗口（见下）
+```
+
+两条 cron 各持一把会话级 advisory lock，**键不同**（抓取 `0x746F7574` "tout"、
+热度 `0x686F74` "hot"）——热度任务不该因为另一实例正在抓取而整轮跳过，
+那等于把拆开的又粘回去。
+
+**② 增量重算 + 锚点列**（`news.hot_score_at`，可空、**不建索引**）。
+只有锚点为 NULL（迁移前存量 / 新入库未算分）或早于 `now - HOT_STALE_MINUTES`
+的行才参与本轮。窗口（60）大于周期（15）时，每行每窗口最多重写一次——
+无变动也全表重写是纯写入放大（dead tuple / WAL），而半衰期 48h 下
+60 分钟约 2% 衰减，排序无感。互动 bump（评论/收藏）与 `me.py` 的批量合并
+（登录时稀有事件，行为不变）都会刷新锚点，刚算过的行不会被重复扫到。
+
+**③ 为何是字符串锚点**：与 `now_str()` 同格式（naive、秒精度）的 ISO 串
+**字典序即时间序**，staleness 判定免一次类型转换，也规避 SQLite/PG 时区语义差异。
+
+**④ `/api/health` 增 `hotRecompute`**（`enabled` / `lastAt` / `lastCount` /
+`lastError`，进程内状态、重启清零）。**抓取被关停时，这是热度任务仍活着的
+唯一信号**；`lastError` 非空即上轮失败（热度是派生数据，失败只记录不终止循环）。
+
 ## 数据库迁移（Alembic）
 
 ```bash
@@ -538,7 +571,9 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0019_source_health_events`（源健康历史 `rss_source_health_events`，每轮抓取一行 +
   复合索引 `ix_rss_health_key_at`，随源级联删除）、
   `0020_news_soft_hide`（资讯软下架 `news.hidden` / `hidden_at` / `hidden_reason`，
-  `hidden` 非空 `server_default=false`，**刻意不建索引**——下架集小，避免热 feed 索引膨胀）。
+  `hidden` 非空 `server_default=false`，**刻意不建索引**——下架集小，避免热 feed 索引膨胀）、
+  `0021_hot_score_at`（热度重算锚点 `news.hot_score_at`，可空无默认——NULL 即
+  「从未算过」天然覆盖存量；**刻意不建索引**，表有 prune 上限，全表找过期行足够便宜）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -639,7 +674,8 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
   实测出现「零评论的高播放视频霸榜」，与"热议"语义不符。
 - **时间可注入**：所有计算接受 `now` 参数，测试不依赖真实时钟。
 - **更新时机**：评论/收藏等互动发生即 `bump_hot_score()` 增量重算（即时可见）；
-  定时任务在抓取后 `recompute_hot_scores()` 全量重算（刷新时间衰减）。
+  定时任务走**独立热度 cron**（P1-21）`recompute_hot_scores(only_stale=True)`
+  增量刷新时间衰减——只扫锚点（`hot_score_at`）过期的行，抓取停不停都按时推进。
   热度是派生数据，更新失败仅记 warning，**不影响评论/收藏主流程**。
 
 **个性化**：由 `UserFavorite`（权重 3）与 `UserHistory`（权重 1）统计频道分布，
@@ -734,7 +770,7 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 ## 单元测试
 
 ```bash
-pytest -q          # 419 项
+pytest -q          # 432 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -824,16 +860,24 @@ pytest -q          # 419 项
   **点赞关系表**（`TestCommentLikesTable`，3 项）——关系行增删、复合主键防重、`liked` 按用户区分。
 - `tests/test_feeds.py`（7 项）：RSS 解析 / 条件请求（304 / 条件头 / 不重试）/ 增量入库 / 时效清理（未知时间优先、keep_min 下限、子表清理）。
 - `tests/test_search_stats.py`（21 项）：**搜索词统计**——记录与空白词忽略、**同用户同词 60s 内去重（防刷）**、窗口过后重新计数、不同用户不去重、未登录无去重窗口、超长词截断、按次数倒序、同次数按词升序（顺序稳定）、**窗口外的旧搜索不计入**、limit 生效、清理保留期内数据、接口契约与越界 422、搜索即记录、已登录去重。
-- `tests/test_ranking.py`（29 项）：**排序与个性化**——热度纯函数（互动越多分越高、
+- `tests/test_ranking.py`（34 项）：**排序与个性化**——热度纯函数（互动越多分越高、
   评论权重高于收藏、越旧分越低、48h 恰好半衰、无法解析时间取中性值、
   未来时间不放大、**带时区与 naive 混用不报错**）、三模式排序（时间 / 热度 / 偏好提升 /
   未登录退化 / 偏好压不过真实热度 / 历史也构成偏好）、置顶在热榜仍优先、
   非法 sort 为 422、`hot` 游标翻页无重复无遗漏、v1 游标仍可续接、
-  **`comment_count` 随评论增删增减且不为负**、收藏抬升/取消降低热度、全量重算。
+  **`comment_count` 随评论增删增减且不为负**、收藏抬升/取消降低热度、全量重算；
+  **P1-21 增量重算**（`TestIncrementalRecompute`，5 项）——增量只扫过期行
+  （未过期的分数与锚点都不动）、窗口内行跳过、全量模式忽略 staleness、
+  同一 now 下增量分数与全量一致、互动 bump 刷新锚点。
 - `tests/test_api.py` 另含 `TestMessageEvents`（8 项）：**消息事件化**——广播对全员可见、
   定向消息仅收件人可见、评论通知其他评论者、**自身不通知自己**、点赞通知作者、
   **取消赞不打扰**、反复点赞去重、全部已读只标记可见消息。
-- `tests/test_multi_instance.py`（3 项）：限流器工厂回退、非 PG 方言 advisory lock 行为。
+- `tests/test_multi_instance.py`（4 项）：限流器工厂回退、非 PG 方言 advisory lock 行为、
+  **抓取锁与热度锁键不同**（P1-21，防热度任务被抓取锁连带跳过）。
+- `tests/test_scheduler.py`（6 项）：**热度重算独立 cron**（P1-21）——核心回归
+  「抓取关停时热度照建照跑、抓取一次不执行」、抓取单轮不再顺带重算热度
+  （结构性解耦）、每轮异常都不杀循环、`_hot_job` 失败只落 `lastError` 恢复即清零、
+  `/api/health.hotRecompute` 四键形状、`hot_status()` 返回副本。
 - `tests/test_me.py`（18 项）：**收藏 / 浏览历史云端同步**——鉴权（6 个端点）、收藏增删幂等、
   并集合并且不丢数据/不误删、非法 id 跳过、历史去重与置顶、超限裁剪、被动副作用静默、
   **跨用户隔离**、**资讯清理时标记级联清除**。
@@ -907,7 +951,7 @@ server-api/
     ├── search_stats.py  # 搜索词日志 + 热词时间窗口聚合
     ├── notify.py        # 互动事件 → 消息
     ├── response.py      # { code, message, data } 封装
-    ├── scheduler.py     # 定时抓取（asyncio lifespan）
+    ├── scheduler.py     # 双 cron：定时抓取 + 热度重算（asyncio lifespan，各持独立 advisory lock）
     ├── seed.py          # 种子数据（幂等补齐 + 孤立引用自愈）
     ├── feeds/           # RSS 抓取层
     │   ├── sources.py   # 源清单（内置播种 + 读库回退）

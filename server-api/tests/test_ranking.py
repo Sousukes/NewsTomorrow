@@ -70,6 +70,14 @@ def _set_hot(nid: str, value: float) -> None:
         db.commit()
 
 
+def _set_anchor(nid: str, value: str | None) -> None:
+    """直接写 `hot_score_at` 锚点，模拟「上一轮重算发生在何时」。"""
+    with SessionLocal() as db:
+        n = db.query(News).filter(News.id == nid).first()
+        n.hot_score_at = value
+        db.commit()
+
+
 def _register(client, phone: str, name: str) -> dict:
     client.post(
         "/api/auth/register", json={"phone": phone, "password": "abc123", "name": name}
@@ -324,3 +332,77 @@ class TestRecompute:
     def test_recompute_on_empty_table_is_safe(self, client):
         with SessionLocal() as db:
             assert recompute_hot_scores(db, now=NOW) == 0
+
+
+# ------------------------------------------------- P1-21：增量重算与锚点
+
+
+class TestIncrementalRecompute:
+    """`only_stale=True` 只重算过期行；锚点 `hot_score_at` 随之落库/刷新。
+
+    要防的两类回归：
+    1. 增量逻辑失效退化成全表重写（写入放大回来）——用「未过期行
+       分数与锚点都未被触动」钉住；
+    2. 增量把算法也改了——同一 `now` 下分数必须与全量一致。
+    """
+
+    def test_only_stale_skips_fresh_rows(self, client):
+        _mk_news("s1", comments=5, published_at="2026-10-13T11:00:00")
+        _mk_news("s2", comments=3, published_at="2026-10-13T11:00:00")
+        _mk_news("s3", comments=1, published_at="2026-10-13T11:00:00")
+        with SessionLocal() as db:
+            assert recompute_hot_scores(db, now=NOW) == 3  # 全量：一并补锚点
+            fresh = {x.id: (x.hot_score, x.hot_score_at) for x in db.query(News).all()}
+        # s2 锚点过期（90 分钟前 > 60 分钟窗口）、s3 锚点缺失、s1 刚算过
+        _set_anchor("s2", (NOW - timedelta(minutes=90)).isoformat(timespec="seconds"))
+        _set_anchor("s3", None)
+        with SessionLocal() as db:
+            n = recompute_hot_scores(db, now=NOW, only_stale=True, stale_minutes=60)
+            assert n == 2
+            after = {x.id: (x.hot_score, x.hot_score_at) for x in db.query(News).all()}
+        # 未过期的行：分数和锚点都没被动过（否则就是全表重写）
+        assert after["s1"] == fresh["s1"]
+        # 过期 / 缺失的行：锚点刷新为本次重算时间（naive、秒精度，与 now_str 同格式）
+        assert after["s2"][1] == NOW.isoformat(timespec="seconds")
+        assert after["s3"][1] == NOW.isoformat(timespec="seconds")
+        assert after["s2"][0] > 0 and after["s3"][0] > 0
+
+    def test_row_inside_window_is_skipped(self, client):
+        """ staleness 窗口内的行不重算——这是「每行每窗口最多写一次」的另一半。"""
+        _mk_news("w1", comments=5, published_at="2026-10-13T11:00:00")
+        _set_anchor("w1", (NOW - timedelta(minutes=30)).isoformat(timespec="seconds"))
+        with SessionLocal() as db:
+            assert recompute_hot_scores(db, now=NOW, only_stale=True, stale_minutes=60) == 0
+
+    def test_full_mode_ignores_staleness(self, client):
+        """`me.py` 批量合并收藏走全量重算：默认模式不看 staleness，行行都算。"""
+        _mk_news("a1", comments=5, published_at="2026-10-13T11:00:00")
+        with SessionLocal() as db:
+            assert recompute_hot_scores(db, now=NOW) == 1
+            assert recompute_hot_scores(db, now=NOW) == 1  # 锚点刚刷新，仍重算
+
+    def test_incremental_score_matches_full(self, client):
+        """增量只改「扫哪些行」，不改算法：同一 now 下分数与全量一致。"""
+        _mk_news("m1", comments=7, published_at="2026-10-12T11:00:00")
+        with SessionLocal() as db:
+            recompute_hot_scores(db, now=NOW)
+            full = db.query(News).filter(News.id == "m1").first().hot_score
+        _set_anchor("m1", None)  # 打回「从未算过」
+        with SessionLocal() as db:
+            recompute_hot_scores(db, now=NOW, only_stale=True)
+            inc = db.query(News).filter(News.id == "m1").first().hot_score
+        assert inc == full
+
+    def test_bump_refreshes_anchor(self, client):
+        """互动 bump 立即重算并刷新锚点——否则刚互动的行会被下一轮增量重复扫到。"""
+        _mk_news("b1", comments=0, published_at="2026-10-13T11:00:00")
+        h = _register(client, "13940000009", "锚点")
+        client.post("/api/news/b1/comments", json={"content": "触发 bump"}, headers=h)
+        with SessionLocal() as db:
+            n = db.query(News).filter(News.id == "b1").first()
+            assert n.hot_score > 0
+            assert n.hot_score_at is not None
+            # 锚点就是「刚刚」：秒级 naive ISO 串，且距当前时间在分钟级以内
+            at = datetime.fromisoformat(n.hot_score_at)
+            assert at.tzinfo is None
+            assert abs((datetime.now() - at).total_seconds()) < 60

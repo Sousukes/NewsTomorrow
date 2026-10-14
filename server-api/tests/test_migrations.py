@@ -227,6 +227,25 @@ class TestMigrationChain:
         names = {i["name"] for i in insp.get_indexes("news")}
         assert not any("hidden" in n for n in names)
 
+    def test_news_hot_score_at_column(self, chain_db):
+        """0021：热度重算锚点列（P1-21 增量重算的「上一轮何时算过」）。
+
+        钉住三件容易在后续改动里悄悄丢掉的事：
+        - **可空**：迁移前存量行没有锚点，NULL 天然覆盖（给非空默认值反而要
+          写死一个「永远过期」的假时间，把首轮增量变成全量）；
+        - **刻意不建索引**：表有 prune 上限，每轮扫全表找过期行足够便宜，
+          索引只会拖慢每轮写入（与 0020 hidden 同款处方）；
+        - 字符串列而非 DateTime：与 `now_str()` 同格式的字典序即时间序，
+          staleness 判定免一次类型转换，也规避 SQLite/PG 时区语义差异。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("news")}
+        assert "hot_score_at" in cols
+        col = next(c for c in insp.get_columns("news") if c["name"] == "hot_score_at")
+        assert col["nullable"] is True
+        names = {i["name"] for i in insp.get_indexes("news")}
+        assert not any("hot_score_at" in n for n in names)
+
     def test_admin_audit_logs_table(self, chain_db):
         """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""
         insp = inspector_of(chain_db)
