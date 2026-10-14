@@ -113,3 +113,9 @@ FEED_ROBOTS_TTL_HOURS = max(1, int(_env("FEED_ROBOTS_TTL_HOURS", "24")))
 FEED_ALERT_ENABLED = _env("FEED_ALERT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 FEED_ALERT_STALE_HOURS = max(1, int(_env("FEED_ALERT_STALE_HOURS", "24")))
 FEED_ALERT_MIN_INTERVAL_HOURS = max(1, int(_env("FEED_ALERT_MIN_INTERVAL_HOURS", "6")))
+# 告警聚合（P1-17）：本轮待告警源达到该数量时合并为**一条汇总**。
+# 断网 / 对方站点整体挂掉时十几个源会同时异常，逐源发一条等于刷屏，
+# 而收件人对十几条消息也做不了逐个处置——他要的信息是"出事了，N 条，去看源管理"。
+FEED_ALERT_AGGREGATE_MIN = max(2, int(_env("FEED_ALERT_AGGREGATE_MIN", "3")))
+# 汇总消息里每类原因最多列出几个源名，其余用"等"概括（消息预览是单行省略号，列多了看不见）
+FEED_ALERT_AGGREGATE_LIST = max(1, int(_env("FEED_ALERT_AGGREGATE_LIST", "5")))

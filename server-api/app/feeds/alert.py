@@ -14,6 +14,17 @@
     `rss_sources.last_alerted_at`——**落库而非进程内变量**，多实例部署时共享同一窗口
     （定时抓取有 advisory lock，但手动触发不走锁），进程重启也不会重新刷屏。
 
+聚合（P1-17）：
+    待告警源达到 `FEED_ALERT_AGGREGATE_MIN` 时合并成**一条汇总**，而不是一源一条。
+    断网或对方站点整体挂掉时十几个源会同时异常，逐源发一条就是刷屏；
+    而收件人对十几条消息也做不了逐个处置，他要的是"出事了、多少条、去看源管理"。
+    低于阈值仍逐源发送：一两条时直接点开看名字比先读汇总更省事。
+
+    汇总**按原因分组并按严重度排序**，而非罗列源名：消息中心的预览是单行省略号，
+    尾部必然被截断，所以"最严重 + 最普遍"必须排在最前面。
+    "超时未抓取 N 条"本身就在告诉收件人这是系统性问题（定时任务或网络），
+    不需要再写一句"建议排查网络"——那句话大概率被省略号吃掉。
+
 收件人：
     管理能力来自 `ADMIN_PHONES` ∪ `admin_users` 表（与 `routers.admin.is_admin` 同源），
     但消息中心按 `user_id` 投递，故需把手机号解析成**已注册**的用户；
@@ -26,6 +37,8 @@ from sqlalchemy import select
 
 from ..config import (
     ADMIN_PHONES,
+    FEED_ALERT_AGGREGATE_LIST,
+    FEED_ALERT_AGGREGATE_MIN,
     FEED_ALERT_ENABLED,
     FEED_ALERT_MIN_INTERVAL_HOURS,
     FEED_ALERT_STALE_HOURS,
@@ -33,6 +46,12 @@ from ..config import (
 from ..models import AdminUser, Message, RssSource, User, now_str
 
 logger = logging.getLogger("toutiao.alert")
+
+# 原因分类：既是汇总文案的标签，也是**严重度顺序**（抓取失败最需要人看，排最前）
+KIND_LABELS = {"error": "抓取失败", "stale": "超时未抓取", "never": "从未成功"}
+_KIND_ORDER = ("error", "stale", "never")
+# 与 Message.summary 的列宽一致：超了会被数据库截断（MySQL 严格模式会直接报错）
+_SUMMARY_LIMIT = 300
 
 
 def _parse(iso: str | None) -> datetime | None:
@@ -49,25 +68,71 @@ def unhealthy_sources(
     stale_hours: int = FEED_ALERT_STALE_HOURS,
     now: datetime | None = None,
 ) -> list[dict]:
-    """列出需要告警的源（只看**启用中**的——禁用源不抓是预期行为）。"""
+    """列出需要告警的源（只看**启用中**的——禁用源不抓是预期行为）。
+
+    按 `weight` 降序返回：汇总消息会把靠前的源名列出来，位次即"谁更重要"，
+    与抓取合并时的权重优先同一套语义。
+    """
     now = now or datetime.now()
     cutoff = now - timedelta(hours=stale_hours)
     out: list[dict] = []
-    for row in db.execute(
-        select(RssSource).where(RssSource.enabled.is_(True))
-    ).scalars():
+    rows = db.execute(
+        select(RssSource)
+        .where(RssSource.enabled.is_(True))
+        .order_by(RssSource.weight.desc(), RssSource.key)
+    ).scalars()
+    for row in rows:
         if row.last_status == "error":
+            kind = "error"
             reason = f"最近一次抓取失败：{(row.last_error or '未知原因')[:80]}"
         else:
             last = _parse(row.last_fetched_at)
             if last is None:
+                kind = "never"
                 reason = "从未成功抓取"
             elif last < cutoff:
+                kind = "stale"
                 reason = f"已超过 {stale_hours} 小时未成功抓取"
             else:
                 continue
-        out.append({"key": row.key, "name": row.name, "reason": reason, "row": row})
+        out.append(
+            {"key": row.key, "name": row.name, "kind": kind, "reason": reason, "row": row}
+        )
     return out
+
+
+def _short_name(name: str, limit: int = 10) -> str:
+    s = (name or "").strip() or "未命名"
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def compose_batch_summary(
+    items: list[dict], list_limit: int = FEED_ALERT_AGGREGATE_LIST
+) -> str:
+    """把多条源异常压成一条摘要，形如「抓取失败 3 条（A、B、C）；超时未抓取 2 条（D、E）」。
+
+    刻意**按原因分组**而不是逐个罗列：
+    - 消息中心预览是单行省略号，尾部看不到，最严重 + 最普遍必须排最前；
+    - "超时未抓取 8 条"本身就在说这是系统性问题（定时任务或网络），
+      比罗列 8 个名字更能指导下一步动作。
+    """
+    parts: list[str] = []
+    for kind in _KIND_ORDER:
+        grp = [i for i in items if i.get("kind") == kind]
+        if not grp:
+            continue
+        # 截断后去重：名字过长时被截成一模一样的前缀，并列出来是纯噪音
+        # （真实场景常见于同一站点的多个频道，如"XX 科技/体育/财经"）
+        names: list[str] = []
+        for it in grp:
+            s = _short_name(it["name"])
+            if s not in names:
+                names.append(s)
+            if len(names) >= list_limit:
+                break
+        tail = " 等" if len(grp) > len(names) else ""
+        parts.append(f"{KIND_LABELS[kind]} {len(grp)} 条（{'、'.join(names)}{tail}）")
+    return "；".join(parts)[:_SUMMARY_LIMIT]
 
 
 def _admin_user_ids(db) -> list[int]:
@@ -116,14 +181,17 @@ def notify_unhealthy_sources(db) -> int:
 
     created = 0
     stamp = now.strftime("%Y%m%d%H%M%S")
-    for item in due:
-        summary = f"信源「{item['name']}」异常：{item['reason']}"
+    if len(due) >= FEED_ALERT_AGGREGATE_MIN:
+        # 合并成一条：收件人对 N 条独立消息做不了逐个处置，要的是"出事了、多少条"。
+        # 数量放**标题**（预览区标题不受单行省略号挤压），摘要放分组明细。
+        title = f"信源异常汇总（{len(due)} 条）"
+        summary = compose_batch_summary(due)
         for uid in recipients:
             db.add(
                 Message(
-                    id=f"msg_alert_{item['key']}_{uid}_{stamp}",
+                    id=f"msg_alertbatch_{uid}_{stamp}",
                     type="system",
-                    title="信源异常提醒",
+                    title=title,
                     summary=summary,
                     news_id=None,
                     user_id=uid,
@@ -131,9 +199,31 @@ def notify_unhealthy_sources(db) -> int:
                 )
             )
             created += 1
-        # 推进节流锚点：本条已通知到人，窗口内不再重复
+    else:
+        for item in due:
+            summary = f"信源「{item['name']}」异常：{item['reason']}"
+            for uid in recipients:
+                db.add(
+                    Message(
+                        id=f"msg_alert_{item['key']}_{uid}_{stamp}",
+                        type="system",
+                        title="信源异常提醒",
+                        summary=summary,
+                        news_id=None,
+                        user_id=uid,
+                        time="刚刚",
+                    )
+                )
+                created += 1
+
+    # 推进节流锚点：本轮已通知到人，窗口内不再重复。
+    # 两个分支都要做——漏掉会让汇总消息每轮重发。
+    for item in due:
         item["row"].last_alerted_at = now_str()
     db.commit()
     if created:
-        logger.info("源健康告警：%d 个源 → %d 条消息", len(due), created)
+        logger.info(
+            "源健康告警：%d 个源 → %d 条消息（%s）",
+            len(due), created, "汇总" if len(due) >= FEED_ALERT_AGGREGATE_MIN else "逐源",
+        )
     return created

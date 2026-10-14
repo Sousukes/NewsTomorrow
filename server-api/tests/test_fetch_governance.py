@@ -6,6 +6,9 @@
 2. **礼貌抓取**：按 host 分组（同站串行 + 间隔）、单源最小抓取间隔、
    robots.txt 遵守且逐源可关（取不到 robots 时放行）；
 3. **超时告警**：异常源与超时未成功源主动通知管理员，并按 `last_alerted_at` 节流。
+
+P1-17 追加：告警**去重聚合**——待告警源达到阈值时合并成一条汇总（按原因分组），
+避免断网时十几个源一起刷屏；见 `TestAlertAggregation`。
 """
 import os
 import threading
@@ -250,14 +253,14 @@ def db():
 
 
 def _source(db, key, *, status="ok", fetched_minutes_ago=1.0, enabled=True,
-            alerted_minutes_ago=None):
+            alerted_minutes_ago=None, name=None, weight=5):
     last = (
         (datetime.now() - timedelta(minutes=fetched_minutes_ago)).isoformat(timespec="seconds")
         if fetched_minutes_ago is not None else None
     )
     row = RssSource(
-        key=key, name=key, channel="tech", url=f"https://{key}.com/f.xml",
-        weight=5, enabled=enabled, last_status=status,
+        key=key, name=name or key, channel="tech", url=f"https://{key}.com/f.xml",
+        weight=weight, enabled=enabled, last_status=status,
         last_error="连接超时" if status == "error" else None,
         last_fetched_at=last, created_at=now_str(), updated_at=now_str(),
     )
@@ -349,3 +352,128 @@ class TestSourceAlerts:
         _source(db, "bad2", fetched_minutes_ago=None)
         _source(db, "good", fetched_minutes_ago=5)
         assert alert_mod.unhealthy_count(db) == 2
+
+
+class TestAlertAggregation:
+    """P1-17：多源同时异常时合并成一条汇总，而不是一源一条刷屏。
+
+    断网 / 对方站点整体挂掉时十几个源会一起异常，逐源发一条等于把同一个坏消息
+    重复 N 遍；收件人对 N 条独立消息也做不了逐个处置。
+    """
+
+    def test_single_source_stays_direct(self, db):
+        """1 条时汇总反而更绕，保持逐源直发（点开就是名字）。"""
+        _admin(db)
+        _source(db, "bad", status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 1
+        msg = db.execute(select(Message)).scalars().one()
+        assert msg.title == "信源异常提醒"
+        assert "bad" in msg.summary
+
+    def test_below_threshold_is_not_aggregated(self, db):
+        """阈值以下（默认 3）仍逐源：一两条时逐个读名字更省事。"""
+        _admin(db)
+        _source(db, "a", status="error")
+        _source(db, "b", status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 2
+        assert {m.title for m in db.execute(select(Message)).scalars()} == {"信源异常提醒"}
+
+    def test_above_threshold_collapses_to_one_per_recipient(self, db):
+        """5 个源 × 2 个管理员 = 2 条汇总，而不是 10 条。"""
+        _admin(db, "13800138000")
+        _admin(db, "13800138001")
+        for k in "abcde":
+            _source(db, k, status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 2
+        msgs = db.execute(select(Message)).scalars().all()
+        assert len({m.user_id for m in msgs}) == 2
+        assert all(m.title == "信源异常汇总（5 条）" for m in msgs)
+
+    def test_batch_summary_groups_by_cause_and_severity(self, db):
+        """按原因分组、抓取失败排最前：预览是单行省略号，最严重必须最先被看到。"""
+        _admin(db)
+        _source(db, "e1", status="error")
+        _source(db, "e2", status="error")
+        _source(db, "s1", fetched_minutes_ago=None)  # 从未成功
+        _source(db, "s2", fetched_minutes_ago=60 * 48)  # 超时未成功
+        alert_mod.notify_unhealthy_sources(db)
+        summary = db.execute(select(Message)).scalars().one().summary
+        assert summary.index("抓取失败") < summary.index("超时未抓取")
+        assert "抓取失败 2 条" in summary
+        assert "超时未抓取 1 条" in summary
+        assert "从未成功 1 条" in summary
+
+    def test_all_stale_surfaces_shared_cause(self, db):
+        """全是"从未成功"= 系统性问题（定时任务/网络），分组本身就把这层信息带出来了，
+        不需要再写一句"建议排查网络"——那句话大概率被省略号吃掉。"""
+        _admin(db)
+        for k in "abcd":
+            _source(db, k, fetched_minutes_ago=None)
+        alert_mod.notify_unhealthy_sources(db)
+        summary = db.execute(select(Message)).scalars().one().summary
+        assert "从未成功 4 条" in summary
+        assert "抓取失败" not in summary
+
+    def test_long_name_list_is_elided(self, db):
+        """超过列举上限时只列前 N 个并用"等"概括，但总量必须准确。"""
+        _admin(db)
+        for i in range(8):
+            _source(db, f"s{i}", status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 1
+        s = db.execute(select(Message)).scalars().one().summary
+        assert "抓取失败 8 条" in s
+        assert "等" in s
+        assert s.count("、") == 4  # 列了 5 个名字
+
+    def test_identical_truncated_names_are_deduped(self, db):
+        """名字过长被截成同一前缀时并列出来是纯噪音——去重，但**总量不变**。"""
+        _admin(db)
+        for i in range(4):
+            _source(db, f"d{i}", status="error", name="同一站点的超长频道名称" * 3)
+        alert_mod.notify_unhealthy_sources(db)
+        s = db.execute(select(Message)).scalars().one().summary
+        assert "抓取失败 4 条" in s
+        assert s.count("、") == 0  # 只剩一个去重后的名字
+        assert "等" in s
+
+    def test_summary_fits_the_column(self, db):
+        """summary 列宽 300：源再多、名字再长也不该被数据库截断或报错。"""
+        _admin(db)
+        for i in range(50):
+            _source(db, f"s{i}", status="error", name="超长信源名称" * 10)
+        assert alert_mod.notify_unhealthy_sources(db) == 1
+        assert len(db.execute(select(Message)).scalars().one().summary) <= 300
+
+    def test_aggregated_advances_anchor_for_every_source(self, db):
+        """被汇总带上的源都要推进锚点，否则下一轮整批重发。"""
+        _admin(db)
+        for k in "abcd":
+            _source(db, k, status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 1
+        db.expire_all()
+        assert all(db.get(RssSource, k).last_alerted_at for k in "abcd")
+        assert alert_mod.notify_unhealthy_sources(db) == 0
+
+    def test_threshold_is_configurable(self, monkeypatch, db):
+        monkeypatch.setattr(alert_mod, "FEED_ALERT_AGGREGATE_MIN", 2)
+        _admin(db)
+        _source(db, "a", status="error")
+        _source(db, "b", status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 1
+        assert db.execute(select(Message)).scalars().one().title == "信源异常汇总（2 条）"
+
+    def test_throttled_sources_stay_out_of_the_batch(self, db):
+        """节流窗口内的源不进汇总：数量随之下降，甚至退回逐源。"""
+        _admin(db)
+        _source(db, "old1", status="error", alerted_minutes_ago=10)
+        _source(db, "old2", status="error", alerted_minutes_ago=10)
+        _source(db, "fresh", status="error")
+        assert alert_mod.notify_unhealthy_sources(db) == 1  # 只有 fresh 到期
+        assert db.execute(select(Message)).scalars().one().title == "信源异常提醒"
+
+    def test_ordering_is_deterministic_by_weight(self, db):
+        """权重高的源排前面——汇总里被列出的名字就是"最该先看的几个"。"""
+        _admin(db)
+        _source(db, "low", status="error", weight=1)
+        _source(db, "high", status="error", weight=9)
+        assert [i["key"] for i in alert_mod.unhealthy_sources(db)] == ["high", "low"]
