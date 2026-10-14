@@ -108,7 +108,12 @@ class SourceIn(BaseModel):
     enabled: bool = True
     # 是否遵守对方 robots.txt（P1-16）。默认遵守；个别源 robots 写得过严却实际
     # 提供公开 RSS，逐源可关——故是源级配置而非全局开关。
-    respect_robots: bool = True
+    #
+    # ⚠️ **入参的多词字段一律驼峰**（与 `CommentCreateIn.parentId` / `MarkIn.newsId`
+    # 同惯例，也与响应侧 `lastStatus` 一致）。写成蛇形 `respect_robots` 时，
+    # pydantic 默认 `extra='ignore'` 会**静默丢弃**前端发来的 `respectRobots`，
+    # 表现为「开关能点、但永远不生效」——且前后端各自的单测都覆盖不到这个缝。
+    respectRobots: bool = True
 
     _channel = field_validator("channel")(_valid_channel)
 
@@ -121,7 +126,8 @@ class SourceUpdateIn(BaseModel):
     url: str | None = Field(default=None, min_length=1, max_length=500)
     weight: int | None = Field(default=None, ge=0, le=100)
     enabled: bool | None = None
-    respect_robots: bool | None = None
+    # 入参多词字段走驼峰（见 `SourceIn.respectRobots` 的说明）
+    respectRobots: bool | None = None
 
     _channel = field_validator("channel")(_valid_channel)
 

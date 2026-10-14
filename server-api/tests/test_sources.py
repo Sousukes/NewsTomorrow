@@ -355,6 +355,66 @@ class TestAdminSources:
             assert db.get(RssSource, "aihot_picks").enabled is False
             assert "aihot_picks" not in [s["key"] for s in src_mod.all_enabled_sources(db)]
 
+    def test_respect_robots_round_trips_through_api(self, client):
+        """多词入参字段必须真的落库，而不是被 pydantic 静默丢弃。
+
+        `respectRobots` 是项目里第一个多词**入参**字段（响应侧早有 `lastStatus` 等）。
+        若模型字段误写成蛇形 `respect_robots`，pydantic 默认 `extra='ignore'` 会把前端
+        发来的 `respectRobots` 当作未知字段丢掉——表现为「开关看得见、点得动，
+        但永远不生效」，而前后端各自的单测**都不会失败**（前端只断言自己发出的 body）。
+        故这里从 API 打到数据库，把这条缝焊死。
+        """
+        h = _admin(client)
+        # ① 不传即默认遵守
+        client.post(
+            "/api/admin/sources",
+            headers=h,
+            json={
+                "key": "strict_ok",
+                "name": "默认遵守",
+                "channel": "tech",
+                "url": "https://a.example.com/f.xml",
+            },
+        )
+        with SessionLocal() as db:
+            assert db.get(RssSource, "strict_ok").respect_robots is True
+
+        # ② 新增时显式关闭，响应与库都要是 false
+        data = client.post(
+            "/api/admin/sources",
+            headers=h,
+            json={
+                "key": "lax_feed",
+                "name": "破例源",
+                "channel": "tech",
+                "url": "https://b.example.com/f.xml",
+                "respectRobots": False,
+            },
+        ).json()["data"]
+        assert data["respectRobots"] is False
+        with SessionLocal() as db:
+            assert db.get(RssSource, "lax_feed").respect_robots is False
+
+        # ③ PATCH 关 → 开（局部更新同样要看懂这个字段）
+        r = client.patch(
+            "/api/admin/sources/strict_ok", headers=h, json={"respectRobots": False}
+        )
+        assert r.json()["data"]["respectRobots"] is False
+        with SessionLocal() as db:
+            assert db.get(RssSource, "strict_ok").respect_robots is False
+        client.patch("/api/admin/sources/strict_ok", headers=h, json={"respectRobots": True})
+        with SessionLocal() as db:
+            assert db.get(RssSource, "strict_ok").respect_robots is True
+
+    def test_health_dict_carries_respect_robots_for_fetcher(self, client):
+        """抓取侧读的是 `sources._to_dict` 的蛇形键：DB → 抓取入参这一跳也要通。"""
+        h = _admin(client)
+        client.patch("/api/admin/sources/aihot_picks", headers=h, json={"respectRobots": False})
+        with SessionLocal() as db:
+            items = src_mod.sources_for_channel("tech", db)
+            row = next(s for s in items if s["key"] == "aihot_picks")
+            assert row["respect_robots"] is False
+
     def test_update_missing_is_404(self, client):
         h = _admin(client)
         r = client.patch("/api/admin/sources/nope", headers=h, json={"weight": 1})

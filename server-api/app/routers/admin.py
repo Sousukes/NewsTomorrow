@@ -142,7 +142,7 @@ def create_source(
         url=body.url,
         weight=body.weight,
         enabled=body.enabled,
-        respect_robots=body.respect_robots,
+        respect_robots=body.respectRobots,
         created_at=now,
         updated_at=now,
     )
@@ -176,10 +176,13 @@ def update_source(
     if body.url is not None:
         _validate_url(body.url)
     before = _out(row)
-    for field in ("name", "channel", "url", "weight", "enabled", "respect_robots"):
+    # 入参字段名 → 模型列名。多词入参走驼峰（`respectRobots`），模型侧是蛇形——两边
+    # 必须显式对齐，否则 pydantic 会静默丢掉前端传来的字段（详见 schemas.SourceIn）。
+    COLUMN_OF = {"respectRobots": "respect_robots"}
+    for field in ("name", "channel", "url", "weight", "enabled", "respectRobots"):
         value = getattr(body, field)
         if value is not None:
-            setattr(row, field, value)
+            setattr(row, COLUMN_OF.get(field, field), value)
     row.updated_at = now_str()
     after = _out(row)
     # 只记真正变化的字段：无变化的 PATCH（前端常因表单整体提交而触发）不该灌进时间线
