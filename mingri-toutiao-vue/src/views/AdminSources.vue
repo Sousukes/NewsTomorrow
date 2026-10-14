@@ -601,6 +601,8 @@ function healthTitle(s: RssSourceItem): string {
           :label="selecting ? '退出批量' : '批量管理'"
           @click="toggleSelectMode"
         />
+        <!-- P1-20：内容处置在资讯审核页——源管理管"从哪来"，那边管"留不留" -->
+        <Button variant="secondary" label="资讯审核" @click="router.push('/admin/news')" />
         <Button variant="secondary" label="管理员" @click="router.push('/admin/users')" />
         <Button variant="secondary" label="审计" @click="router.push('/admin/audit')" />
       </div>

@@ -58,6 +58,18 @@ class News(Base):
     # 热度分（落库而非查询时计算）：评论/收藏/播放加权后乘时间衰减。
     # 落库才能建索引并被游标作为标量比较；由 ranking.recompute_hot_scores 周期重算。
     hot_score = Column(Float, nullable=False, default=0.0, server_default="0")
+    # ---- P1-20 软下架 ----
+    # **软下架而非硬删**：评论的 is_deleted 是同一处方——合规要求「保存记录」，
+    # 误下架也要能一键恢复。公开查询（列表/详情/搜索/相关推荐）统一过滤 hidden，
+    # 管理端可见并可恢复。
+    # **不给 hidden 建索引**：下架集预期很小，加了只会让热 feed 的索引膨胀、
+    # 拖慢每轮写入；过滤条件本身对全表扫描也足够便宜。
+    # 热度重算仍计算已下架行：恢复的那一刻就该拿到新鲜分数，不必等下一轮。
+    hidden = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    hidden_at = Column(String(30))
+    # 下架理由：**必填**（trim 后 ≤300 字符，空则 422）——「留痕是准入条件」，
+    # 与 P1-18 自动禁用必须能解释同理。恢复时清空（理由只对下架状态有意义）。
+    hidden_reason = Column(String(300))
 
     comments = relationship(
         "Comment", back_populates="news", cascade="all, delete-orphan", passive_deletes=True

@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **280** 项，覆盖：
+- **单元测试**：Vitest 共 **321** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -40,7 +40,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   - `stores/user` 管理能力标志 `isAdmin`（6）：登录响应带 `isAdmin=true` 时置位、**缺省不授予特权**、
     **落盘后刷新页面运营入口不消失**、登出归位（不把上个账号的特权留给匿名态）、
     **未登录时忽略 prefs 里的 isAdmin**（token 失效不得留下管理入口）、普通账号仍为 false
-  - `api/admin`（34）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
+  - `api/admin`（52）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
     `ensureRealBackend` 守卫、行数据归一化（缺 `key` 的脏行丢弃、`lastError` 空串转 null、
     **`respectRobots` 缺失时按更保守的一方兜底为 `true`、显式 `false` 原样透出**）、
     五个源管理接口的路径/方法/错误透传；
@@ -49,7 +49,14 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     **健康历史**（P1-19：`fetchSources()` 返回 `{list, healthDays}`、`healthDays` 缺失回落 7、
     每行 `health` 归一化（`rate` 收敛 0–1、非对象/坏字段回落 `null`）、
     `fetchSourceHealth` 的 `days` 传参与三段数据归一化——**坏日期与无时间点的日桶丢弃**、
-    `kind` 白名单外的取值回落 `null`、failures 上限 20）
+    `kind` 白名单外的取值回落 `null`、failures 上限 20）；
+    **资讯审核与下架**（P1-20：`fetchAdminNews` 查询串按空白 trim 后拼接（纯空白 keyword
+    不拼串）、信封缺失兜底、**缺 `id` 的脏行丢弃**、`hidden` 三件套缺失一律按可见兜底、
+    理由空串转 `null`、`isTop` 非 `true` 一律 `false`、`hotScore`/`commentCount` 垃圾值归零、
+    标题缺失回落 id、非法 `channel` 回落 `recommend`；`hideNews` 的 POST/请求体/**id 编码**
+    与「响应无法解析」报错、`restoreNews` POST 无请求体、`updateNewsTop` 焊死
+    `{isTop: true}` 驼峰体且 422 向上抛）；**mock 模式下四个新闻函数一律拒绝**
+    （与源管理同——不伪造可变的审核数据）
   - `views/AdminUsers`（11）：管理员白名单渲染（含 `registered` 已注册/预授权与 `addedBy`）、
     env 计数说明、添加成功清空表单并刷新、**手机号格式前端拦截不发请求**、冲突 409 展示服务端文案、
     移除二次确认、**末位保护 409 保留行并报服务端语义**、加载失败与 403 转无权限态、
@@ -74,6 +81,15 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     **健康趋势**（P1-19：行内 chip 按 `<0.5` 红 / `<0.9` 琥珀分色、无尝试显示"—"、
     「趋势」就地展开且**一次只开一个**、失败只在行内报错**不掀页**、
     `healthDays` 从列表响应带出供趋势面板解释时间范围）
+  - `views/AdminNews`（23）：基础渲染（无权限态 / 频道标签 / 评论数 / 发布时间 / 共 N 条 /
+    置顶 chip / **已下架红 chip + 理由 + 下架时间** / 403 态 / 错误横幅 / 空态）；
+    **筛选与搜索**（status chips 带参重请求 + 选中态标红、再点取消、Enter 与搜索按钮、
+    清除筛选后重新拉取、无结果提示）；
+    **下架与恢复**（**空理由前端拦截**「请填写下架理由（留痕是准入条件）」、超 300 字拦截、
+    成功路径行更新 + toast + 弹层关闭、失败留层不关、**可见筛选下下架后行移除且 total 递减**、
+    恢复回可见态、恢复失败留层）；
+    **置顶与更多**（**乐观更新立即换文案** + PATCH 焊死 `{isTop: true}`、失败回滚、
+    加载更多带 cursor 追加、无更多不出按钮、**「历史」按钮跳 `/admin/audit?target=<id>`**）
   - `components/SourceHealthTrend`（17）：四指标渲染（成功率/成功轮均条数/抓取轮次/失败次数）、
     **空窗口不给图**、`rate` 为 null 显示"—"而非 0%、**格子按 `days` 铺满再按日期落点**、
     无数据日留浅底空格（**不伪装失败**）、全失败日柱高强制 6% 不塌成零像素、
@@ -360,6 +376,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 | `/admin/sources` | `AdminSources` | **RSS 源管理**（仅 `isAdmin` 账号可见入口；增删改/启停/重置 + 抓取健康状态 + 搜索筛选 + 异常置顶 + 批量操作 + **「遵守 robots.txt」逐源开关**；P1-18 **失败分级标签**（连续 N 次 · 永久性/可重试）与**熔断冷却至 xx:xx**；P1-19 **健康 chip + 就地展开趋势面板**——按天序列/失败原文，及条数下滑与规律抖动两条结论） |
 | `/admin/users` | `AdminUsers` | **管理员管理**（P1-14）：应用内增删「指定账号」——双源说明（env break-glass + 库白名单）、添加并支持预授权、注册状态标记、移除确认与末位保护提示、**env 管理员为 0 时提示应急通道缺失** |
 | `/admin/audit` | `AdminAudit` | **运营审计**（P1-15）：时间线展示谁改了什么——中文动作标签、对象、操作者、字段级变更（旧→新）、游标分页「加载更多」；带 `?target=` 进入时只看该对象；P1-18 新增**自动禁用源**条目（`system` 显示为「系统自动执行」，并带连续失败次数与最后错误自证原因） |
+| `/admin/news` | `AdminNews` | **资讯审核与下架**（P1-20）：全部/可见/已下架三态 chips + 关键词搜索（服务端筛选）、频道标签、置顶 chip、**已下架行红 chip + 理由 + 下架时间**；**下架弹窗理由必填**（空理由/超 300 字前端拦截，「留痕是准入条件」）、一键恢复、置顶开关（乐观更新 + 失败回滚）、游标「加载更多」、每行「历史」直达审计时间线 |
 
 > 底部 `TabBar` 仅对带 `meta.tab` 的路由（首页/视频/消息/我的）显示；详情、评论、图集、登录、搜索类整页不显示。
 
@@ -402,6 +419,13 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   行数据经 `toAdminUser()` 归一化，**形态非法的手机号直接丢弃**（删除按 phone 定位，脏行无法操作）。
   另含审计时间线 `fetchAuditPage({ limit, cursor, target })` → `/admin/audit`（P1-15，同样只有真实后端），
   游标由服务端下发（自增 id）、客户端不解析；行数据经 `toAudit()` 归一化。
+  另含资讯审核四接口（P1-20，同样只有真实后端）：`fetchAdminNews({ status, keyword, channel, limit, cursor })`
+  → `GET /admin/news`（**游标由服务端下发**，`{list, total}` 中 total 始终带回）、`hideNews(id, reason)`
+  → `POST /admin/news/:id/hide`（**理由必填**，空理由走前端拦截，服务端 422 向上抛）、
+  `restoreNews(id)` → `POST /admin/news/:id/restore`、`updateNewsTop(id, isTop)` → `PATCH /admin/news/:id`
+  （**焊死驼峰 `{isTop}`**——蛇形会被后端 `extra='ignore'` 静默丢弃，表现为「开关永不生效」）。
+  行数据经 `toNews()` 归一化：缺 `id` 的脏行丢弃、`hidden` 三件套缺失按**可见**兜底、
+  理由空串转 `null`、`isTop` 非 `true` 一律 `false`、非法 `channel` 回落 `recommend`。
 
 > store 采用**离线优先**：本地先更新并持久化，真实模式下再后台与服务端同步（失败静默，不影响交互）。
 
@@ -435,14 +459,16 @@ npm run dev:api     # 终端 2（把 .env.api 指向 3001 即切换）
 
 ```bash
 node scripts/contract-check.mjs    # 需后端已启动 + DEMO_PASSWORD（47 项，含 18 项二级评论契约）
-# 追加校验管理端接口（当前账号须具备管理能力，共 83 项：源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11）
+# 追加校验管理端接口（当前账号须具备管理能力，共 114 项：源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + 资讯审核 31）
 DEMO_PASSWORD=123456 CHECK_ADMIN=1 node scripts/contract-check.mjs
 ```
 
 > mock 后端同样支持全套校验（演示账号：任意 11 位手机号 + `123456`，`13800138000` 为管理员；
 > 二级评论的回复创建 / 拍平 / 正序分页 / 预览 / 删除语境在 mock 上与真实后端行为一致；
 > 管理员白名单在 mock 上以进程内白名单并存，`isAdminPhone` 与后端同为「env ∪ 库」双源判定；
-> P1-19 的 `days` 非法值在 mock 上同样 422，与真实后端 `ge=1, le=365` 对齐）。
+> P1-19 的 `days` 非法值在 mock 上同样 422，与真实后端 `ge=1, le=365` 对齐；
+> P1-20 的资讯审核五端点在 mock 上同样可用——含**已下架种子资讯**供演示「已下架」分支，
+> 公开四路过滤（列表/详情/搜索/评论）对已下架条目返回与「不存在」**同码 40400**）。
 
 接口清单与错误码见 `../server-api/README.md`。响应统一 `{ code, message, data }`，`code: 0` 成功。
 
@@ -497,7 +523,7 @@ npm run build-storybook# 产出静态站 storybook-static/
 
 ## 开发进度
 
-> 截至 2026-10-11。`npm run build`（`vue-tsc` 类型检查 + 构建）零报错通过。
+> 截至 2026-10-15。`npm run build`（`vue-tsc` 类型检查 + 构建）零报错通过。
 
 ### 已完成
 
@@ -519,7 +545,7 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放
 - [x] Storybook 工程化（`@storybook/vue3-vite`，7 个组件 stories + 静态构建）
 - [x] **FastAPI + SQLite 后端**（`../server-api/`）：JWT 鉴权、PBKDF2 密码、资讯/评论/认证接口、SQLite 持久化
-- [x] 前后端契约自动化校验（`scripts/contract-check.mjs`，**47 项全通过**，含 `/me` 收藏与历史、排序三模式与非法 `sort` 422、热搜词与搜索即统计、**二级评论 18 项**；`CHECK_ADMIN=1` 另加管理端 36 项，其中 **P1-19 健康趋势 11 项**）
+- [x] 前后端契约自动化校验（`scripts/contract-check.mjs`，**47 项全通过**，含 `/me` 收藏与历史、排序三模式与非法 `sort` 422、热搜词与搜索即统计、**二级评论 18 项**；`CHECK_ADMIN=1` 另加管理端 **67 项**——源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + **P1-20 资讯审核 31**）
 - [x] **数据源迁移到 PostgreSQL 18.6**（JSONB 生效，SQLite 全量数据已迁移并保留回退）
 - [x] **收藏 / 浏览历史云端同步**：`api/me.ts` + `stores/user.ts`（离线优先、登录后**并集合并**、
   写操作乐观更新 + 后台推送、登出清空本地标记防串号）；服务端 `user_favorites` / `user_history`
@@ -547,6 +573,14 @@ npm run build-storybook# 产出静态站 storybook-static/
   两条只有历史看得见的结论（**条数下滑**：成功轮均条数最近不足前期六成；
   **规律抖动**：失败集中同一钟点 → 疑似对方维护窗口）。`fetchSources()` 随之改返
   `{list, healthDays}`；mock 后端补两个样本源（条数下滑 / 凌晨规律失败）供演示
+- [x] **资讯审核与下架**（P1-20）：新增 `/admin/news` 管理页——全部/可见/已下架三态筛选 +
+  关键词搜索、**下架必须填理由**（空理由/超 300 字前端拦截，「留痕是准入条件」）、
+  一键恢复、置顶开关（乐观更新 + 失败回滚）、游标「加载更多」、每行「历史」直达审计。
+  后端**软下架非硬删**（`hidden`/`hidden_at`/`hidden_reason`），公开侧列表/详情/搜索/
+  相关/评论五路过滤且与「不存在」**同码 40400**（管理端 40404 区分）；**后审核模式**——
+  不改内容管线，恢复即实时可见；下架/恢复**幂等**（重复下架不覆盖原理由、恢复清空理由防张冠李戴）；
+  审计新增 `news.hide`/`news.restore`/`news.update` 三动作，置顶走 PATCH 字段级 diff；
+  mock 后端五端点 + 已下架种子同步支持
 
 ### 待完成 / 依赖后端
 

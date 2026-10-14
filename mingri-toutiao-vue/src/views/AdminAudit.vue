@@ -37,6 +37,10 @@ const ACTION_LABELS: Record<string, string> = {
   'source.auto_disable': '自动禁用源',
   'admin.add': '添加管理员',
   'admin.remove': '移除管理员',
+  // P1-20：资讯审核与下架
+  'news.hide': '下架资讯',
+  'news.restore': '恢复资讯',
+  'news.update': '修改资讯',
 };
 
 /** 变更字段 → 中文名（与后端 _out 的字段对齐） */
@@ -47,6 +51,7 @@ const FIELD_LABELS: Record<string, string> = {
   weight: '权重',
   enabled: '启用',
   respectRobots: '遵守 robots',
+  isTop: '置顶',
 };
 
 function actionLabel(action: string): string {
@@ -66,6 +71,8 @@ function actorLine(phone: string): string {
 function fieldValue(field: string, value: unknown): string {
   if (field === 'enabled') return value ? '启用' : '停用';
   if (field === 'respectRobots') return value ? '遵守' : '忽略';
+  // P1-20：置顶开关。false 译成"取消置顶"而不是"不置顶"——后者读起来像从未置顶
+  if (field === 'isTop') return value ? '置顶' : '取消置顶';
   if (value === null || value === undefined || value === '') return '空';
   return String(value);
 }
@@ -99,6 +106,15 @@ function changeTexts(item: AdminAuditItem): string[] {
   }
   if (typeof item.detail.seeded === 'number') return [`恢复 ${item.detail.seeded} 个内置源`];
   if (typeof item.detail.note === 'string' && item.detail.note) return [item.detail.note];
+  // P1-20：下架/恢复的明细是 {title, reason}——target 只有资讯 id，
+  // 运营认标题不认 id；理由更必须显示出来，只写"下架了一条资讯"等于没留痕
+  if (typeof item.detail.title === 'string' && item.detail.title) {
+    const parts = [item.detail.title];
+    if (typeof item.detail.reason === 'string' && item.detail.reason) {
+      parts.push(`理由：${item.detail.reason}`);
+    }
+    return parts;
+  }
   return [];
 }
 

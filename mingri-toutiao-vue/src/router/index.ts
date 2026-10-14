@@ -61,6 +61,12 @@ const router = createRouter({
       name: 'admin-audit',
       component: () => import('@/views/AdminAudit.vue'),
     },
+    // 资讯审核与下架（P1-20）：软下架/恢复/置顶，理由必填 + 审计留痕
+    {
+      path: '/admin/news',
+      name: 'admin-news',
+      component: () => import('@/views/AdminNews.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });

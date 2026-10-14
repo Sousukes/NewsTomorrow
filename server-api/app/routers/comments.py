@@ -160,8 +160,10 @@ def _decorate_roots(db: Session, roots: list[Comment], current: Optional[User]) 
 
 
 def _get_news_or_404(db: Session, news_id: str) -> News:
+    # P1-20：已下架资讯的讨论区一并不可见（列表/回复/发表评论都走这里）。
+    # 与「不存在」同码——对外不暴露"它存在但被下了"。
     item = db.get(News, news_id)
-    if item is None:
+    if item is None or item.hidden:
         raise HTTPException(status_code=404, detail={"code": 40400, "message": "内容不存在或已下架"})
     return item
 

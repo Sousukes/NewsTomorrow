@@ -7,9 +7,13 @@ import {
   ADMIN_SOURCES_SUPPORTED,
   createSource,
   deleteSource,
+  fetchAdminNews,
   fetchSourceHealth,
   fetchSources,
+  hideNews,
   resetSources,
+  restoreNews,
+  updateNewsTop,
   updateSource,
 } from '@/api/admin';
 
@@ -46,6 +50,23 @@ const RAW_SOURCE = {
   nextRetryAt: null,
   // P1-19：近期健康摘要
   health: { attempts: 24, rate: 0.9583, avgItems: 18.4 },
+};
+
+// P1-20：管理端资讯行（含 hidden 三件套）
+const RAW_NEWS = {
+  id: 'n_1',
+  title: '某 AI 新品发布',
+  summary: '一场关于端侧模型的发布会',
+  source: 'AIHOT·精选',
+  commentCount: 12,
+  time: '2026-10-15T08:00:00',
+  isTop: false,
+  channel: 'tech',
+  publishedAt: '2026-10-15T08:00:00',
+  hotScore: 12.3456,
+  hidden: false,
+  hiddenAt: null,
+  hiddenReason: null,
 };
 
 beforeEach(() => {
@@ -403,6 +424,195 @@ describe('api/admin（健康历史，P1-19）', () => {
   });
 });
 
+// P1-20：资讯审核与下架。这一层的关键是**归一化不猜状态**——
+// hidden 缺失按可见兜底（老后端），isTop 非 true 一律 false（不猜置顶态），
+// 坏行整行丢弃（没有 id 的行无法定位，下架/恢复/置顶全都按 id 操作）。
+describe('api/admin（资讯审核与下架，P1-20）', () => {
+  const stubNews = (data: unknown) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond(data)),
+    );
+  };
+
+  /** 列表信封：多数用例只关心 list 本身，兜底值单独覆盖 */
+  const envelope = (over: Record<string, unknown> = {}) => ({
+    list: [RAW_NEWS],
+    total: 1,
+    hasMore: false,
+    nextCursor: null,
+    ...over,
+  });
+
+  it('fetchAdminNews 不带参数时请求裸路径，并解析信封', async () => {
+    stubNews(envelope());
+    const page = await fetchAdminNews();
+    expect(lastCall()?.[0] as string).toBe('/api/admin/news');
+    expect(page.list).toHaveLength(1);
+    expect(page.total).toBe(1);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('查询串带上筛选与分页参数，keyword 做 trim', async () => {
+    stubNews(envelope());
+    await fetchAdminNews({
+      status: 'hidden',
+      keyword: '  发布会  ',
+      channel: 'tech',
+      limit: 20,
+      cursor: 'c1',
+    });
+    // 顺序即插入顺序：status → keyword → channel → limit → cursor
+    expect(lastCall()?.[0] as string).toBe(
+      '/api/admin/news?status=hidden&keyword=%E5%8F%91%E5%B8%83%E4%BC%9A&channel=tech&limit=20&cursor=c1',
+    );
+  });
+
+  it('纯空白 keyword 不拼进查询串（否则等于搜全部，还多一次无效请求）', async () => {
+    stubNews(envelope());
+    await fetchAdminNews({ keyword: '   ' });
+    expect(lastCall()?.[0] as string).toBe('/api/admin/news');
+  });
+
+  it('信封整段缺失时回落为空列表与零值，不抛', async () => {
+    stubNews({});
+    const page = await fetchAdminNews();
+    expect(page.list).toEqual([]);
+    expect(page.total).toBe(0);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('整行归一化：hidden 三件套与公开字段一起透出', async () => {
+    stubNews(
+      envelope({
+        list: [
+          {
+            ...RAW_NEWS,
+            hidden: true,
+            hiddenAt: '2026-10-15T09:30:00',
+            hiddenReason: '来源不可靠',
+          },
+        ],
+      }),
+    );
+    const [n] = (await fetchAdminNews()).list;
+    expect(n).toMatchObject({
+      id: 'n_1',
+      title: '某 AI 新品发布',
+      hidden: true,
+      hiddenAt: '2026-10-15T09:30:00',
+      hiddenReason: '来源不可靠',
+      isTop: false,
+      channel: 'tech',
+      hotScore: 12.3456,
+      publishedAt: '2026-10-15T08:00:00',
+      commentCount: 12,
+    });
+  });
+
+  it('缺 id 的行被丢弃（下架/恢复/置顶都按 id 定位）', async () => {
+    stubNews(envelope({ list: [{ title: '没有 id' }, RAW_NEWS] }));
+    const page = await fetchAdminNews();
+    expect(page.list.map((n) => n.id)).toEqual(['n_1']);
+  });
+
+  it('hidden 三件套缺失（老后端）时按可见兜底，而不是 undefined', async () => {
+    // 显式删键：用 RAW_NEWS 里已有的 false/null 测不出"缺失"这条分支
+    const legacy: Record<string, unknown> = { ...RAW_NEWS };
+    delete legacy.hidden;
+    delete legacy.hiddenAt;
+    delete legacy.hiddenReason;
+    stubNews(envelope({ list: [legacy] }));
+    const [n] = (await fetchAdminNews()).list;
+    expect(n.hidden).toBe(false);
+    expect(n.hiddenAt).toBeNull();
+    expect(n.hiddenReason).toBeNull();
+  });
+
+  it('hiddenReason / hiddenAt 空串归一化为 null', async () => {
+    stubNews(
+      envelope({
+        list: [{ ...RAW_NEWS, hidden: true, hiddenAt: '', hiddenReason: '' }],
+      }),
+    );
+    const [n] = (await fetchAdminNews()).list;
+    expect(n.hiddenAt).toBeNull();
+    expect(n.hiddenReason).toBeNull();
+  });
+
+  it('isTop 非 true 一律 false（不猜置顶态）', async () => {
+    stubNews(envelope({ list: [{ ...RAW_NEWS, isTop: 'yes' }] }));
+    expect((await fetchAdminNews()).list[0].isTop).toBe(false);
+  });
+
+  it('hotScore / commentCount 是垃圾值时回落为 0，不产生 NaN', async () => {
+    stubNews(envelope({ list: [{ ...RAW_NEWS, hotScore: '很高', commentCount: null }] }));
+    const [n] = (await fetchAdminNews()).list;
+    expect(n.hotScore).toBe(0);
+    expect(n.commentCount).toBe(0);
+  });
+
+  it('title 缺失时回落为 id（界面至少有可定位的一行）', async () => {
+    stubNews(envelope({ list: [{ ...RAW_NEWS, title: '' }] }));
+    expect((await fetchAdminNews()).list[0].title).toBe('n_1');
+  });
+
+  it('非法 channel 归一化为默认频道', async () => {
+    stubNews(envelope({ list: [{ ...RAW_NEWS, channel: 'tecn' }] }));
+    expect((await fetchAdminNews()).list[0].channel).toBe('recommend');
+  });
+
+  it('hideNews 走 POST 并带上理由，id 被编码', async () => {
+    stubNews({
+      ...RAW_NEWS,
+      hidden: true,
+      hiddenAt: '2026-10-15T10:00:00',
+      hiddenReason: '内容错误',
+    });
+    const n = await hideNews('a/b', { reason: '内容错误' });
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/news/a%2Fb/hide');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ reason: '内容错误' });
+    expect(n.hidden).toBe(true);
+    expect(n.hiddenReason).toBe('内容错误');
+  });
+
+  it('hideNews 响应无法解析时抛错（而不是把空壳当成功）', async () => {
+    stubNews({ title: '没有 id' });
+    await expect(hideNews('n_1', { reason: 'x' })).rejects.toThrow('下架成功但响应无法解析');
+  });
+
+  it('restoreNews 走 POST 且不带 body', async () => {
+    stubNews({ ...RAW_NEWS, hidden: false });
+    const n = await restoreNews('n_1');
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/news/n_1/restore');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeUndefined();
+    expect(n.hidden).toBe(false);
+  });
+
+  it('updateNewsTop 走 PATCH，body 焊死驼峰 isTop（蛇形会被后端静默丢弃）', async () => {
+    stubNews({ ...RAW_NEWS, isTop: true });
+    await updateNewsTop('n_1', { isTop: true });
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/news/n_1');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({ isTop: true });
+  });
+
+  it('后端 422（空理由）向上抛错，供页面原地展示', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fail(422, '下架理由不能为空')),
+    );
+    await expect(hideNews('n_1', { reason: '' })).rejects.toThrow('下架理由不能为空');
+  });
+});
+
 describe('api/admin（mock 模式）', () => {
   it('USE_MOCK=true 时明确拒绝，而不是伪造一份可增删的假列表', async () => {
     vi.resetModules();
@@ -410,6 +620,18 @@ describe('api/admin（mock 模式）', () => {
     const mod = await import('@/api/admin');
     expect(mod.ADMIN_SOURCES_SUPPORTED).toBe(false);
     await expect(mod.fetchSources()).rejects.toThrow('mock 模式');
+    vi.doUnmock('@/api/config');
+    vi.resetModules();
+  });
+
+  it('USE_MOCK=true 时资讯审核三个接口同样明确拒绝', async () => {
+    vi.resetModules();
+    vi.doMock('@/api/config', () => ({ USE_MOCK: true, API_BASE: '' }));
+    const mod = await import('@/api/admin');
+    await expect(mod.fetchAdminNews()).rejects.toThrow('mock 模式');
+    await expect(mod.hideNews('n_1', { reason: 'x' })).rejects.toThrow('mock 模式');
+    await expect(mod.restoreNews('n_1')).rejects.toThrow('mock 模式');
+    await expect(mod.updateNewsTop('n_1', { isTop: true })).rejects.toThrow('mock 模式');
     vi.doUnmock('@/api/config');
     vi.resetModules();
   });

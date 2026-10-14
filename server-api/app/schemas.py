@@ -142,3 +142,32 @@ class AdminIn(BaseModel):
 
     phone: str = Field(min_length=11, max_length=11, pattern=r"^1\d{10}$")
     note: str = Field(default="", max_length=100)
+
+
+class NewsHideIn(BaseModel):
+    """资讯下架入参（P1-20）：理由**必填**。
+
+    「留痕是准入条件」——与 P1-18 自动禁用必须能解释同理。空理由（含纯空白）
+    一律 422：运营当时省十秒钟，事后排查就要靠猜。`min_length=1` 挡不住
+    单个空格，故再用 validator strip 后判空。
+    """
+
+    reason: str = Field(min_length=1, max_length=300)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("下架理由不能为空")
+        return v
+
+
+class NewsTopIn(BaseModel):
+    """资讯置顶开关（PATCH 局部更新，字段可选——对齐 SourceUpdateIn 的「不传即不改」）。
+
+    入参多词字段走驼峰（`isTop`）：写成蛇形会被 pydantic `extra='ignore'`
+    静默丢弃，表现为「开关能点、但永远不生效」（见 SourceIn.respectRobots 注释）。
+    """
+
+    isTop: bool | None = None

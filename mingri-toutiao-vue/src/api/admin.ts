@@ -1,5 +1,6 @@
 /**
- * 管理端接口：RSS 源配置（后端 P1-9，界面 P1-10）+ 管理员白名单（P1-14）。
+ * 管理端接口：RSS 源配置（后端 P1-9，界面 P1-10）+ 管理员白名单（P1-14）
+ * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）。
  *
  * 与 `api/me.ts` 的关键差别：**没有 mock 短路**。源配置与白名单只存在于
  * 后端数据库中，mock 模式下并无真实对象可操作——伪造一份"能增能删"的假列表
@@ -13,9 +14,14 @@ import { toChannel } from '@/constants/channels';
 import type {
   AdminAuditItem,
   AdminAuditPage,
+  AdminNewsItem,
+  AdminNewsListResult,
+  AdminNewsQuery,
   AdminUserInput,
   AdminUserItem,
   AdminUserList,
+  NewsHideInput,
+  NewsTopInput,
   RssSourceItem,
   SourceCreateInput,
   SourceHealth,
@@ -316,4 +322,99 @@ export async function fetchAuditPage(
     hasMore: data?.hasMore === true,
     nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : null,
   };
+}
+
+// ---------------------------------------------------------------- 资讯审核与下架（P1-20）
+
+/**
+ * 管理端资讯行归一化。
+ *
+ * `hidden` 缺省视为 false（后端默认可见）；但 `hiddenReason` 为空的已下架行
+ * 照样渲染——那是历史数据/异常态，界面要能暴露出来而不是伪装成普通行。
+ */
+function toAdminNews(raw: unknown): AdminNewsItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = typeof r.id === 'string' ? r.id : '';
+  if (!id) return null; // 没有 id 的行无法定位（下架/恢复/置顶都按 id 操作）
+  return {
+    id,
+    title: typeof r.title === 'string' && r.title ? r.title : id,
+    summary: typeof r.summary === 'string' && r.summary ? r.summary : null,
+    source: typeof r.source === 'string' ? r.source : '',
+    commentCount: Number.isFinite(Number(r.commentCount)) ? Number(r.commentCount) : 0,
+    time: typeof r.time === 'string' ? r.time : '',
+    isTop: r.isTop === true,
+    channel: toChannel(r.channel),
+    publishedAt: typeof r.publishedAt === 'string' && r.publishedAt ? r.publishedAt : null,
+    hotScore: Number.isFinite(Number(r.hotScore)) ? Number(r.hotScore) : 0,
+    hidden: r.hidden === true,
+    hiddenAt: typeof r.hiddenAt === 'string' && r.hiddenAt ? r.hiddenAt : null,
+    hiddenReason: typeof r.hiddenReason === 'string' && r.hiddenReason ? r.hiddenReason : null,
+  };
+}
+
+/**
+ * GET /admin/news —— 管理端资讯列表：筛选 + 搜索 + 游标分页（P1-20）。
+ *
+ * 默认 `status=all`（含已下架）：运营要能核验自己的下架操作。
+ * `total` 是当前筛选的总数；`cursor` 由服务端下发，客户端原样回传。
+ */
+export async function fetchAdminNews(options: AdminNewsQuery = {}): Promise<AdminNewsListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.status) params.set('status', options.status);
+  if (options.keyword?.trim()) params.set('keyword', options.keyword.trim());
+  if (options.channel) params.set('channel', options.channel);
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', options.cursor);
+  const qs = params.toString();
+  const data = await request<{
+    list?: unknown;
+    total?: number;
+    hasMore?: boolean;
+    nextCursor?: string | null;
+  }>(`/admin/news${qs ? `?${qs}` : ''}`);
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toAdminNews).filter((n): n is AdminNewsItem => n !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+    hasMore: data?.hasMore === true,
+    nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : null,
+  };
+}
+
+/** POST /admin/news/:id/hide —— 软下架（理由必填，空/纯空白 422；幂等） */
+export async function hideNews(id: string, input: NewsHideInput): Promise<AdminNewsItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/news/${encodeURIComponent(id)}/hide`, {
+    method: 'POST',
+    body: input,
+  });
+  const item = toAdminNews(data);
+  if (!item) throw new Error('下架成功但响应无法解析');
+  return item;
+}
+
+/** POST /admin/news/:id/restore —— 恢复已下架资讯（幂等；公开查询实时生效） */
+export async function restoreNews(id: string): Promise<AdminNewsItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/news/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+  });
+  const item = toAdminNews(data);
+  if (!item) throw new Error('恢复成功但响应无法解析');
+  return item;
+}
+
+/** PATCH /admin/news/:id —— 局部更新（当前仅置顶开关；字段级 diff 审计） */
+export async function updateNewsTop(id: string, input: NewsTopInput): Promise<AdminNewsItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/news/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: input,
+  });
+  const item = toAdminNews(data);
+  if (!item) throw new Error('更新成功但响应无法解析');
+  return item;
 }

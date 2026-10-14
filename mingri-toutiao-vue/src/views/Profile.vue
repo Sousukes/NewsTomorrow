@@ -34,6 +34,12 @@ const menu = computed(() => {
       to: '/admin/sources',
     });
     items.push({
+      key: 'admin-news',
+      label: '资讯审核',
+      desc: '下架违规资讯、恢复与置顶',
+      to: '/admin/news',
+    });
+    items.push({
       key: 'admin-users',
       label: '管理员管理',
       desc: '指定可访问后台的账号',

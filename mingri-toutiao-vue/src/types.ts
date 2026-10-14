@@ -266,3 +266,58 @@ export interface AdminAuditPage {
   hasMore: boolean;
   nextCursor: string | null;
 }
+
+/**
+ * 管理端资讯行（P1-20，对应 GET /api/admin/news 的条目）。
+ * 公开 `NewsItem` 的超集：附下架三件套与排查字段（发布时间 / 热度分）。
+ */
+export interface AdminNewsItem {
+  id: string;
+  title: string;
+  summary: string | null;
+  source: string;
+  commentCount: number;
+  time: string;
+  isTop: boolean;
+  channel: Channel;
+  /** ISO 时间串；管理端排序与定位的依据 */
+  publishedAt: string | null;
+  /** 落库热度分（互动加权 × 时间衰减），置顶决策参考 */
+  hotScore: number;
+  /** 是否已下架（软下架：公开四路实时过滤，可恢复） */
+  hidden: boolean;
+  hiddenAt: string | null;
+  /** 下架理由（必填，≤300 字）；恢复后为 null */
+  hiddenReason: string | null;
+}
+
+/** GET /api/admin/news 的信封（筛选后的总数 + 游标分页） */
+export interface AdminNewsListResult {
+  list: AdminNewsItem[];
+  /** 当前筛选条件下的总条数（界面显示"共 N 条"） */
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+/** 管理端资讯列表查询（不传的项后端用默认值） */
+export interface AdminNewsQuery {
+  /** all（默认，含已下架）| visible | hidden */
+  status?: 'all' | 'visible' | 'hidden';
+  /** 标题/摘要关键词（服务端 ILIKE） */
+  keyword?: string;
+  channel?: Channel;
+  limit?: number;
+  /** 上一页末条的游标（服务端下发，客户端不解析） */
+  cursor?: string | null;
+}
+
+/** 下架入参：理由必填（trim 后 ≤300，空则 422） */
+export interface NewsHideInput {
+  reason: string;
+}
+
+/** 置顶开关入参（PATCH 局部更新；多词字段走驼峰，蛇形会被静默丢弃） */
+export interface NewsTopInput {
+  isTop: boolean;
+}

@@ -210,6 +210,23 @@ class TestMigrationChain:
         fks = insp.get_foreign_keys("rss_source_health_events")
         assert any(fk["referred_table"] == "rss_sources" for fk in fks)
 
+    def test_news_soft_hide_columns(self, chain_db):
+        """0020：资讯软下架三列（P1-20）。
+
+        钉住两件容易在后续改动里悄悄丢掉的事：
+        - `hidden` 必须**非空且存量默认 false**——NULL 会在公开查询的过滤条件里
+          掉出结果集，表现为「老资讯突然搜不到」，而功能测试走的是新建行，
+          根本看不出这类问题（与 0018 consecutive_failures 同款教训）；
+        - **刻意不给 hidden 建索引**：下架集小，索引只会拖慢热 feed 写入。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("news")}
+        assert {"hidden", "hidden_at", "hidden_reason"} <= cols
+        col = next(c for c in insp.get_columns("news") if c["name"] == "hidden")
+        assert col["nullable"] is False
+        names = {i["name"] for i in insp.get_indexes("news")}
+        assert not any("hidden" in n for n in names)
+
     def test_admin_audit_logs_table(self, chain_db):
         """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""
         insp = inspector_of(chain_db)

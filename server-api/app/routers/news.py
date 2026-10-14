@@ -122,7 +122,9 @@ def _search_ranked(db: Session, keyword: str, page: int, pageSize: int):
     score = title_hit + summary_hit + sim_title * _SEARCH_TITLE_WEIGHT + sim_summary
 
     query = db.query(News).filter(
-        or_(News.title.ilike(like, escape="\\"), News.summary.ilike(like, escape="\\"))
+        or_(News.title.ilike(like, escape="\\"), News.summary.ilike(like, escape="\\")),
+        # P1-20：已下架内容不参与搜索召回
+        News.hidden.is_(False),
     )
     total = query.count()
     items = (
@@ -143,7 +145,9 @@ def _search_fallback(db: Session, keyword: str, page: int, pageSize: int):
     like = f"%{_escape_like(keyword)}%"
     title_hit = case((News.title.ilike(like, escape="\\"), 0), else_=1)
     query = db.query(News).filter(
-        or_(News.title.ilike(like, escape="\\"), News.summary.ilike(like, escape="\\"))
+        or_(News.title.ilike(like, escape="\\"), News.summary.ilike(like, escape="\\")),
+        # P1-20：已下架内容不参与搜索召回
+        News.hidden.is_(False),
     )
     total = query.count()
     items = (
@@ -289,7 +293,13 @@ def list_news(
     - `sort`：`latest`（默认，时间）/ `hot`（热度）/ `for-you`（热度 + 频道偏好）；
       `for-you` 在未登录或无行为数据时退化为 `hot`（偏好权重为空，加分恒为 0）；
     - 传 `cursor` 走 keyset 分页（性能更好），否则回退 offset 分页。
-    """
+
+下架过滤（P1-20）：
+    软下架的资讯（`hidden`）对所有公开查询不可见：列表 / 详情 / 搜索 /
+    相关推荐四路统一加 `News.hidden.is_(False)`；详情与相关推荐对已下架目标
+    直接 404（与「不存在」同码——对外不该暴露"它存在但被下了"）。
+    热度重算仍计算已下架行：恢复的那一刻就该拿到新鲜分数。
+"""
     if sort not in SORT_MODES:
         raise HTTPException(
             status_code=422, detail={"code": 42201, "message": f"排序方式不支持：{sort}"}
@@ -301,6 +311,8 @@ def list_news(
     q = db.query(News)
     if channel and channel != "recommend":
         q = q.filter(News.channel == channel)
+    # P1-20：已下架内容不进公开信息流（游标分页同样生效——过滤加在 keyset 之前）
+    q = q.filter(News.hidden.is_(False))
 
     if cursor:
         decoded = _decode_cursor(cursor)
@@ -409,7 +421,9 @@ def related_news(
     始终排除当前资讯自身，且三级结果按 id 去重。
     """
     target = db.get(News, news_id)
-    if target is None:
+    # 已下架的资讯与「不存在」同码返回：对外不暴露"它存在但被下了"。
+    # 正常路径也到不了这里——详情页先 404，相关推荐没有入口。
+    if target is None or target.hidden:
         raise HTTPException(status_code=404, detail={"code": 40400, "message": "内容不存在或已下架"})
 
     picked: list[News] = []
@@ -420,7 +434,7 @@ def related_news(
         sim = func.similarity(News.title, target.title)
         rows = (
             db.query(News)
-            .filter(News.id != news_id, sim > _SIMILARITY_THRESHOLD)
+            .filter(News.id != news_id, sim > _SIMILARITY_THRESHOLD, News.hidden.is_(False))
             .order_by(sim.desc(), _PUB.desc(), News.id.desc())
             .limit(limit)
             .all()
@@ -437,6 +451,7 @@ def related_news(
                 db.query(News).filter(
                     News.id != news_id,
                     News.channel == target.channel,
+                    News.hidden.is_(False),
                     ~News.id.in_(seen) if seen else True,
                 )
             )
@@ -451,7 +466,9 @@ def related_news(
     # ---- 3) 全站最新兜底 ----
     if len(picked) < limit:
         rows = (
-            _order_by(db.query(News).filter(News.id != news_id, ~News.id.in_(seen)))
+            _order_by(
+                db.query(News).filter(News.id != news_id, News.hidden.is_(False), ~News.id.in_(seen))
+            )
             .limit(limit - len(picked))
             .all()
         )
@@ -465,7 +482,8 @@ def related_news(
 
 @router.get("/{news_id}", response_model=None)
 def news_detail(news_id: str, db: Session = Depends(get_db)):
+    # 已下架与「不存在」同码：对外不暴露"它存在但被下了"（P1-20）
     item = db.get(News, news_id)
-    if item is None:
+    if item is None or item.hidden:
         raise HTTPException(status_code=404, detail={"code": 40400, "message": "内容不存在或已下架"})
     return ok(to_out(item))

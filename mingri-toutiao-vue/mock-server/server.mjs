@@ -27,6 +27,9 @@ const news = [
     images: ['', '', ''],
     channel: 'tech',
     variant: 'triple',
+    // P1-20：管理端排序/定位用（published_at 统一格式，coalesce 空串）
+    publishedAt: '2026-10-15T09:30:00',
+    hotScore: 86.5,
   },
   {
     id: 'n2',
@@ -38,6 +41,8 @@ const news = [
     cover: '',
     channel: 'finance',
     variant: 'left-right',
+    publishedAt: '2026-10-15T08:30:00',
+    hotScore: 41.2,
   },
   {
     id: 'n3',
@@ -49,6 +54,8 @@ const news = [
     channel: 'recommend',
     isTop: true,
     variant: 'text',
+    publishedAt: '2026-10-15T10:30:00',
+    hotScore: 30.75,
   },
   {
     id: 'n4',
@@ -60,6 +67,8 @@ const news = [
     cover: '',
     channel: 'video',
     variant: 'video',
+    publishedAt: '2026-10-15T06:30:00',
+    hotScore: 58.125,
   },
   {
     id: 'n5',
@@ -71,6 +80,8 @@ const news = [
     images: ['', '', ''],
     channel: 'tech',
     variant: 'triple',
+    publishedAt: '2026-10-15T07:30:00',
+    hotScore: 63.4,
   },
   {
     id: 'n6',
@@ -82,6 +93,25 @@ const news = [
     cover: '',
     channel: 'recommend',
     variant: 'left-right',
+    publishedAt: '2026-10-15T05:30:00',
+    hotScore: 91.25,
+  },
+  {
+    // P1-20：已下架种子。公开四路（列表/详情/搜索/评论）实时过滤掉它，
+    // 管理端默认 status=all 能看见——否则 mock 下永远看不到「已下架」分支
+    id: 'n7',
+    title: '演示用已下架资讯',
+    summary: '这条资讯在 mock 启动时即处于已下架状态，用于演示审核页的已下架分支与恢复操作。',
+    source: '演示源',
+    commentCount: 5,
+    time: '8小时前',
+    channel: 'recommend',
+    variant: 'text',
+    publishedAt: '2026-10-15T03:30:00',
+    hotScore: 3.5,
+    hidden: true,
+    hiddenAt: '2026-10-15T10:05:00',
+    hiddenReason: '演示种子：内容待核实',
   },
 ];
 
@@ -698,6 +728,8 @@ const server = createServer(async (req, res) => {
       return fail(res, 422, 42201, `排序方式不支持：${sort}`);
     }
     let list = channel === 'recommend' ? news : news.filter((n) => n.channel === channel);
+    // P1-20：公开列表实时过滤已下架（软下架，与后端 list_news 同口径）
+    list = list.filter((n) => n.hidden !== true);
     // 热度模式：无服务端时用评论数近似（离线演示也能看出差异）
     if (sort !== 'latest') {
       list = [...list].sort((x, y) => (y.commentCount ?? 0) - (x.commentCount ?? 0));
@@ -717,12 +749,13 @@ const server = createServer(async (req, res) => {
     const kw = q.toLowerCase();
     const hit = news.filter(
       (n) =>
-        String(n.title ?? '')
+        n.hidden !== true && // P1-20：搜索同样实时过滤已下架
+        (String(n.title ?? '')
           .toLowerCase()
           .includes(kw) ||
-        String(n.summary ?? '')
-          .toLowerCase()
-          .includes(kw),
+          String(n.summary ?? '')
+            .toLowerCase()
+            .includes(kw)),
     );
     // 与后端一致：搜索即计入热词统计
     terms.set(q, (terms.get(q) ?? 0) + 1);
@@ -742,12 +775,16 @@ const server = createServer(async (req, res) => {
   // GET /news/:id
   if (head === 'news' && a && !b && method === 'GET') {
     const item = news.find((n) => n.id === a);
-    if (!item) return fail(res, 404, 40400, '内容不存在或已下架');
+    // P1-20：已下架与不存在同码 40400（对外不暴露"被下了"）
+    if (!item || item.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
     return ok(res, item);
   }
 
   // GET /news/:id/comments（P1-12：只返回主评论，附回复数与最早 2 条预览）
   if (head === 'news' && a && b === 'comments' && !c && method === 'GET') {
+    // P1-20：已下架资讯的评论一并不可见（与后端 _get_news_or_404 一致）
+    const target = news.find((n) => n.id === a);
+    if (!target || target.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
     const all = comments[a] ?? [];
     const roots = all.filter((x) => !x.rootId && !x.isDeleted).sort((x, y) => y._seq - x._seq);
     // mock 不做真游标：一次返回全部主评论（与既有行为一致）
@@ -783,6 +820,9 @@ const server = createServer(async (req, res) => {
   // POST /news/:id/comments（需登录；parentId 非空时为回复——二级评论）
   if (head === 'news' && a && b === 'comments' && !c && method === 'POST') {
     if (!requireAuth(req, res)) return;
+    // P1-20：已下架资讯不能发评论（与后端 _get_news_or_404 一致）
+    const target = news.find((n) => n.id === a);
+    if (!target || target.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
     const { content, parentId } = await readBody(req);
     const text = String(content ?? '').trim();
     if (!text) return fail(res, 400, 40002, '评论内容不能为空');
@@ -1024,6 +1064,174 @@ const server = createServer(async (req, res) => {
     audit(operator, 'source.delete', b, { snapshot: sourceOut(sources[i]) });
     const [row] = sources.splice(i, 1);
     return ok(res, { key: row.key });
+  }
+
+  /* --------------------- 管理端：资讯审核与下架（P1-20） --------------------- */
+
+  /** status 三态，与后端 Query(pattern=...) 一致 */
+  const NEWS_STATUSES = ['all', 'visible', 'hidden'];
+
+  /** 管理端资讯行输出，与后端 admin._news_out 同构（公开字段的超集 + 下架三件套） */
+  function adminNewsOut(row) {
+    return {
+      id: row.id,
+      title: row.title,
+      summary: row.summary ?? null,
+      source: row.source ?? '',
+      commentCount: row.commentCount ?? 0,
+      time: row.time ?? '',
+      images: row.images ?? null,
+      cover: row.cover ?? null,
+      videoUrl: row.videoUrl ?? null,
+      playCount: row.playCount ?? null,
+      isTop: row.isTop === true,
+      channel: row.channel ?? 'recommend',
+      variant: row.variant ?? 'left-right',
+      publishedAt: row.publishedAt ?? null,
+      hotScore: Number.isFinite(Number(row.hotScore)) ? Number(row.hotScore) : 0,
+      hidden: row.hidden === true,
+      hiddenAt: row.hiddenAt ?? null,
+      hiddenReason: row.hiddenReason ?? null,
+    };
+  }
+
+  // GET /admin/news
+  if (head === 'admin' && a === 'news' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const status = q.get('status') || 'all';
+    if (!NEWS_STATUSES.includes(status)) {
+      return fail(res, 422, 42200, `参数校验失败：status 必须是 ${NEWS_STATUSES.join('/')} 之一`);
+    }
+    const channel = q.get('channel');
+    if (channel !== null && !CHANNEL_KEYS.includes(channel)) {
+      return fail(
+        res,
+        422,
+        42201,
+        `参数校验失败：channel 必须是以下之一：${CHANNEL_KEYS.join(', ')}`,
+      );
+    }
+    const keyword = q.get('keyword') ?? '';
+    if (keyword.length > 50) return fail(res, 422, 42200, '参数校验失败：keyword 不能超过 50 字');
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    const kw = keyword.trim().toLowerCase();
+    let rows = news.filter((n) =>
+      status === 'all' ? true : status === 'hidden' ? n.hidden === true : n.hidden !== true,
+    );
+    if (kw) {
+      rows = rows.filter(
+        (n) =>
+          String(n.title ?? '')
+            .toLowerCase()
+            .includes(kw) ||
+          String(n.summary ?? '')
+            .toLowerCase()
+            .includes(kw),
+      );
+    }
+    if (channel) rows = rows.filter((n) => n.channel === channel);
+    // 排序与后端一致：published_at DESC, id DESC（管理端要时间线，不搞置顶优先）
+    rows = [...rows].sort(
+      (x, y) =>
+        String(y.publishedAt ?? '').localeCompare(String(x.publishedAt ?? '')) ||
+        String(y.id).localeCompare(String(x.id)),
+    );
+    const total = rows.length;
+    const cursor = q.get('cursor');
+    if (cursor) {
+      let pub = '';
+      let nid = '';
+      try {
+        const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+        pub = String(decoded?.[0] ?? '');
+        nid = String(decoded?.[1] ?? '');
+      } catch {
+        return fail(res, 400, 40003, '分页游标无效');
+      }
+      rows = rows.filter(
+        (n) =>
+          String(n.publishedAt ?? '') < pub ||
+          (String(n.publishedAt ?? '') === pub && String(n.id) < nid),
+      );
+    }
+    const page = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const last = page.at(-1);
+    return ok(res, {
+      list: page.map(adminNewsOut),
+      total,
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? Buffer.from(JSON.stringify([last.publishedAt ?? '', last.id])).toString('base64url')
+          : null,
+    });
+  }
+
+  // POST /admin/news/:id/hide（软下架，幂等；理由必填）
+  // 路径分段：/admin/news/:id/hide → b 是资讯 id，c 才是动作
+  if (head === 'admin' && a === 'news' && b && c === 'hide' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const item = news.find((n) => n.id === b);
+    if (!item) return fail(res, 404, 40404, '资讯不存在');
+    const body = await readBody(req);
+    const reason = String(body.reason ?? '').trim();
+    // 与后端 NewsHideIn 同口径：空/纯空白 422（留痕是准入条件）
+    if (!reason) return fail(res, 422, 42200, '参数校验失败：下架理由不能为空');
+    if (reason.length > 300) return fail(res, 422, 42200, '参数校验失败：下架理由不能超过 300 字');
+    // 幂等：已下架不覆盖原理由、不重复记审计
+    if (item.hidden !== true) {
+      item.hidden = true;
+      item.hiddenAt = new Date().toISOString();
+      item.hiddenReason = reason;
+      // detail 带标题：审计页的 target 只有 id，运营认标题不认 id
+      audit(operator, 'news.hide', item.id, { reason, title: item.title });
+    }
+    return ok(res, adminNewsOut(item), '已下架');
+  }
+
+  // POST /admin/news/:id/restore（恢复，幂等；理由只对下架状态有意义，恢复即清空）
+  if (head === 'admin' && a === 'news' && b && c === 'restore' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const item = news.find((n) => n.id === b);
+    if (!item) return fail(res, 404, 40404, '资讯不存在');
+    if (item.hidden === true) {
+      item.hidden = false;
+      item.hiddenAt = null;
+      item.hiddenReason = null;
+      audit(operator, 'news.restore', item.id, { title: item.title });
+    }
+    return ok(res, adminNewsOut(item), '已恢复');
+  }
+
+  // PATCH /admin/news/:id（局部更新，当前仅置顶；字段级 diff，无变化不记审计）
+  if (head === 'admin' && a === 'news' && b && !c && method === 'PATCH') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const item = news.find((n) => n.id === b);
+    if (!item) return fail(res, 404, 40404, '资讯不存在');
+    const body = await readBody(req);
+    const before = adminNewsOut(item);
+    // 多词字段走驼峰：蛇形 is_top 会被静默忽略（与后端 pydantic extra='ignore' 一致）
+    if (body.isTop !== undefined) item.isTop = body.isTop === true;
+    const after = adminNewsOut(item);
+    const changes = {};
+    if (before.isTop !== after.isTop) changes.isTop = [before.isTop, after.isTop];
+    if (Object.keys(changes).length) {
+      audit(operator, 'news.update', item.id, { changes, title: item.title });
+    }
+    return ok(res, after, '已更新');
+  }
+
+  // GET /admin/news/:id（40404 与公开端 40400 刻意分开）
+  if (head === 'admin' && a === 'news' && b && !c && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const item = news.find((n) => n.id === b);
+    if (!item) return fail(res, 404, 40404, '资讯不存在');
+    return ok(res, adminNewsOut(item));
   }
 
   /* --------------------- 管理端：管理员白名单（P1-14） --------------------- */

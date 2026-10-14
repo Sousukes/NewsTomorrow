@@ -6,7 +6,7 @@
  *
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
- * 源健康历史与趋势（P1-19）。
+ * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -631,6 +631,233 @@ const run = async () => {
       missing = true;
     }
     check('未知源的趋势 404', missing);
+  }
+
+  // 14) 管理端：资讯审核与下架（P1-20）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //     核心口径：软下架可恢复、公开四路实时过滤（对外与不存在同码 40400）、
+  //     理由必填 422、操作幂等（重复下架不抹掉第一次理由）、字段级 diff 审计。
+  //     收尾必须恢复演示条，避免污染开发库（与 12 的临时源同思路）。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    // 14.1 列表形状与筛选
+    const allNews = await request('/admin/news?limit=100', { token });
+    check(
+      'GET /admin/news 返回 {list,total,hasMore,nextCursor}',
+      Array.isArray(allNews.list) &&
+        typeof allNews.total === 'number' &&
+        typeof allNews.hasMore === 'boolean' &&
+        'nextCursor' in allNews,
+      `${allNews.total} 条`,
+    );
+    check(
+      '管理端行含 hidden 三件套与 publishedAt/hotScore',
+      (allNews.list ?? []).every(
+        (n) =>
+          typeof n.hidden === 'boolean' &&
+          'hiddenAt' in n &&
+          'hiddenReason' in n &&
+          typeof n.hotScore === 'number' &&
+          (n.publishedAt === null || typeof n.publishedAt === 'string'),
+      ),
+    );
+
+    let badStatus = false;
+    try {
+      await request('/admin/news?status=bogus', { token });
+    } catch {
+      badStatus = true;
+    }
+    check('非法 status 被拒（422）', badStatus);
+
+    const visibleNews = await request('/admin/news?status=visible', { token });
+    check(
+      'status=visible 只返回可见行',
+      (visibleNews.list ?? []).every((n) => n.hidden === false),
+    );
+    const hiddenNews = await request('/admin/news?status=hidden', { token });
+    check(
+      'status=hidden 只返回已下架行',
+      (hiddenNews.list ?? []).every((n) => n.hidden === true),
+    );
+
+    let missingNews = false;
+    try {
+      await request('/admin/news/__no_such_news__', { token });
+    } catch {
+      missingNews = true;
+    }
+    check('未知资讯 404', missingNews);
+
+    // 14.2 挑一条可见资讯走完整「下架 → 恢复」闭环
+    const victim = (visibleNews.list ?? []).find((n) => n.id);
+    check('取到一条可见资讯作为演示条', !!victim, victim?.title);
+    if (victim) {
+      // 下架前公开可访问（恢复后要能原样回来）
+      const pubBefore = await request(`/news/${victim.id}`);
+      check('下架前公开详情可访问', pubBefore.id === victim.id);
+
+      let emptyReason = false;
+      try {
+        await request(`/admin/news/${victim.id}/hide`, {
+          method: 'POST',
+          token,
+          body: { reason: '   ' },
+        });
+      } catch {
+        emptyReason = true;
+      }
+      check('纯空白理由被拒（422）', emptyReason);
+
+      let noReason = false;
+      try {
+        await request(`/admin/news/${victim.id}/hide`, { method: 'POST', token, body: {} });
+      } catch {
+        noReason = true;
+      }
+      check('缺 reason 字段被拒（422）', noReason);
+
+      const hiddenOne = await request(`/admin/news/${victim.id}/hide`, {
+        method: 'POST',
+        token,
+        body: { reason: '契约检查下架理由' },
+      });
+      check(
+        '下架成功：hidden=true 且带回填理由',
+        hiddenOne.hidden === true && hiddenOne.hiddenReason === '契约检查下架理由',
+      );
+
+      // 公开四路实时消失（后审核模式：过滤条件即时生效，无需等下一轮抓取）
+      let pubDetailGone = false;
+      try {
+        await request(`/news/${victim.id}`);
+      } catch (e) {
+        pubDetailGone = e.message === '内容不存在或已下架';
+      }
+      check('下架后公开详情 404（与不存在同码同文案）', pubDetailGone);
+
+      const pubListAfter = await request(`/news?channel=${victim.channel}&pageSize=100`);
+      check('下架后公开列表不出现', !(pubListAfter.list ?? []).some((n) => n.id === victim.id));
+
+      const pubSearchAfter = await request(
+        `/news/search?q=${encodeURIComponent(victim.title.slice(0, 6))}`,
+      );
+      check('下架后搜索不出现', !(pubSearchAfter.list ?? []).some((n) => n.id === victim.id));
+
+      let commentsGone = false;
+      try {
+        await request(`/news/${victim.id}/comments`, { token });
+      } catch {
+        commentsGone = true;
+      }
+      check('下架后评论列表 404', commentsGone);
+
+      // 幂等：重复下架不覆盖原理由、不重复记审计
+      const again = await request(`/admin/news/${victim.id}/hide`, {
+        method: 'POST',
+        token,
+        body: { reason: '第二个理由' },
+      });
+      check('重复下架不覆盖原理由', again.hiddenReason === '契约检查下架理由');
+
+      const auditHide = await request(`/admin/audit?target=${victim.id}&limit=50`, { token });
+      const hides = (auditHide.list ?? []).filter((a) => a.action === 'news.hide');
+      check('重复下架只记一条审计', hides.length === 1, `${hides.length} 条`);
+      check(
+        '下架审计含理由与标题（运营认标题不认 id）',
+        hides[0]?.detail?.reason === '契约检查下架理由' && hides[0]?.detail?.title === victim.title,
+      );
+
+      // 恢复：清空理由/时间，公开查询实时回来
+      const restored = await request(`/admin/news/${victim.id}/restore`, {
+        method: 'POST',
+        token,
+      });
+      check(
+        '恢复后 hidden=false 且理由清空',
+        restored.hidden === false && restored.hiddenReason === null,
+      );
+      const pubBack = await request(`/news/${victim.id}`);
+      check('恢复后公开详情实时可见', pubBack.id === victim.id);
+
+      const restoredAgain = await request(`/admin/news/${victim.id}/restore`, {
+        method: 'POST',
+        token,
+      });
+      check('重复恢复不报错', restoredAgain.hidden === false);
+      const auditRestore = await request(`/admin/audit?target=${victim.id}&limit=50`, { token });
+      check(
+        '恢复只记一条审计',
+        (auditRestore.list ?? []).filter((a) => a.action === 'news.restore').length === 1,
+      );
+
+      // 置顶：驼峰生效、蛇形被忽略、无变化不记审计。
+      // 先翻到反值再翻回来——不管演示条初始是不是置顶，都必然产生两次变化
+      const startTop = victim.isTop === true;
+      const flip1 = await request(`/admin/news/${victim.id}`, {
+        method: 'PATCH',
+        token,
+        body: { isTop: !startTop },
+      });
+      check('PATCH 置顶切换生效（驼峰 isTop）', flip1.isTop === !startTop);
+
+      const snake = await request(`/admin/news/${victim.id}`, {
+        method: 'PATCH',
+        token,
+        body: { is_top: !startTop },
+      });
+      check('蛇形 is_top 被静默忽略（多词字段驼峰约定）', snake.isTop === !startTop);
+
+      const flip2 = await request(`/admin/news/${victim.id}`, {
+        method: 'PATCH',
+        token,
+        body: { isTop: startTop },
+      });
+      check('PATCH 切回原值生效', flip2.isTop === startTop);
+
+      const auditTop = await request(`/admin/audit?target=${victim.id}&limit=50`, { token });
+      const updates = (auditTop.list ?? []).filter((a) => a.action === 'news.update');
+      check('两次变化只记两条 news.update', updates.length === 2, `${updates.length} 条`);
+      check(
+        'update 审计含字段级 diff 与标题',
+        Array.isArray(updates[0]?.detail?.changes?.isTop) &&
+          updates[0].detail.changes.isTop[1] === startTop &&
+          updates[0]?.detail?.title === victim.title,
+        JSON.stringify(updates[0]?.detail?.changes ?? null),
+      );
+
+      // 管理端关键词：标题/摘要命中，且**含已下架行**（默认 all 的口径）
+      const kwPage = await request(
+        `/admin/news?keyword=${encodeURIComponent(victim.title.slice(0, 6))}`,
+        { token },
+      );
+      check(
+        '管理端关键词搜索命中演示条',
+        (kwPage.list ?? []).some((n) => n.id === victim.id),
+      );
+    }
+
+    // 14.3 游标分页：不重不漏 + 坏游标 400
+    const p1 = await request('/admin/news?limit=2', { token });
+    check('第一页满页且有 nextCursor', (p1.list ?? []).length === 2 && !!p1.nextCursor);
+    if (p1.nextCursor) {
+      const p2 = await request(`/admin/news?limit=2&cursor=${encodeURIComponent(p1.nextCursor)}`, {
+        token,
+      });
+      const ids1 = (p1.list ?? []).map((n) => n.id);
+      const ids2 = (p2.list ?? []).map((n) => n.id);
+      check(
+        '游标翻页不重不漏',
+        ids2.length > 0 && ids2.every((id) => !ids1.includes(id)),
+        `第一页 ${ids1.length} / 第二页 ${ids2.length}`,
+      );
+    }
+    let badCursor = false;
+    try {
+      await request('/admin/news?cursor=!!!not-base64!!!', { token });
+    } catch {
+      badCursor = true;
+    }
+    check('坏游标被拒（400）', badCursor);
   }
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);
