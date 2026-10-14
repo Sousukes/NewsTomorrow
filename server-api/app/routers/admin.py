@@ -105,6 +105,11 @@ def _out(row: RssSource) -> dict:
         "lastFetchedAt": row.last_fetched_at,
         # P1-16：抓取礼仪（是否遵守对方 robots.txt），逐源可关
         "respectRobots": bool(row.respect_robots),
+        # P1-18：失败分级与熔断。只报"异常"不够——"连挂 7 次"和"偶发抖一下"
+        # 对运营是完全不同的两件事，前者要立刻处理，后者等系统自己重试即可。
+        "consecutiveFailures": row.consecutive_failures or 0,
+        "failureKind": row.failure_kind,
+        "nextRetryAt": row.next_retry_at,
     }
 
 

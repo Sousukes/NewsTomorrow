@@ -156,3 +156,64 @@ describe('views/AdminAudit', () => {
     expect(w.text()).toContain('无权限查看审计记录');
   });
 });
+
+// P1-18：自动禁用（默认关闭，运维可开启）。这类条目没有人类操作者，
+// 留痕的意义全在"能不能看出为什么被关"——所以重点测操作者与原因两栏。
+describe('views/AdminAudit（自动禁用，P1-18）', () => {
+  const withItems = (items: AdminAuditItem[]) => {
+    vi.mocked(adminApi.fetchAuditPage).mockResolvedValue({
+      list: items,
+      hasMore: false,
+      nextCursor: null,
+    });
+  };
+
+  it('系统自动执行的动作不显示 system 这个假账号', async () => {
+    withItems([
+      item({
+        action: 'source.auto_disable',
+        actorPhone: 'system',
+        detail: { snapshot: { name: '旧源A', consecutive_failures: 7, last_error: 'HTTP 404' } },
+      }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.find('.admin__actor').text()).toBe('系统自动执行');
+    expect(w.text()).not.toContain('由 system 操作');
+    expect(w.text()).toContain('自动禁用源');
+  });
+
+  it('自动禁用自证原因：连续失败次数与最后错误都渲染出来', async () => {
+    withItems([
+      item({
+        action: 'source.auto_disable',
+        actorPhone: 'system',
+        target: 'dead_src',
+        detail: { snapshot: { name: '旧源A', consecutive_failures: 7, last_error: 'HTTP 404' } },
+      }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+
+    const changes = w.findAll('.admin__changes li').map((li) => li.text());
+    expect(changes).toContain('旧源A');
+    expect(changes).toContain('连续失败 7 次');
+    expect(changes).toContain('HTTP 404');
+  });
+
+  it('人工操作仍显示手机号，两种来源不会混淆', async () => {
+    withItems([item({ action: 'source.delete', actorPhone: '13800138000', detail: {} })]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__actor').text()).toBe('由 13800138000 操作');
+    expect(w.text()).toContain('删除源');
+  });
+
+  it('未配置映射的动作退化成原样显示，而不是渲染成空白', async () => {
+    withItems([item({ action: 'source.pinning', actorPhone: '13800138000', detail: {} })]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.text()).toContain('source.pinning');
+  });
+});

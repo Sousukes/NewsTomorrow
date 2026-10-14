@@ -115,6 +115,16 @@ export interface RssSourceItem {
   lastFetchedAt: string | null;
   /** 是否遵守对方 robots.txt（P1-16）；个别源 robots 写得过严却公开提供 RSS 时可关 */
   respectRobots: boolean;
+  /** 连续失败次数（P1-18），成功即归零。是"偶发抖一下"与"早就坏了"的唯一区分依据 */
+  consecutiveFailures: number;
+  /**
+   * 最近一次失败的**性质**（P1-18）：
+   * `permanent` = 404 / robots 拒绝 / 解析无条目，等不会好，必须人工处理；
+   * `transient` = 超时 / 5xx / 429，系统会自动退避重试。
+   */
+  failureKind: 'permanent' | 'transient' | null;
+  /** 熔断到期时间（ISO 串，P1-18）；null = 未熔断 */
+  nextRetryAt: string | null;
 }
 
 /** 新增 / 更新源的入参（更新时全部可选，未传字段保持原值） */

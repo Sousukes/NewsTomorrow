@@ -9,11 +9,19 @@
 
 全部源均为**免费公开、无需 API Key** 的源。
 """
+import json
 import logging
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from ..models import RssSource, now_str
+from ..config import (
+    FEED_AUTO_DISABLE_PERMANENT,
+    FEED_CIRCUIT_COOLDOWN_MINUTES,
+    FEED_CIRCUIT_THRESHOLD,
+)
+from ..models import AdminAuditLog, RssSource, now_str
+from .fetcher import PERMANENT
 
 logger = logging.getLogger("toutiao.sources")
 
@@ -74,7 +82,8 @@ def _to_dict(row: RssSource) -> dict:
 
     健康/礼仪字段一并带出：`last_fetched_at` 用于**单源最小抓取间隔**判定
     （定时任务与手动触发叠加时不重复打同一个源），`respect_robots` 决定本轮
-    是否先查对方 robots.txt（P1-16）。
+    是否先查对方 robots.txt（P1-16）；P1-18 的三个字段用于**熔断判定**——
+    连续失败计数与冷却时间必须来自库而不是进程内存，否则多实例各算各的。
     """
     return {
         "key": row.key,
@@ -85,6 +94,9 @@ def _to_dict(row: RssSource) -> dict:
         "enabled": bool(row.enabled),
         "respect_robots": bool(row.respect_robots),
         "last_fetched_at": row.last_fetched_at,
+        "consecutive_failures": row.consecutive_failures or 0,
+        "failure_kind": row.failure_kind,
+        "next_retry_at": row.next_retry_at,
     }
 
 
@@ -126,10 +138,17 @@ def all_enabled_sources(db: Session | None = None) -> list[dict]:
     `db` 为空时回落到内置源——保证单测与不连库的脚本仍可运行。
     """
     if db is None:
-        # 无库回退：内置源补齐礼仪字段默认值，使下游判定无需到处 `.get(..., 默认)`
+        # 无库回退：内置源补齐礼仪/熔断字段默认值，使下游判定无需到处 `.get(..., 默认)`
         return _by_weight(
             [
-                {**s, "respect_robots": s.get("respect_robots", True), "last_fetched_at": None}
+                {
+                    **s,
+                    "respect_robots": s.get("respect_robots", True),
+                    "last_fetched_at": None,
+                    "consecutive_failures": 0,
+                    "failure_kind": None,
+                    "next_retry_at": None,
+                }
                 for s in BUILTIN_SOURCES
                 if s["enabled"]
             ]
@@ -149,16 +168,83 @@ def sources_for_channel(channel: str | None, db: Session | None = None) -> list[
     return [s for s in active if s["channel"] == channel] or active
 
 
-def record_fetch_result(db: Session, key: str, ok: bool, count: int, error: str | None) -> None:
-    """回写单次抓取结果（健康状态）。失败静默——它只是排障信息。"""
+def _auto_disable_if_due(db: Session, row: RssSource) -> bool:
+    """连续**永久**失败达阈值则自动禁用；阈值 0（默认）时**从不触发**。
+
+    刻意默认关闭：源临时 404 一周就被静默关掉、且没人记得重新打开，
+    比一直重试更糟——"自动禁用"必须由运维主动选择，不能是开箱行为。
+
+    开启后每次触发都**写审计**（`source.auto_disable`）：
+    「谁把源关了」事后查不到，是最难排查的一类问题；
+    留痕是这项功能的准入条件，不是可选项。
+    """
+    if not FEED_AUTO_DISABLE_PERMANENT or row.failure_kind != PERMANENT:
+        return False
+    if (row.consecutive_failures or 0) < FEED_AUTO_DISABLE_PERMANENT:
+        return False
+    row.enabled = False
+    db.add(
+        AdminAuditLog(
+            # 无人类操作者：系统按规则执行。留一个可识别的 actor，
+            # 否则审计里会出现"来源不明"的变更，同样无从追溯。
+            actor_phone="system",
+            action="source.auto_disable",
+            target=row.key,
+            detail=json.dumps(
+                {
+                    "snapshot": {
+                        "name": row.name,
+                        "consecutive_failures": row.consecutive_failures,
+                        "last_error": row.last_error,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            created_at=now_str(),
+        )
+    )
+    logger.warning(
+        "源 %s 连续 %d 次永久失败（%s），已自动禁用（阈值 %d）",
+        row.key, row.consecutive_failures, row.last_error, FEED_AUTO_DISABLE_PERMANENT,
+    )
+    return True
+
+
+def record_fetch_result(
+    db: Session,
+    key: str,
+    ok: bool,
+    count: int,
+    error: str | None,
+    kind: str | None = None,
+) -> None:
+    """回写单次抓取结果（健康状态 + 失败分级）。失败静默——它只是排障信息。
+
+    `kind`（transient / permanent）由抓取层判定后**结构化带回**：
+    异常在线程池里常被 `str(e)` 抹成字符串，分类信息一丢就只剩一刀切。
+    """
     row = db.get(RssSource, key)
     if row is None:
         return
+    now = now_str()
     row.last_status = "ok" if ok else "error"
     row.last_error = (error or "")[:300] or None
     row.last_item_count = count
-    row.last_fetched_at = now_str()
-    row.updated_at = row.last_fetched_at
+    row.last_fetched_at = now
+    row.updated_at = now
+    if ok:
+        # 成功即**彻底**解除熔断：计数与冷却一并清零，不必等冷却自然到期
+        row.consecutive_failures = 0
+        row.failure_kind = None
+        row.next_retry_at = None
+    else:
+        row.consecutive_failures = (row.consecutive_failures or 0) + 1
+        row.failure_kind = kind
+        if FEED_CIRCUIT_THRESHOLD and row.consecutive_failures >= FEED_CIRCUIT_THRESHOLD:
+            row.next_retry_at = (
+                datetime.now() + timedelta(minutes=FEED_CIRCUIT_COOLDOWN_MINUTES)
+            ).isoformat(timespec="seconds")
+        _auto_disable_if_due(db, row)
     try:
         db.commit()
     except Exception as e:

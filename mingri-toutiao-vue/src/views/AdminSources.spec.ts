@@ -35,6 +35,10 @@ const source = (over: Partial<RssSourceItem> = {}): RssSourceItem => ({
   lastItemCount: 20,
   lastFetchedAt: '2026-10-13T07:38:22',
   respectRobots: true,
+  // P1-18：默认"没有正在发生的故障"，需要故障态的用例自行覆盖
+  consecutiveFailures: 0,
+  failureKind: null,
+  nextRetryAt: null,
   ...over,
 });
 
@@ -586,5 +590,100 @@ describe('views/AdminSources robots 开关', () => {
     expect(adminApi.createSource).toHaveBeenCalledWith(
       expect.objectContaining({ respectRobots: true }),
     );
+  });
+});
+
+// P1-18：失败分级 + 熔断冷却。列表页的核心问题不是"挂没挂"，
+// 而是"我是该等它自己恢复，还是得去改配置"——这两类必须看起来不一样。
+describe('views/AdminSources（失败分级与熔断，P1-18）', () => {
+  it('连续失败 + 永久性 → 红色标签写明次数与性质', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({
+        key: 'dead_src',
+        name: '死源',
+        lastStatus: 'error',
+        lastError: 'HTTP 404',
+        consecutiveFailures: 7,
+        failureKind: 'permanent',
+      }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+
+    const tag = w.find('.admin__failure');
+    expect(tag.text()).toBe('连续 7 次失败 · 永久性');
+    expect(tag.classes()).toContain('is-permanent');
+  });
+
+  it('可重试失败用中性样式，且不带 is-permanent', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({
+        lastStatus: 'error',
+        lastError: 'ReadTimeout',
+        consecutiveFailures: 3,
+        failureKind: 'transient',
+      }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+
+    const tag = w.find('.admin__failure');
+    expect(tag.text()).toBe('连续 3 次失败 · 可重试');
+    expect(tag.classes()).not.toContain('is-permanent');
+  });
+
+  it('只失败一次且无性质时不出标签：偶发抖动多显示一格就是噪音', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({ lastStatus: 'error', lastError: 'HTTP 500', consecutiveFailures: 1 }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+    // 状态仍然是"异常"，只是不再追加失败性质标签
+    expect(w.text()).toContain('异常');
+    expect(w.find('.admin__failure').exists()).toBe(false);
+  });
+
+  it('正常的源不出现任何失败标签', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({ lastStatus: 'ok', consecutiveFailures: 5, failureKind: 'transient' }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__failure').exists()).toBe(false);
+  });
+
+  it('熔断冷却期内显示恢复时间，过期后不再显示', async () => {
+    const future = new Date(Date.now() + 25 * 60 * 1000).toISOString();
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({ key: 'cb', lastStatus: 'error', nextRetryAt: future }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+
+    const tag = w.find('.admin__cooldown');
+    expect(tag.exists()).toBe(true);
+    expect(tag.text()).toMatch(/^冷却至 \d{2}-\d{2} \d{2}:\d{2}$/);
+
+    // 同一个源过了冷却点：再显示"冷却至…"就是在骗人
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({
+        key: 'cb',
+        lastStatus: 'error',
+        nextRetryAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      }),
+    ]);
+    const w2 = mountPage();
+    await settle(w2);
+    expect(w2.find('.admin__cooldown').exists()).toBe(false);
+  });
+
+  it('冷却时间是垃圾字符串时静默跳过，不渲染 NaN', async () => {
+    vi.mocked(adminApi.fetchSources).mockResolvedValue([
+      source({ key: 'cb', lastStatus: 'error', nextRetryAt: '不是时间' }),
+    ]);
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.admin__cooldown').exists()).toBe(false);
+    expect(w.text()).not.toContain('NaN');
   });
 });

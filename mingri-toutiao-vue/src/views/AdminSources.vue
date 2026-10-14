@@ -389,6 +389,34 @@ function statusText(s: RssSourceItem): string {
   if (s.lastStatus === 'error') return '异常';
   return '未抓取';
 }
+
+/**
+ * 失败性质标签（P1-18）：只写"异常"两个字不足以决定动作——
+ * 「连续 7 次失败 · 永久性」要去改配置或换源，「可重试」等系统自己退避重试即可。
+ * 只失败一次、且没有性质时返回空：那多半是偶发抖动，多显示一格反而是噪音。
+ */
+function failureText(s: RssSourceItem): string {
+  if (s.lastStatus !== 'error') return '';
+  const n = s.consecutiveFailures;
+  if (n <= 1 && !s.failureKind) return '';
+  const head = n > 1 ? `连续 ${n} 次失败` : '失败';
+  if (s.failureKind === 'permanent') return `${head} · 永久性`;
+  if (s.failureKind === 'transient') return `${head} · 可重试`;
+  return head;
+}
+
+/**
+ * 熔断冷却中（P1-18）：该源本轮会被整轮跳过。
+ * 不显示的话，运营看到"抓取时间停在半小时前"会以为定时任务挂了，
+ * 实际上是系统在按策略避让一个正在故障的站点。
+ */
+function cooldownText(s: RssSourceItem): string {
+  const until = s.nextRetryAt;
+  if (!until) return '';
+  const t = new Date(until).getTime();
+  if (Number.isNaN(t) || t <= Date.now()) return '';
+  return `冷却至 ${formatTime(until)}`;
+}
 </script>
 
 <template>
@@ -578,6 +606,27 @@ function statusText(s: RssSourceItem): string {
               title="该源已关闭 robots.txt 检查"
             >
               忽略 robots
+            </span>
+            <!-- P1-18：只写"异常"不足以决定动作——等系统重试，还是得去改配置 -->
+            <span
+              v-if="failureText(s)"
+              class="admin__failure"
+              :class="{ 'is-permanent': s.failureKind === 'permanent' }"
+              :title="
+                s.failureKind === 'permanent'
+                  ? '永久性失败（404 / robots 拒绝 / 解析无条目）：需改配置或换源'
+                  : '可重试失败（超时 / 5xx / 429）：系统会自动退避重试'
+              "
+            >
+              {{ failureText(s) }}
+            </span>
+            <!-- 熔断冷却：不显示的话，运营看到抓取时间停住会以为定时任务挂了 -->
+            <span
+              v-if="cooldownText(s)"
+              class="admin__cooldown"
+              title="连续失败已达阈值，冷却期内整轮跳过该源；到期后自动恢复尝试"
+            >
+              {{ cooldownText(s) }}
             </span>
             <code class="admin__key">{{ s.key }}</code>
           </div>
@@ -1073,6 +1122,31 @@ function statusText(s: RssSourceItem): string {
   border-radius: 6px;
   background: #fff4e5;
   color: #b26a00;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 可重试失败用中性的蓝灰：系统正在自己处理，运营不必立刻动手 */
+.admin__failure {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #eef2f8;
+  color: #4a5b78;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 永久性失败用红色：等不会好，必须人工处理（与"异常"状态色同族，但不至于误报故障） */
+.admin__failure.is-permanent {
+  background: #fdeceb;
+  color: #b3352b;
+}
+
+.admin__cooldown {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #eaf1fa;
+  color: #2f6690;
   font-size: 11px;
   white-space: nowrap;
 }

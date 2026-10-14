@@ -44,12 +44,24 @@ from ..config import (
     FEED_ALERT_STALE_HOURS,
 )
 from ..models import AdminUser, Message, RssSource, User, now_str
+from .fetcher import PERMANENT, TRANSIENT
 
 logger = logging.getLogger("toutiao.alert")
 
-# 原因分类：既是汇总文案的标签，也是**严重度顺序**（抓取失败最需要人看，排最前）
-KIND_LABELS = {"error": "抓取失败", "stale": "超时未抓取", "never": "从未成功"}
-_KIND_ORDER = ("error", "stale", "never")
+# 原因分类：既是汇总文案的标签，也是**严重度顺序**。
+# 抓取失败按 P1-18 的**失败性质**再细分一层：
+#   - `error_permanent`：404 / robots 拒绝 / 解析无条目 —— 等不会好，必须人工处理；
+#   - `error_transient`：超时 / 5xx / 429 —— 系统会自动重试，多半只是一次抖动。
+# 对收件人来说这两者的对策完全不同，混在"抓取失败"里就只能一律去翻源列表。
+# `error_unknown` 是存量数据（P1-18 之前落的错误没有性质）的兜底。
+KIND_LABELS = {
+    "error_permanent": "永久失败",
+    "error_transient": "临时失败",
+    "error_unknown": "抓取失败",
+    "stale": "超时未抓取",
+    "never": "从未成功",
+}
+_KIND_ORDER = ("error_permanent", "error_transient", "error_unknown", "stale", "never")
 # 与 Message.summary 的列宽一致：超了会被数据库截断（MySQL 严格模式会直接报错）
 _SUMMARY_LIMIT = 300
 
@@ -83,8 +95,15 @@ def unhealthy_sources(
     ).scalars()
     for row in rows:
         if row.last_status == "error":
-            kind = "error"
-            reason = f"最近一次抓取失败：{(row.last_error or '未知原因')[:80]}"
+            kind, tail = "error_unknown", ""
+            if row.failure_kind == PERMANENT:
+                kind, tail = "error_permanent", "（永久性，需人工处理）"
+            elif row.failure_kind == TRANSIENT:
+                kind, tail = "error_transient", "（可重试，系统会自动继续尝试）"
+            # 连续次数是"抖一下"还是"早就坏了"的唯一区分依据
+            n = row.consecutive_failures or 0
+            head = f"连续 {n} 次失败：" if n > 1 else "最近一次抓取失败："
+            reason = f"{head}{(row.last_error or '未知原因')[:80]}{tail}"
         else:
             last = _parse(row.last_fetched_at)
             if last is None:
@@ -201,7 +220,8 @@ def notify_unhealthy_sources(db) -> int:
             created += 1
     else:
         for item in due:
-            summary = f"信源「{item['name']}」异常：{item['reason']}"
+            # 截断到列宽：源名（100）+ 原因（含 80 字错误详情）理论上可以超过 300
+            summary = f"信源「{item['name']}」异常：{item['reason']}"[:_SUMMARY_LIMIT]
             for uid in recipients:
                 db.add(
                     Message(

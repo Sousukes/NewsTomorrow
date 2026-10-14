@@ -173,6 +173,20 @@ class TestMigrationChain:
         col = next(c for c in insp.get_columns("rss_sources") if c["name"] == "respect_robots")
         assert col["nullable"] is False
 
+    def test_fetch_failure_grading_columns(self, chain_db):
+        """0018：失败分级与熔断字段（P1-18）。
+
+        `consecutive_failures` 必须**非空**：NULL 参与阈值比较会静默失效，
+        熔断就永远不会触发——而这类 bug 在功能测试里看不出来（计数走的是新建行）。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("rss_sources")}
+        assert {"consecutive_failures", "failure_kind", "next_retry_at"} <= cols
+        col = next(
+            c for c in insp.get_columns("rss_sources") if c["name"] == "consecutive_failures"
+        )
+        assert col["nullable"] is False
+
     def test_admin_audit_logs_table(self, chain_db):
         """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""
         insp = inspector_of(chain_db)

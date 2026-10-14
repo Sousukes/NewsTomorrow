@@ -33,6 +33,8 @@ const ACTION_LABELS: Record<string, string> = {
   'source.update': '修改源',
   'source.delete': '删除源',
   'source.reset': '重置内置源',
+  // P1-18：连续永久失败达阈值后由系统自动禁用（默认关闭，需运维主动开启）
+  'source.auto_disable': '自动禁用源',
   'admin.add': '添加管理员',
   'admin.remove': '移除管理员',
 };
@@ -49,6 +51,15 @@ const FIELD_LABELS: Record<string, string> = {
 
 function actionLabel(action: string): string {
   return ACTION_LABELS[action] ?? action;
+}
+
+/**
+ * 操作者（P1-18）：系统按规则自动执行的动作没有人类操作者，
+ * 直接把后端的 `system` 显示出来会让人以为是某个账号，改成"系统自动执行"才说得通——
+ * 审计页的核心价值就是"谁动的"，这一栏含糊等于白留痕。
+ */
+function actorLine(phone: string): string {
+  return phone === 'system' ? '系统自动执行' : `由 ${phone} 操作`;
 }
 
 /** 把 enabled 的 true/false 翻成"启用/停用"，避免出现"true→false"这种后端视角的文案 */
@@ -78,6 +89,12 @@ function changeTexts(item: AdminAuditItem): string[] {
     if (typeof s.enabled === 'boolean') parts.push(s.enabled ? '启用' : '停用');
     // 只在「关闭遵守」时补一句：true 是默认值，逐条打出来只会稀释真正的信息
     if (s.respectRobots === false) parts.push('忽略 robots');
+    // P1-18：自动禁用必须**自证原因**——只写"被禁了"的审计条目等于没留痕，
+    // 运营要能一眼看出"是因为连挂 7 次 404 才被禁的"
+    if (typeof s.consecutive_failures === 'number') {
+      parts.push(`连续失败 ${s.consecutive_failures} 次`);
+    }
+    if (typeof s.last_error === 'string' && s.last_error) parts.push(s.last_error);
     return parts;
   }
   if (typeof item.detail.seeded === 'number') return [`恢复 ${item.detail.seeded} 个内置源`];
@@ -183,7 +200,7 @@ function formatTime(iso: string): string {
             <span v-if="a.target" class="admin__target">{{ a.target }}</span>
             <span class="admin__time">{{ formatTime(a.createdAt) }}</span>
           </div>
-          <p class="admin__actor">由 {{ a.actorPhone }} 操作</p>
+          <p class="admin__actor">{{ actorLine(a.actorPhone) }}</p>
           <ul v-if="changeTexts(a).length" class="admin__changes">
             <li v-for="(t, i) in changeTexts(a)" :key="i">{{ t }}</li>
           </ul>

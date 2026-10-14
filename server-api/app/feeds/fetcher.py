@@ -257,14 +257,38 @@ class NotModified(Exception):
     """源返回 304：内容未变更。**不是错误**，调用方不应重试。"""
 
 
+# ---- 失败分级（P1-18）----
+# 两类失败的**对策完全不同**，混在一起就只能一刀切：
+TRANSIENT = "transient"  # 可重试：超时 / 连接错误 / 5xx / 429 —— 等一等就好
+PERMANENT = "permanent"  # 永久：4xx / robots 拒绝 / 解析无条目 —— 必须改配置或换源
+
+
+def classify_status(status: int) -> str:
+    """HTTP 状态 → 失败分类。
+
+    - `5xx` 与 `429` 归**可重试**：服务端的错与限流都是"稍后再来"的显式信号，
+      退避重试正是对的做法（429 常自带 Retry-After，但统一退避已足够）；
+    - 其余 `4xx` 归**永久**：401/403 重试不会突然有权限，404/410 地址不会自己回来，
+      重试只会多打几个一模一样的请求。
+    """
+    if status >= 500 or status == 429:
+        return TRANSIENT
+    return PERMANENT
+
+
 class FetchError(Exception):
     """单源抓取失败：网络异常 / HTTP 错误状态 / 解析后无条目。
 
     为何要抛而不是静默返回空列表：调用方需要区分「源挂了」与「源正常但没内容」，
     否则 `rss_sources.last_status` 永远是 ok，源悄悄烂掉也无人发现（迁移 0013）。
+
+    为何要带 `kind`：异常跨线程传回主线程后常被 `str(e)` 抹成字符串，
+    分类信息会丢，调用方就又退化成"所有失败一视同仁"。
     """
 
-    pass
+    def __init__(self, message: str, kind: str = PERMANENT):
+        super().__init__(message)
+        self.kind = kind
 
 
 # 每源缓存 ETag / Last-Modified（进程内；重启失效，仅用于省流）
@@ -309,7 +333,7 @@ def fetch_source(
         r = client.get(source["url"], headers=_conditional_headers(key))
     except Exception as e:  # 连接超时、DNS 失败、file:// 等非法协议
         logger.warning("请求失败 [%s]: %s %s", name, type(e).__name__, e)
-        raise FetchError(f"{type(e).__name__}: {e}") from e
+        raise FetchError(f"{type(e).__name__}: {e}", TRANSIENT) from e
 
     if r.status_code == 304:
         logger.info("源未变更(304) [%s]", name)
@@ -317,13 +341,15 @@ def fetch_source(
 
     if r.status_code >= 400:
         logger.warning("HTTP %s [%s]", r.status_code, name)
-        raise FetchError(f"HTTP {r.status_code}")
+        raise FetchError(f"HTTP {r.status_code}", classify_status(r.status_code))
 
     _remember_validators(key, r)
     items = parse_feed(r.text, source)
     if not items:
-        # 200 却解析不出条目：多半是源改版/返回了 HTML，属于真实故障
+        # 200 却解析不出条目：多半是源改版/返回了 HTML，属于真实故障。
+        # 归**永久**：HTTP 这一层是成功的，说明网络与地址都通，
+        # 立刻再取一次几乎必然拿到同一份内容——重试没有意义。
         logger.warning("解析后无条目 [%s]", name)
-        raise FetchError("解析后无条目")
+        raise FetchError("解析后无条目", PERMANENT)
     logger.info("抓取 %s: %d 条", name, len(items))
     return items[:limit]

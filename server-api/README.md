@@ -342,10 +342,66 @@ FEED_ALERT_STALE_HOURS=24         # 超过该时长未成功抓取即告警
 FEED_ALERT_MIN_INTERVAL_HOURS=6   # 同一源的告警节流窗口
 FEED_ALERT_AGGREGATE_MIN=3        # 待告警源达到该数量即合并成一条汇总
 FEED_ALERT_AGGREGATE_LIST=5       # 汇总里每类原因最多列几个源名
+
+FEED_RETRY_TRANSIENT=2            # 「可重试」失败的重试次数（默认 2，即最多 3 次尝试）
+FEED_RETRY_BACKOFF=0.6            # 重试退避基数（秒，指数退避）
+FEED_CIRCUIT_THRESHOLD=5          # 连续失败达此次数即熔断（0 = 不熔断）
+FEED_CIRCUIT_COOLDOWN_MINUTES=30  # 熔断冷却时长（分钟）
+FEED_AUTO_DISABLE_PERMANENT=0     # 连续「永久性」失败达此次数则自动禁用（0 = 从不自动禁用）
 ```
 
 `GET /api/metrics` 暴露 `toutiao_sources_unhealthy`（异常 + 超时未成功计数；`-1` 表示
 查询失败——用一个不可能的计数表达"未知"，而不是假装健康）。
+
+### 失败分级与熔断（迁移 0018）
+
+告警聚合（P1-17）解决了"N 个源同时挂"时的消息噪音，但它没解决更前置的一个问题：
+**所有失败在此前被当成同一件事处理**。404 和超时被同等重试、同等计数、同等告警——
+于是真正该做的两件不同的事（"等它自己恢复" 与 "去改配置"）都被含糊成了"再试一次"。
+
+**① 分级**（`fetcher.FetchError.kind`）：
+
+| 性质 | 触发 | 处置 |
+| --- | --- | --- |
+| `transient` 可重试 | 超时 / 连接重置 / 5xx / 429 | 退避重试，系统自己会好 |
+| `permanent` 永久 | 4xx（401/403/404…）/ robots 拒绝 / 解析后无条目 | 重试无意义，需人工改配置或换源 |
+
+> `kind` 必须作为**结构化数据**穿过线程池：异常被 `str(e)` 拍平后就没法再分类了，
+> 而用元组返回会在半路丢掉它。所以它是 `FetchError` 的属性，一路带到 `record_fetch_result`。
+>
+> 判定的边界：`429` 归可重试（对方只是限流，等一会儿就能过），其余 4xx 归永久；
+> 「解析成功但 0 条」归永久——拿不到条目的地址不会自己变好。
+
+**② 只有可重试的才重试**：`_fetch_with_retry` 遇到 `permanent` 立即跳出，不再消耗剩余次数。
+此前对 404 也重试 3 次，纯属把对方站点的错误日志刷一遍。
+
+**③ 计数落库**（`rss_sources.consecutive_failures` / `failure_kind`）：进程内的计数器
+多实例之间不共享、重启即清零，熔断阈值就永远判不准。成功一次即归零。
+
+**④ 熔断**（`FEED_CIRCUIT_THRESHOLD`，默认 5）：连续失败达阈值后写
+`next_retry_at`，**冷却期内整轮跳过该源**；到期自动恢复尝试，不需要人工干预。
+与礼仪跳过同一条规则：**被跳过的源本轮不刷新健康状态**，否则"多久没成功"永远归零。
+
+> 熔断的意义是"别再给一个正在故障的站点送请求"，不是"这个源不要了"。
+> 所以它自愈、也不改 `enabled`——改 `enabled` 是运营决策，不能由抓取器代劳。
+
+**⑤ 自动禁用默认关闭**（`FEED_AUTO_DISABLE_PERMANENT=0`）：
+连续**永久**失败达阈值时可自动置 `enabled=False`，但**默认永不触发**。
+一个源 404 一周就被静默关掉、且没人记得重新打开，比一直重试更糟；
+"自动禁用"必须由运维主动选择。开启后**每次触发都写审计**（`source.auto_disable`，
+`actor_phone="system"`，detail 带连续次数与最后错误）——
+「谁把这个源关了」事后查不到是最难排查的一类问题，留痕是这项功能的准入条件。
+
+**⑥ 告警带上性质**（P1-17 的分组在此扩展为 5 类）：
+
+```
+永久失败 4 条（旧源A、旧源B、旧源C、旧源D）        ← 等不会好，得去改配置
+临时失败 3 条（新浪科技、cnBeta、虎嗅）            ← 系统会在冷却后自己重试
+```
+
+单源原因也区分对待：`连续 7 次失败：HTTP 404（永久性，需人工处理）` vs
+`连续 3 次失败：ReadTimeout（可重试，系统会自动继续尝试）`。
+老数据没有 `failure_kind` 时退化为 `连续 N 次失败`，不猜。
 
 ## 数据库迁移（Alembic）
 
@@ -373,7 +429,9 @@ alembic check                       # 检测 models 与迁移是否漂移
   `parent_id`/`root_id`，移除 `comments.liked_by` JSON 列）、
   `0015_admin_whitelist`（管理员白名单 `admin_users`，应用内管理「指定账号」）、
   `0016_admin_audit_logs`（运营审计 `admin_audit_logs`，记录谁改了什么）、
-  `0017_fetch_politeness`（抓取礼仪 `rss_sources.respect_robots` + 告警节流 `last_alerted_at`）。
+  `0017_fetch_politeness`（抓取礼仪 `rss_sources.respect_robots` + 告警节流 `last_alerted_at`）、
+  `0018_fetch_failure_grading`（失败分级与熔断 `consecutive_failures` / `failure_kind` /
+  `next_retry_at`）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -579,7 +637,7 @@ pytest -q          # 321 项
 
 - `tests/test_units.py`（25 项）：限流器（阈值/隔离/窗口过期）、PBKDF2 密码哈希与加盐、JWT 往返、RSS 解析与字段映射（RSS 2.0 / Atom / 图片提取 / 变体判定 / 稳定 id / 相对时间）。
 - `tests/test_hardening.py`（14 项）：受信代理 IP 解析（XFF 采信/忽略/回退）、分页游标编解码与非法输入、**schema 单轨守卫**（缺表时抛错且**不就地建表**、`init_db` 源码不含 `create_all`）。
-- `tests/test_fetch_governance.py`（34 项）：**抓取链路治理**（P1-16 + P1-17）——分组（保持权重序 /
+- `tests/test_fetch_governance.py`（53 项）：**抓取链路治理**（P1-16 + P1-17 + P1-18）——分组（保持权重序 /
   异站分组 / 最小间隔判定）、并发与合并顺序（**高权重源在重复稿件上胜出**、
   stats 顺序不随网络快慢漂移、同站并发峰值恒为 1、异站确实并行）、礼貌抓取
   （robots 禁止记为异常且**不发正文请求**、取不到 robots 放行、逐源可关、
@@ -588,12 +646,16 @@ pytest -q          # 321 项
   节流窗口内外、**无收件人不占用节流锚点**、env-only 管理员同样收件、不健康计数）、
   **告警去重聚合**（阈值上下分别走逐源 / 汇总、N 源 × M 管理员坍缩成 M 条、
   按原因分组且严重度在前、同因成批体现系统性问题、长名列举截断与**去重后总量不变**、
-  摘要不超 300 列宽、汇总同样推进全部锚点、节流源不进汇总、权重决定列举顺序）。
+  摘要不超 300 列宽、汇总同样推进全部锚点、节流源不进汇总、权重决定列举顺序）、
+  **失败分级与熔断**（超时/5xx/429 判可重试、404/robots 拒绝/解析无条目判永久、
+  永久失败**不消耗重试次数**、成功即清零、阈值前后 `next_retry_at` 有无、
+  冷却期内不抓且不刷新健康、到期自愈、自动禁用默认关闭且开启时**必写审计**、
+  告警文案区分永久/临时并带连续次数）。
 - `tests/test_migrations.py`（18 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
   与 `ix_news_hot`、`rss_sources` 的列与主键（含 0017 的 `respect_robots` **非空**与
-  `last_alerted_at`）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
+  `last_alerted_at`、0018 的 `consecutive_failures` **非空**与 `failure_kind` / `next_retry_at`）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
   秒级时间戳下**同一条评论同一用户重复点赞只留一行**、悬空/非整数 user_id 被跳过、
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的

@@ -119,3 +119,17 @@ FEED_ALERT_MIN_INTERVAL_HOURS = max(1, int(_env("FEED_ALERT_MIN_INTERVAL_HOURS",
 FEED_ALERT_AGGREGATE_MIN = max(2, int(_env("FEED_ALERT_AGGREGATE_MIN", "3")))
 # 汇总消息里每类原因最多列出几个源名，其余用"等"概括（消息预览是单行省略号，列多了看不见）
 FEED_ALERT_AGGREGATE_LIST = max(1, int(_env("FEED_ALERT_AGGREGATE_LIST", "5")))
+# ---- 失败分级与熔断（P1-18）----
+# 只有**可重试**失败（超时 / 连接错误 / 5xx / 429）才退避重试；
+# 其余 4xx、robots 拒绝、解析无条目都是永久性的，重试多少次结果都一样，
+# 白白多打 N 个请求（对对方站点也是负担）。
+FEED_RETRY_TRANSIENT = max(0, int(_env("FEED_RETRY_TRANSIENT", "2")))
+FEED_RETRY_BACKOFF = max(0.0, float(_env("FEED_RETRY_BACKOFF", "0.6")))
+# 连续失败达阈值即进入冷却（熔断）：已经连挂 5 轮的源不需要每轮再打 3 次。
+# 冷却期内该源**整轮跳过且不动健康状态**（与按礼仪跳过同口径——刷新会让"多久没成功"归零）。
+FEED_CIRCUIT_THRESHOLD = max(0, int(_env("FEED_CIRCUIT_THRESHOLD", "5")))
+FEED_CIRCUIT_COOLDOWN_MINUTES = max(1, int(_env("FEED_CIRCUIT_COOLDOWN_MINUTES", "30")))
+# 连续**永久**失败达阈值自动禁用该源；**默认 0 = 关闭**。
+# 刻意默认关闭：源临时 404 一周就被静默关掉、且没人记得重新打开，比一直重试更糟。
+# 开启后每次触发都必须留痕（审计 + 告警），绝不静默。
+FEED_AUTO_DISABLE_PERMANENT = max(0, int(_env("FEED_AUTO_DISABLE_PERMANENT", "0")))

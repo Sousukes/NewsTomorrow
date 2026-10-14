@@ -273,6 +273,16 @@ class RssSource(Base):
     # P1-16 告警节流：上次就该源发出告警的时间（为空 = 从未告警）。
     # 落库而非进程内变量：多实例部署时各实例共享同一节流窗口，重启也不失效。
     last_alerted_at = Column(String(30))
+    # ---- P1-18 失败分级与熔断 ----
+    # 连续失败次数：成功即归零。它是熔断与"是否值得继续重试"的唯一依据，
+    # 必须**落库**——进程内计数在多实例下各算各的，重启也会丢失。
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    # 最近一次失败的**性质**：transient（可重试：超时/5xx/连接错误/429）
+    # 或 permanent（永久：4xx/robots 拒绝/解析无条目）。成功时置空。
+    # 区分二者决定了对策：前者等一等就好，后者必须改配置或换源。
+    failure_kind = Column(String(20))
+    # 熔断到期时间：连续失败达阈值后设置，冷却期内整轮跳过该源（省请求也不烦对方）。
+    next_retry_at = Column(String(30))
     created_at = Column(String(30), default=now_str, nullable=False)
     updated_at = Column(String(30), default=now_str, nullable=False)
 

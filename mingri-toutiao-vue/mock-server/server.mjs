@@ -389,6 +389,29 @@ const BUILTIN_SOURCES = [
   },
 ];
 
+/**
+ * 演示用的故障态种子：少量源带失败分级数据，便于在 mock 下看到
+ * 「永久性（需人工处理）」与「可重试」两种 UI 分支。key 不存在即按健康兜底。
+ */
+const SEEDED_FAILURES = {
+  sina_tech: {
+    lastStatus: 503,
+    lastError: 'HTTP 503',
+    lastItemCount: null,
+    consecutiveFailures: 3,
+    failureKind: 'transient',
+    nextRetryAt: null,
+  },
+  cnbeta: {
+    lastStatus: 404,
+    lastError: 'HTTP 404',
+    lastItemCount: null,
+    consecutiveFailures: 7,
+    failureKind: 'permanent',
+    nextRetryAt: null,
+  },
+};
+
 const freshSources = () =>
   BUILTIN_SOURCES.map((s) => ({
     ...s,
@@ -397,6 +420,7 @@ const freshSources = () =>
     lastItemCount: null,
     lastFetchedAt: null,
     respectRobots: true,
+    ...(SEEDED_FAILURES[s.key] ?? {}),
   }));
 
 let sources = freshSources();
@@ -415,6 +439,10 @@ function sourceOut(row) {
     lastItemCount: row.lastItemCount ?? null,
     lastFetchedAt: row.lastFetchedAt ?? null,
     respectRobots: row.respectRobots !== false,
+    // P1-18：失败分级与熔断（缺省按"没有正在发生的故障"兜底，与前端 toSource 同口径）
+    consecutiveFailures: row.consecutiveFailures ?? 0,
+    failureKind: row.failureKind ?? null,
+    nextRetryAt: row.nextRetryAt ?? null,
   };
 }
 

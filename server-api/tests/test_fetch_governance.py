@@ -28,8 +28,25 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from app.database import Base  # noqa: E402
 from app.feeds import alert as alert_mod  # noqa: E402
 from app.feeds import fetcher  # noqa: E402
-from app.feeds.ingest import _fetch_one, _group_by_host, _too_soon, collect  # noqa: E402
-from app.models import AdminUser, Message, RssSource, User, now_str  # noqa: E402
+from app.feeds import ingest as ingest_mod  # noqa: E402
+from app.feeds import sources as src_mod  # noqa: E402
+from app.feeds.ingest import (  # noqa: E402
+    SKIP_CIRCUIT,
+    SKIP_INTERVAL,
+    _circuit_open,
+    _fetch_one,
+    _group_by_host,
+    _too_soon,
+    collect,
+)
+from app.models import (  # noqa: E402
+    AdminAuditLog,
+    AdminUser,
+    Message,
+    RssSource,
+    User,
+    now_str,
+)
 
 RSS_ONE = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -194,30 +211,32 @@ class TestPoliteness:
     def test_robots_denied_is_error_without_fetching_feed(self):
         client = ScriptedClient({"feed.xml": Resp(200, RSS_ONE.format(title="t", link="l"))},
                                 robots=ROBOTS_DENY)
-        key, items, err, skipped = _fetch_one(
+        out = _fetch_one(
             client, _src("denied", "https://denied.com/feed.xml", respect_robots=True), 10, 0
         )
-        assert err == "robots.txt 禁止抓取"
-        assert items is None
-        assert skipped is False
+        assert out.error == "robots.txt 禁止抓取"
+        assert out.items is None
+        assert out.skipped is False
+        # robots 拒绝是**永久性**的：重试多少次对方都不会突然允许
+        assert out.kind == fetcher.PERMANENT
         assert not any("feed.xml" in c for c in client.calls)
 
     def test_robots_missing_is_fail_open(self):
         """取不到 robots（404）不应阻断抓取：没有声明不等于禁止。"""
         client = ScriptedClient({"feed.xml": Resp(200, RSS_ONE.format(title="t", link="l"))})
-        key, items, err, skipped = _fetch_one(
+        out = _fetch_one(
             client, _src("ok", "https://ok.com/feed.xml", respect_robots=True), 10, 0
         )
-        assert err is None and len(items) == 1
+        assert out.error is None and len(out.items) == 1
 
     def test_respect_robots_can_be_disabled_per_source(self):
         """逐源开关：关掉后即使 robots 禁止也照抓（应对写得过严却公开提供 RSS 的源）。"""
         client = ScriptedClient({"feed.xml": Resp(200, RSS_ONE.format(title="t", link="l"))},
                                 robots=ROBOTS_DENY)
-        key, items, err, skipped = _fetch_one(
+        out = _fetch_one(
             client, _src("override", "https://override.com/feed.xml", respect_robots=False), 10, 0
         )
-        assert err is None and len(items) == 1
+        assert out.error is None and len(out.items) == 1
 
     def test_robots_is_cached_per_host(self):
         """robots 是整站声明：同站多源只取一次（取本身就是一次请求）。"""
@@ -233,8 +252,9 @@ class TestPoliteness:
         client = ScriptedClient({})
         src = _src("recent", "https://recent.com/f.xml",
                    last_fetched_at=datetime.now().isoformat(timespec="seconds"))
-        key, items, err, skipped = _fetch_one(client, src, 10, 10)
-        assert skipped is True
+        out = _fetch_one(client, src, 10, 10)
+        assert out.skipped is True
+        assert out.skip_reason == SKIP_INTERVAL  # 与熔断跳过区分，便于日志解释
         assert client.calls == []
 
 
@@ -253,7 +273,8 @@ def db():
 
 
 def _source(db, key, *, status="ok", fetched_minutes_ago=1.0, enabled=True,
-            alerted_minutes_ago=None, name=None, weight=5):
+            alerted_minutes_ago=None, name=None, weight=5,
+            fail_kind=None, failures=0):
     last = (
         (datetime.now() - timedelta(minutes=fetched_minutes_ago)).isoformat(timespec="seconds")
         if fetched_minutes_ago is not None else None
@@ -263,6 +284,7 @@ def _source(db, key, *, status="ok", fetched_minutes_ago=1.0, enabled=True,
         weight=weight, enabled=enabled, last_status=status,
         last_error="连接超时" if status == "error" else None,
         last_fetched_at=last, created_at=now_str(), updated_at=now_str(),
+        failure_kind=fail_kind, consecutive_failures=failures,
     )
     if alerted_minutes_ago is not None:
         row.last_alerted_at = (
@@ -477,3 +499,211 @@ class TestAlertAggregation:
         _source(db, "low", status="error", weight=1)
         _source(db, "high", status="error", weight=9)
         assert [i["key"] for i in alert_mod.unhealthy_sources(db)] == ["high", "low"]
+
+
+class TestFailureGrading:
+    """P1-18：失败分级 → 连续失败计数 → 熔断 → （可选）自动禁用。
+
+    此前所有失败一视同仁（404 也退避重试两遍）：既浪费请求、烦扰对方站点，
+    也说不清"该继续等还是该换源"——`last_status=error` 里看不出失败的**性质**。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        """跳过退避等待：真实 sleep 会让每个可重试失败白等约 1.8s。"""
+        monkeypatch.setattr(ingest_mod.time, "sleep", lambda *_: None)
+
+    # ---- 分类 ----
+
+    def test_5xx_and_429_are_transient(self):
+        """服务端的错与限流都是"稍后再来"，退避重试正是对的做法。"""
+        for code in (429, 500, 502, 503, 504):
+            assert fetcher.classify_status(code) == fetcher.TRANSIENT
+
+    def test_4xx_is_permanent(self):
+        """401/403 重试不会突然有权限，404/410 地址不会自己回来。"""
+        for code in (400, 401, 403, 404, 410):
+            assert fetcher.classify_status(code) == fetcher.PERMANENT
+
+    def test_network_error_is_transient(self):
+        class Boom:
+            def get(self, url, headers=None):
+                raise ConnectionError("连接被重置")
+
+        with pytest.raises(fetcher.FetchError) as ei:
+            fetcher.fetch_source(Boom(), _src("x", "https://x.com/f.xml"), 10)
+        assert ei.value.kind == fetcher.TRANSIENT
+
+    def test_no_items_is_permanent(self):
+        """200 却解析不出条目：HTTP 层是通的，立刻再取一次几乎必然是同一份内容。"""
+        empty = ScriptedClient({"f.xml": Resp(200, "<rss version='2.0'><channel/></rss>")})
+        with pytest.raises(fetcher.FetchError) as ei:
+            fetcher.fetch_source(empty, _src("x", "https://x.com/f.xml"), 10)
+        assert ei.value.kind == fetcher.PERMANENT
+
+    # ---- 重试只对可重试失败 ----
+
+    def test_permanent_failure_is_not_retried(self):
+        """404 重试再多次也是 404：不该白白多打 N 个请求。"""
+        client = ScriptedClient({"f.xml": Resp(404, "")})
+        out = _fetch_one(client, _src("p", "https://p.com/f.xml"), 10, 0)
+        assert out.error == "HTTP 404"
+        assert out.kind == fetcher.PERMANENT
+        assert len(client.calls) == 1  # 旧行为是 3 次
+
+    def test_transient_failure_is_retried(self):
+        client = ScriptedClient({"f.xml": Resp(503, "")})
+        out = _fetch_one(client, _src("t", "https://t.com/f.xml"), 10, 0)
+        assert out.kind == fetcher.TRANSIENT
+        assert len(client.calls) == 3  # 首试 + FEED_RETRY_TRANSIENT(2) 次退避重试
+
+    def test_429_is_retried(self):
+        """限流是"稍后再来"的显式信号，必须重试而不是当成永久失败。"""
+        client = ScriptedClient({"f.xml": Resp(429, "")})
+        out = _fetch_one(client, _src("r", "https://r.com/f.xml"), 10, 0)
+        assert out.kind == fetcher.TRANSIENT
+        assert len(client.calls) == 3
+
+    # ---- 连续失败计数（落库）----
+
+    def test_consecutive_failures_are_counted_in_db(self, db):
+        """计数必须**落库**：进程内计数在多实例下各算各的，重启也会丢。"""
+        _source(db, "flaky")
+        for _ in range(3):
+            src_mod.record_fetch_result(db, "flaky", False, 0, "超时", kind=fetcher.TRANSIENT)
+        row = db.get(RssSource, "flaky")
+        assert row.consecutive_failures == 3
+        assert row.failure_kind == fetcher.TRANSIENT
+
+    def test_success_resets_counter_and_clears_cooldown(self, db):
+        """成功即**彻底**解除熔断，不必等冷却自然到期。"""
+        _source(db, "heals")
+        for _ in range(6):
+            src_mod.record_fetch_result(db, "heals", False, 0, "超时", kind=fetcher.TRANSIENT)
+        assert db.get(RssSource, "heals").next_retry_at  # 已熔断
+        src_mod.record_fetch_result(db, "heals", True, 5, None)
+        row = db.get(RssSource, "heals")
+        assert row.consecutive_failures == 0
+        assert row.failure_kind is None
+        assert row.next_retry_at is None
+        assert row.last_status == "ok"
+
+    # ---- 熔断 ----
+
+    def test_circuit_opens_only_at_threshold(self, monkeypatch, db):
+        monkeypatch.setattr(src_mod, "FEED_CIRCUIT_THRESHOLD", 3)
+        _source(db, "dying")
+        for _ in range(2):
+            src_mod.record_fetch_result(db, "dying", False, 0, "超时", kind=fetcher.TRANSIENT)
+        assert db.get(RssSource, "dying").next_retry_at is None  # 未达阈值
+        src_mod.record_fetch_result(db, "dying", False, 0, "超时", kind=fetcher.TRANSIENT)
+        assert db.get(RssSource, "dying").next_retry_at  # 达阈值才熔断
+
+    def test_circuit_skips_without_any_request(self):
+        """熔断期内一个请求都不发：既省自己的时间，也不去烦正在故障的站点。"""
+        src = _src(
+            "cooling", "https://cooling.com/f.xml",
+            consecutive_failures=5,
+            next_retry_at=(datetime.now() + timedelta(minutes=10)).isoformat(timespec="seconds"),
+        )
+        client = ScriptedClient({"f.xml": Resp(200, RSS_ONE.format(title="t", link="l"))})
+        out = _fetch_one(client, src, 10, 0)
+        assert out.skipped is True
+        assert out.skip_reason == SKIP_CIRCUIT
+        assert client.calls == []
+
+    def test_circuit_clears_after_cooldown_and_source_heals(self):
+        """冷却到期后自动恢复尝试（自愈），无需人工干预。"""
+        src = _src(
+            "thawed", "https://thawed.com/f.xml",
+            consecutive_failures=5,
+            next_retry_at=(datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds"),
+        )
+        assert _circuit_open(src) is False
+        client = ScriptedClient({"f.xml": Resp(200, RSS_ONE.format(title="t", link="l"))})
+        out = _fetch_one(client, src, 10, 0)
+        assert out.skipped is False
+        assert len(out.items) == 1
+
+    # ---- 自动禁用（默认关闭）----
+
+    def test_auto_disable_is_off_by_default(self, db):
+        """默认关闭：源临时 404 一周就被静默关掉、且没人记得打开，比一直重试更糟。"""
+        assert src_mod.FEED_AUTO_DISABLE_PERMANENT == 0
+        _source(db, "dead")
+        for _ in range(10):
+            src_mod.record_fetch_result(db, "dead", False, 0, "HTTP 404", kind=fetcher.PERMANENT)
+        assert db.get(RssSource, "dead").enabled is True
+
+    def test_auto_disable_ignores_transient_failures(self, monkeypatch, db):
+        """可重试失败永远不该触发禁用——网络抖一下不代表源没用了。"""
+        monkeypatch.setattr(src_mod, "FEED_AUTO_DISABLE_PERMANENT", 2)
+        _source(db, "flaky")
+        for _ in range(5):
+            src_mod.record_fetch_result(db, "flaky", False, 0, "超时", kind=fetcher.TRANSIENT)
+        row = db.get(RssSource, "flaky")
+        assert row.enabled is True
+        assert row.consecutive_failures == 5
+
+    def test_auto_disable_writes_audit_trace(self, monkeypatch, db):
+        """开启后触发**必须留痕**：「谁把源关了」事后查不到，是最难排查的一类问题。"""
+        monkeypatch.setattr(src_mod, "FEED_AUTO_DISABLE_PERMANENT", 2)
+        _source(db, "gone")
+        for _ in range(2):
+            src_mod.record_fetch_result(db, "gone", False, 0, "HTTP 404", kind=fetcher.PERMANENT)
+        row = db.get(RssSource, "gone")
+        assert row.enabled is False
+        log = db.execute(
+            select(AdminAuditLog).where(AdminAuditLog.action == "source.auto_disable")
+        ).scalars().one()
+        assert log.target == "gone"
+        assert log.actor_phone == "system"  # 无人类操作者，但要可追溯
+        assert "consecutive_failures" in log.detail
+
+    # ---- 端到端 ----
+
+    def test_kind_survives_the_thread_pool(self):
+        """异常跨线程会被 `str(e)` 抹平，kind 必须**结构化**带回主线程。"""
+        stats: list[dict] = []
+        collect(
+            sources=[_src("dead", "https://dead.com/f.xml")],
+            limit_per_source=10,
+            stats=stats,
+            client=ScriptedClient({"f.xml": Resp(404, "")}),
+        )
+        assert stats[0]["ok"] is False
+        assert stats[0]["kind"] == fetcher.PERMANENT
+
+    # ---- 告警里的失败性质 ----
+
+    def test_alert_reason_carries_streak_and_nature(self, db):
+        """告警要能回答"等一等，还是得去改"——这是 P1-18 对运营最直接的价值。"""
+        _source(db, "p", status="error", fail_kind=fetcher.PERMANENT, failures=3)
+        _source(db, "t", status="error", fail_kind=fetcher.TRANSIENT, failures=1)
+        reasons = {i["key"]: i["reason"] for i in alert_mod.unhealthy_sources(db)}
+        assert "连续 3 次失败" in reasons["p"]
+        assert "永久性，需人工处理" in reasons["p"]
+        assert "可重试" in reasons["t"]
+        assert "连续" not in reasons["t"]  # 只失败一次不该说"连续"
+
+    def test_batch_summary_separates_permanent_from_transient(self, db):
+        """汇总按**失败性质**再分组：全临时 = 抖动，全永久 = 真的坏了。"""
+        _admin(db)
+        for k in "ab":
+            _source(db, k, status="error", fail_kind=fetcher.TRANSIENT)
+        for k in "cd":
+            _source(db, k, status="error", fail_kind=fetcher.PERMANENT)
+        alert_mod.notify_unhealthy_sources(db)
+        s = db.execute(select(Message)).scalars().one().summary
+        assert "永久失败 2 条" in s
+        assert "临时失败 2 条" in s
+        assert s.index("永久失败") < s.index("临时失败")  # 需人工的排前面
+
+    def test_legacy_errors_without_nature_fall_back(self, db):
+        """P1-18 之前落的错误没有性质，兜底成「抓取失败」而不是消失。"""
+        _admin(db)
+        for k in "abc":
+            _source(db, k, status="error")
+        alert_mod.notify_unhealthy_sources(db)
+        s = db.execute(select(Message)).scalars().one().summary
+        assert "抓取失败 3 条" in s

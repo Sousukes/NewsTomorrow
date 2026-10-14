@@ -50,6 +50,14 @@ function toSource(raw: unknown): RssSourceItem | null {
     lastFetchedAt: typeof r.lastFetchedAt === 'string' && r.lastFetchedAt ? r.lastFetchedAt : null,
     // 缺省视为遵守：后端默认 true，字段意外缺失时按更保守的一方兜底
     respectRobots: r.respectRobots !== false,
+    // P1-18：三项都是"旁路信息"，缺字段一律按"没有正在发生的故障"兜底（0 / null），
+    // 而不是猜一个失败性质——误标成 permanent 会让运营白跑一趟
+    consecutiveFailures: Number.isFinite(Number(r.consecutiveFailures))
+      ? Number(r.consecutiveFailures)
+      : 0,
+    failureKind:
+      r.failureKind === 'permanent' || r.failureKind === 'transient' ? r.failureKind : null,
+    nextRetryAt: typeof r.nextRetryAt === 'string' && r.nextRetryAt ? r.nextRetryAt : null,
   };
 }
 

@@ -6,6 +6,13 @@ P1-16 抓取治理：
   权重高者先入库"是先到先得的语义，若直接并发合并会让入库顺序随机化；
 - **礼貌抓取**：按 host 分组（同站串行 + 间隔）、单源最小抓取间隔、
   遵守 robots.txt（逐源可关，见 `respect_robots`）。
+
+P1-18 失败分级：
+- 只有**可重试**失败（超时 / 连接错误 / 5xx / 429）才退避重试；
+  4xx / robots 拒绝 / 解析无条目是永久性的，重试多少次结果都一样；
+- 连续失败**落库计数**（`consecutive_failures`），达阈值进入**熔断**
+  （冷却期内整轮跳过，且不动健康状态）；
+- 失败**性质**（`failure_kind`）一路带回主线程——异常跨线程常被 `str(e)` 抹平。
 """
 import logging
 import random
@@ -20,19 +27,49 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import (
+    FEED_CIRCUIT_COOLDOWN_MINUTES,
+    FEED_CIRCUIT_THRESHOLD,
     FEED_HOST_GAP_SECONDS,
     FEED_MAX_CONCURRENCY,
     FEED_MIN_INTERVAL_MINUTES,
+    FEED_RETRY_BACKOFF,
+    FEED_RETRY_TRANSIENT,
 )
 from ..models import News
-from .fetcher import USER_AGENT, FetchError, NotModified, RawItem, fetch_source, robots_check
+from .fetcher import (
+    PERMANENT,
+    TRANSIENT,
+    USER_AGENT,
+    FetchError,
+    NotModified,
+    RawItem,
+    fetch_source,
+    robots_check,
+)
 from .sources import all_enabled_sources, record_fetch_result, sources_for_channel
 
 logger = logging.getLogger("toutiao.ingest")
 
-# 退避重试参数
-RETRY_TIMES = 2
-BACKOFF_BASE = 0.6
+# 熔断跳过的标记（与"按礼仪跳过"区分，仅用于日志可解释）
+SKIP_INTERVAL = "interval"
+SKIP_CIRCUIT = "circuit"
+
+
+@dataclass
+class FetchOutcome:
+    """单源抓取结果（取代原先的 4 元组）。
+
+    `kind` 只在失败时有值（`transient` / `permanent`）：异常对象在线程池里被
+    `str(e)` 抹成字符串后分类就没了，必须**结构化地带回**主线程，
+    否则 `record_fetch_result` 又退化成"所有失败一视同仁"。
+    """
+
+    key: str
+    items: list | None = None
+    error: str | None = None
+    skipped: bool = False
+    kind: str | None = None
+    skip_reason: str | None = None
 
 
 @dataclass
@@ -60,26 +97,38 @@ def _client(timeout: float, connect: float) -> httpx.Client:
 
 
 def _fetch_with_retry(client: httpx.Client, source: dict, limit: int) -> list[RawItem]:
-    """带指数退避的抓取；重试仍失败则抛出 `FetchError`（由 `collect` 记为该源故障）。
+    """带指数退避的抓取，但**只对可重试失败**退避。
+
+    原实现对所有失败一律重试 N 次：404 / robots 拒绝 / 解析无条目这类**永久性**失败，
+    重试再多次结果都一样，只是白白多打 N 个请求——对自己是浪费，对对方站点是负担。
 
     源返回 304（未变更）时直接返回空列表且**不重试**——那不是失败。
     """
+    name = source.get("name") or source.get("key", "")
     last_exc: Exception | None = None
-    for attempt in range(RETRY_TIMES + 1):
+    for attempt in range(FEED_RETRY_TRANSIENT + 1):
         try:
             return fetch_source(client, source, limit=limit)
         except NotModified:
             return []
         except Exception as e:
             last_exc = e
-            if attempt < RETRY_TIMES:
-                # 指数退避 + 抖动，避免多源同时重试打爆对端
-                delay = BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.3)
-                logger.info(
-                    "重试 %s（第 %d 次）：%s，等待 %.2fs", source.get("name"), attempt + 1, e, delay
-                )
-                time.sleep(delay)
-    raise last_exc if last_exc is not None else FetchError("抓取失败")
+            # 认不出的异常按"可重试"处理，保守保留旧行为（不至于因为分类缺失丢掉重试）
+            retryable = getattr(e, "kind", TRANSIENT) == TRANSIENT
+            if not retryable:
+                logger.info("永久失败，不重试 [%s]：%s（需改配置或换源）", name, e)
+                break
+            if attempt >= FEED_RETRY_TRANSIENT:
+                break
+            # 指数退避 + 抖动，避免多源同时重试打爆对端
+            delay = FEED_RETRY_BACKOFF * (2 ** attempt) + random.uniform(0, 0.3)
+            logger.info(
+                "重试 %s（第 %d 次）：%s，等待 %.2fs", name, attempt + 1, e, delay
+            )
+            time.sleep(delay)
+    if last_exc is None:  # pragma: no cover - 循环至少执行一次
+        raise FetchError("抓取失败", PERMANENT)
+    raise last_exc
 
 
 def _dedupe_sources(srcs: list[dict]) -> list[dict]:
@@ -127,16 +176,39 @@ def _too_soon(source: dict, min_interval_minutes: int) -> bool:
     return (now - dt) < timedelta(minutes=min_interval_minutes)
 
 
-def _fetch_one(
-    client, source: dict, limit: int, min_interval_minutes: int
-) -> tuple[str, list[RawItem] | None, str | None, bool]:
-    """抓一个源 → `(key, items, error, skipped)`。
+def _circuit_open(source: dict, now: datetime | None = None) -> bool:
+    """熔断判定：连续失败达阈值后，冷却期内不再打这个源。
 
-    单个源的失败/跳过**不抛**：并发下异常要带回主线程归类，而不是炸掉整组。
+    意义：一个已经连挂 N 轮的源，不需要每轮再打 `FEED_RETRY_TRANSIENT + 1` 次
+    ——既省自己的时间，也不去烦一个正在故障的站点。
+
+    自愈：冷却到期后自动恢复尝试，成功即清零计数（`record_fetch_result`），
+    无需人工干预。
     """
+    if not FEED_CIRCUIT_THRESHOLD:
+        return False
+    if (source.get("consecutive_failures") or 0) < FEED_CIRCUIT_THRESHOLD:
+        return False
+    until = source.get("next_retry_at")
+    if not until:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(until))
+    except (TypeError, ValueError):
+        return False
+    ref = now or (datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now())
+    return dt > ref
+
+
+def _fetch_one(client, source: dict, limit: int, min_interval_minutes: int) -> FetchOutcome:
+    """抓一个源。单个源的失败/跳过**不抛**：并发下异常要带回主线程归类，而不是炸掉整组。"""
     key = source.get("key") or source.get("url", "")
     if min_interval_minutes and _too_soon(source, min_interval_minutes):
-        return key, None, None, True
+        return FetchOutcome(key, skipped=True, skip_reason=SKIP_INTERVAL)
+    if _circuit_open(source):
+        # 与"按礼仪跳过"同口径：本轮没抓，就**不刷新健康状态**。
+        # 该源仍然是不健康的（last_status 保持 error），只是不去打扰它。
+        return FetchOutcome(key, skipped=True, skip_reason=SKIP_CIRCUIT)
     if source.get("respect_robots", True):
         try:
             allowed, delay, reason = robots_check(client, source["url"])
@@ -144,15 +216,15 @@ def _fetch_one(
             logger.info("robots 检查异常[%s]，按放行处理: %s", key, e)
             allowed, delay, reason = True, None, ""
         if not allowed:
-            return key, None, reason or "robots.txt 禁止抓取", False
+            return FetchOutcome(key, error=reason or "robots.txt 禁止抓取", kind=PERMANENT)
         if delay:
             # 尊重 Crawl-delay，但封顶 5s：对方若写了极大值，不能把整轮拖死
             time.sleep(min(float(delay), 5.0))
     try:
-        return key, _fetch_with_retry(client, source, limit), None, False
+        return FetchOutcome(key, items=_fetch_with_retry(client, source, limit))
     except Exception as e:
         logger.warning("源 %s 抓取失败：%s", key, e)
-        return key, None, str(e), False
+        return FetchOutcome(key, error=str(e), kind=getattr(e, "kind", TRANSIENT))
 
 
 def _fetch_group(client, group: list[dict], limit: int, gap: float, min_interval: int):
@@ -177,7 +249,7 @@ def _collect_all(
 ) -> list[RawItem]:
     """两阶段：并发抓取 → 按权重顺序串行合并（实现见 `collect` 的说明）。"""
     groups = _group_by_host(srcs)
-    fetched: dict[str, tuple[list[RawItem] | None, str | None, bool]] = {}
+    fetched: dict[str, FetchOutcome] = {}
     with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as pool:
         futures = [
             pool.submit(_fetch_group, client, g, limit_per_source, gap, interval)
@@ -190,35 +262,57 @@ def _collect_all(
             except Exception as e:  # pragma: no cover - 防御性
                 logger.warning("抓取分组异常: %s", e)
                 continue
-            for key, items, err, skipped in results:
-                fetched[key] = (items, err, skipped)
+            for oc in results:
+                fetched[oc.key] = oc
 
     collected: dict[str, RawItem] = {}
     for s in srcs:
-        items, err, skipped = fetched.get(s["key"], (None, "未执行", False))
-        if skipped:
+        oc = fetched.get(s["key"]) or FetchOutcome(s["key"], error="未执行", kind=TRANSIENT)
+        if oc.skipped:
             if stats is not None:
                 stats.append(
-                    {"key": s["key"], "ok": True, "count": 0, "error": None, "skipped": True}
+                    {
+                        "key": s["key"],
+                        "ok": True,
+                        "count": 0,
+                        "error": None,
+                        "skipped": True,
+                        "skip_reason": oc.skip_reason,
+                    }
+                )
+            if oc.skip_reason == SKIP_CIRCUIT:
+                logger.info(
+                    "源 %s 处于熔断冷却期，本轮跳过（已连续失败 %s 次）",
+                    s["key"], s.get("consecutive_failures"),
                 )
             continue
-        if err is not None or items is None:
+        if oc.error is not None or oc.items is None:
             if stats is not None:
                 stats.append(
                     {
                         "key": s["key"],
                         "ok": False,
                         "count": 0,
-                        "error": (err or "抓取失败")[:300],
+                        "error": (oc.error or "抓取失败")[:300],
                         "skipped": False,
+                        "kind": oc.kind,
+                        "skip_reason": None,
                     }
                 )
             continue
         if stats is not None:
             stats.append(
-                {"key": s["key"], "ok": True, "count": len(items), "error": None, "skipped": False}
+                {
+                    "key": s["key"],
+                    "ok": True,
+                    "count": len(oc.items),
+                    "error": None,
+                    "skipped": False,
+                    "kind": None,
+                    "skip_reason": None,
+                }
             )
-        for it in items:
+        for it in oc.items:
             if keyword and keyword not in it.title and keyword not in it.summary:
                 continue
             # 同 id 保留先到的一条（多源可能转载同一稿件）
@@ -245,9 +339,11 @@ def collect(
     - `sources`：显式指定源列表（**优先**）。抓取流程会传入库中配置的源；
       不传则回退到内置源（`all_enabled_sources()`），保证无库场景仍可运行。
     - `stats`：可选出参，收集每个源的抓取结果
-      `{key, ok, count, error, skipped}`，供调用方回写健康状态。
-      **单个源失败不影响其他源**；`skipped=True` 表示本轮按礼仪跳过（未抓取），
-      调用方不应刷新其健康状态。
+      `{key, ok, count, error, skipped, kind, skip_reason}`，供调用方回写健康状态。
+      **单个源失败不影响其他源**；`skipped=True` 表示本轮未抓取（按礼仪或熔断跳过），
+      调用方**不应刷新其健康状态**——刷新会让"多久没成功"永远归零。
+      `kind` 是失败性质（transient / permanent），异常跨线程会被 `str(e)` 抹平，
+      必须结构化带回；`skip_reason` 区分 `interval` / `circuit`，仅用于日志可解释。
     - `client`：注入 HTTP 客户端（测试用）。生产调用不传，由本函数按超时配置创建。
 
     并发只用于**等待网络**；合并仍按 `srcs`（权重降序）串行进行——
@@ -359,7 +455,9 @@ def run_ingest(
         for st in stats:
             if st.get("skipped"):
                 continue
-            record_fetch_result(db, st["key"], st["ok"], st["count"], st["error"])
+            record_fetch_result(
+                db, st["key"], st["ok"], st["count"], st["error"], kind=st.get("kind")
+            )
         # 告警是本轮的收尾动作：源挂了要有人被通知，而不是等人去翻列表。
         # 放在 finally 里，抓取阶段异常时也能基于已有健康状态发出告警。
         try:

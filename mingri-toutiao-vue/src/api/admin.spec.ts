@@ -40,6 +40,9 @@ const RAW_SOURCE = {
   lastItemCount: 20,
   lastFetchedAt: '2026-10-13T07:38:22',
   respectRobots: true,
+  consecutiveFailures: 0,
+  failureKind: null,
+  nextRetryAt: null,
 };
 
 beforeEach(() => {
@@ -77,6 +80,10 @@ describe('api/admin', () => {
       lastFetchedAt: '2026-10-13T07:38:22',
       lastError: null,
       respectRobots: true,
+      // P1-18：多词字段走驼峰，落库口径与后端 `_out` 对齐（拼错会静默变 null）
+      consecutiveFailures: 0,
+      failureKind: null,
+      nextRetryAt: null,
     });
   });
 
@@ -212,6 +219,63 @@ describe('api/admin', () => {
     await expect(
       createSource({ key: 'dup', name: 'x', channel: 'tech', url: 'https://e.com/a.xml' }),
     ).rejects.toThrow('该源标识已存在');
+  });
+});
+
+// P1-18：失败分级三项是**旁路信息**，取值不认识时一律回落到"没有故障"，
+// 绝不猜一个失败性质——误标成 permanent 会让运营白跑一趟。
+describe('api/admin（失败分级字段，P1-18）', () => {
+  const one = async (patch: Record<string, unknown>) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ list: [{ ...RAW_SOURCE, ...patch }] })),
+    );
+    const [s] = await fetchSources();
+    return s;
+  };
+
+  it('三项齐全时原样透出', async () => {
+    const s = await one({
+      consecutiveFailures: 7,
+      failureKind: 'permanent',
+      nextRetryAt: '2026-10-15T12:00:00',
+    });
+    expect(s.consecutiveFailures).toBe(7);
+    expect(s.failureKind).toBe('permanent');
+    expect(s.nextRetryAt).toBe('2026-10-15T12:00:00');
+  });
+
+  it('transient 原样透出（与 permanent 走同一通道）', async () => {
+    expect((await one({ failureKind: 'transient' })).failureKind).toBe('transient');
+  });
+
+  it('整个字段缺失（后端旧版本）时回落为 0 / null / null', async () => {
+    // 显式删掉三个键，真正模拟"老后端不下发"——用 RAW_SOURCE 里已有的 0/null
+    // 是测不出缺失分支的
+    const legacy: Record<string, unknown> = { ...RAW_SOURCE };
+    delete legacy.consecutiveFailures;
+    delete legacy.failureKind;
+    delete legacy.nextRetryAt;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ list: [legacy] })),
+    );
+    const [s] = await fetchSources();
+    expect(s.consecutiveFailures).toBe(0);
+    expect(s.failureKind).toBeNull();
+    expect(s.nextRetryAt).toBeNull();
+  });
+
+  it('failureKind 是不认识的取值时回落为 null', async () => {
+    expect((await one({ failureKind: 'fatal' })).failureKind).toBeNull();
+  });
+
+  it('consecutiveFailures 是垃圾值时回落为 0，不产生 NaN', async () => {
+    expect((await one({ consecutiveFailures: '很多次' })).consecutiveFailures).toBe(0);
+  });
+
+  it('nextRetryAt 为空串时回落为 null', async () => {
+    expect((await one({ nextRetryAt: '' })).nextRetryAt).toBeNull();
   });
 });
 
