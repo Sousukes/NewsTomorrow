@@ -9,6 +9,14 @@
     - 主评论被软删除后其回复不可见（回复接口返回空列表）——主评论消失后，
       失去语境的回复不应继续裸露在讨论区。
 
+敏感词审核（P1-23）：
+    提交时先在**服务端**做一次敏感词检测（前端校验只能防误触，防不了直接
+    调 API）。命中 `block` 词直接拒绝提交（提示不回显命中了哪个词——回显
+    等于给绕过者一份对照表）；命中 `mask` 词则脱敏后照常发布并置
+    `pending_review`，交人工复核——机器判断是概率性的，"先兜住再让人看"
+    比"直接吞掉用户的话"代价小。命中一律留日志（含原文片段）：脱敏不可逆，
+    误杀复盘与申诉全靠它。检测只在**写路径**发生，读路径零开销。
+
 隐藏过滤（P1-22）：
     运营软隐藏与软删除对公开侧完全同构：`hidden` 的评论同样从全部公开
     查询消失（主列表/回复/预览/计数），主评论被隐藏后其回复也不再可见；
@@ -28,12 +36,14 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from ..config import MODERATION_ENABLED
 from ..database import get_db
 from ..deps import get_current_user, get_current_user_optional
-from ..models import Comment, CommentLike, News, User, now_str
+from ..moderation import engine, snippet_of
+from ..models import Comment, CommentLike, News, SensitiveHit, SensitiveWord, User, now_str
 from ..notify import (
     notify_comment_liked,
     notify_comment_on_article,
@@ -95,6 +105,10 @@ def to_out(
         "userId": c.user_id,
         "mine": bool(current and c.user_id is not None and c.user_id == current.id),
         "isDeleted": bool(c.is_deleted),
+        # 待人工复核（P1-23）：命中敏感词被脱敏后发布的评论。
+        # 作者据此知道"我的话被处理过"（而不是莫名少了几個字符），前端只对
+        # `mine` 的评论展示提示；他人看到的是已脱敏内容，无额外信息。
+        "pendingReview": bool(c.pending_review),
         # 两级评论（P1-12）：parentId/rootId 定位结构，replyCount/replies 供
         # 主评论展示「N 条回复」与预览，replyTo* 供回复展示「回复 @谁」。
         "parentId": c.parent_id,
@@ -185,6 +199,50 @@ def _get_news_or_404(db: Session, news_id: str) -> News:
 def _order_desc(q):
     """最新在前：created_at 倒序，id 倒序兜底。"""
     return q.order_by(Comment.created_at.desc(), Comment.id.desc())
+
+
+def _record_hits(
+    db: Session,
+    hits: list,
+    *,
+    originals: dict,
+    news_id: str,
+    user: User,
+    comment_id: str | None,
+) -> None:
+    """写命中日志 + 累加词的命中次数（**不提交**，由调用方与业务一起 commit）。
+
+    同一 `(字段, 词)` 在一次提交里只记一行：同一段话三次命中同一个词，
+    对运营是「这条评论命中了 X」一件事，不是三条独立事件——重复行只会
+    把命中列表淹掉，让"哪个词在误杀"看不出来。
+    """
+    ts = now_str()
+    seen: set[tuple[str, str]] = set()
+    for h in hits:
+        key = (h.field, h.word)
+        if key in seen:
+            continue
+        seen.add(key)
+        db.add(
+            SensitiveHit(
+                word=h.word,
+                action=h.action,
+                field=h.field,
+                comment_id=comment_id,
+                news_id=news_id,
+                user_id=user.id,
+                # 记账号真实昵称：运营要按人定位，脱敏后的展示名没有这条信息
+                user_name=user.name,
+                snippet=snippet_of(originals.get(h.field, ""), h.start, h.end),
+                created_at=ts,
+            )
+        )
+        # 自增走 SQL 表达式而不是 Python 侧的 `+=`：并发提交下先读后写会丢更新
+        db.execute(
+            update(SensitiveWord)
+            .where(SensitiveWord.word == h.word)
+            .values(hit_count=SensitiveWord.hit_count + 1)
+        )
 
 
 @router.get("/{news_id}/comments", response_model=None)
@@ -304,6 +362,9 @@ def create_comment(
     回复约束：被回复评论必须属于同一篇文章、未删除且**未隐藏**（P1-22）；
     回复的回复拍平到同一 root。回复只通知被回复者（一级通知），不再走
     「资讯有新评论」广播——避免同一个人收到两条语义重复的消息。
+
+    敏感词审核（P1-23）：落库**之前**检测正文与昵称。命中 block → 40005
+    （提示不回显命中词）；命中 mask → 脱敏后照常发布 + 置待复核。
     """
     _get_news_or_404(db, news_id)
     content = body.content.strip()
@@ -320,18 +381,49 @@ def create_comment(
                 status_code=400, detail={"code": 40003, "message": "回复的评论不存在"}
             )
 
+    # id 先生成：命中日志要能关联到评论（block 时没有评论，故仍可为空）
+    cid = f"c_{uuid.uuid4().hex[:12]}"
+    display_name = user.name
+    pending_review = False
+    if MODERATION_ENABLED:
+        # 引擎在进程内缓存词库：TTL 内不查库，检测本身只是几十微秒的内存扫描
+        inspection = engine.inspect(db, content=content, name=user.name)
+        if inspection.hits:
+            _record_hits(
+                db,
+                inspection.hits,
+                originals={"content": content, "name": user.name},
+                news_id=news_id,
+                user=user,
+                comment_id=None if inspection.blocked else cid,
+            )
+        if inspection.blocked:
+            # 拦截必须留痕：否则"拦了多少人"是黑箱，也认不出反复试探的行为。
+            # 先提交日志再抛错——日志与"评论没写成"是两件事，都要为真。
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail={"code": 40005, "message": "评论包含不当内容，请修改后重试"},
+            )
+        content = inspection.content
+        display_name = inspection.name
+        pending_review = inspection.masked
+
     ts = now_str()
     c = Comment(
-        id=f"c_{uuid.uuid4().hex[:12]}",
+        id=cid,
         news_id=news_id,
         # 归属：发布者用户 id（供"删除自己的评论"/"我的评论"使用）
         user_id=user.id,
-        user_name=user.name,
+        # 昵称可能被脱敏（P1-23）：只改这条评论的展示名快照，不动账号昵称
+        user_name=display_name,
         seed="me",
         content=content,
         time=ts,
         created_at=ts,
         likes=0,
+        # 待人工复核（P1-23）：被脱敏的评论不是"通过了审核"，机器只是先兜住
+        pending_review=pending_review,
         # 两级评论：回复挂到父评论所属的 root 下（父是主评论时 root 即父本身）
         parent_id=parent.id if parent is not None else None,
         root_id=(parent.root_id or parent.id) if parent is not None else None,

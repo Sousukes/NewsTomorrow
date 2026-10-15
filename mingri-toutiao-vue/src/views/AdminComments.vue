@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
-import { fetchAdminComments, hideComment, restoreComment } from '@/api/admin';
+import { fetchAdminComments, hideComment, restoreComment, reviewComment } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
 import type { AdminCommentItem } from '@/types';
 
@@ -26,11 +26,13 @@ const denied = ref(false);
 
 // ------------------------------ 筛选（P1-22） ------------------------------
 
-type StatusFilter = 'all' | 'visible' | 'hidden';
+// pending（P1-23）：命中敏感词被脱敏、等人工看一眼的评论
+type StatusFilter = 'all' | 'visible' | 'hidden' | 'pending';
 const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: 'all', label: '全部' },
   { value: 'visible', label: '可见' },
   { value: 'hidden', label: '已隐藏' },
+  { value: 'pending', label: '待复核' },
 ];
 
 const status = ref<StatusFilter>('all');
@@ -173,7 +175,9 @@ function applyUpdate(updated: AdminCommentItem) {
   const matchesFilter =
     status.value === 'all' ||
     (status.value === 'visible' && !updated.hidden) ||
-    (status.value === 'hidden' && updated.hidden);
+    (status.value === 'hidden' && updated.hidden) ||
+    // 复核通过后不再"待复核"，就地移出 pending 列表（与隐藏/恢复同款处理）
+    (status.value === 'pending' && updated.pendingReview);
   const i = list.value.findIndex((x) => x.id === updated.id);
   if (!matchesFilter) {
     if (i >= 0) list.value.splice(i, 1);
@@ -218,6 +222,25 @@ async function doRestore(c: AdminCommentItem) {
     showToast('已恢复该评论');
   } catch (e) {
     error.value = message(e, '恢复失败');
+  } finally {
+    busyId.value = '';
+  }
+}
+
+/**
+ * 通过人工复核（P1-23）：只清「待复核」标记，不改可见性与计数。
+ *
+ * 脱敏评论从一开始就可见，复核是"人看过了"这个事实，不是"重新放行"；
+ * 复核后仍觉得不合适应当走**隐藏**，而不是把标记留着不管。
+ */
+async function doReview(c: AdminCommentItem) {
+  busyId.value = c.id;
+  try {
+    const updated = await reviewComment(c.id);
+    applyUpdate(updated);
+    showToast('已通过复核');
+  } catch (e) {
+    error.value = message(e, '复核失败');
   } finally {
     busyId.value = '';
   }
@@ -324,6 +347,13 @@ function formatTime(iso: string): string {
               >
                 已隐藏
               </span>
+              <span
+                v-if="c.pendingReview"
+                class="admin__chip admin__chip--pending"
+                title="命中敏感词，已自动脱敏并发布，等待人工复核"
+              >
+                待复核
+              </span>
             </div>
 
             <p class="admin__content" :title="c.content">{{ c.content }}</p>
@@ -362,6 +392,15 @@ function formatTime(iso: string): string {
               </button>
               <button v-else type="button" :disabled="busyId === c.id" @click="doRestore(c)">
                 恢复
+              </button>
+              <!-- 脱敏评论仍可见，复核只是"人看过了"；真不合适要隐藏，别只留着标记 -->
+              <button
+                v-if="c.pendingReview"
+                type="button"
+                :disabled="busyId === c.id"
+                @click="doReview(c)"
+              >
+                通过复核
               </button>
               <!-- 「这条评论被谁动过」：带 target 进审计页，只看它的历史 -->
               <button
@@ -597,6 +636,12 @@ function formatTime(iso: string): string {
 .admin__chip--hidden {
   background: #fdeceb;
   color: #b3352b;
+}
+
+/* 待复核：脱敏后已发布，等人看一眼——用警示黄而不是红，它不是处置态 */
+.admin__chip--pending {
+  background: #fff4e5;
+  color: #a15c00;
 }
 
 /* 评论正文：最多两行，全文在 title 里（治理要扫读，长评论不该撑爆列表） */

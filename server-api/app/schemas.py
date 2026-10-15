@@ -173,6 +173,43 @@ class NewsTopIn(BaseModel):
     isTop: bool | None = None
 
 
+class WordIn(BaseModel):
+    """敏感词新增入参（P1-23）。
+
+    `action` 三选一：`block`（直接拦截）/ `mask`（脱敏 + 待复核）/ `allow`
+    （白名单豁免，专治误杀）。默认 `mask`——机器的判断是概率性的，默认动作
+    应当是"先兜住再让人看"，而不是"直接吞掉用户的话"。
+
+    `word` 的最短长度在**路由层**校验（需要归一化后按字符数计，且要读配置），
+    这里只把关非空与长度上限。
+    """
+
+    word: str = Field(min_length=1, max_length=100)
+    action: str = Field(default="mask", pattern="^(block|mask|allow)$")
+    category: str = Field(default="", max_length=30)
+    enabled: bool = True
+
+    @field_validator("word")
+    @classmethod
+    def _word_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("敏感词不能为空")
+        return v
+
+
+class WordUpdateIn(BaseModel):
+    """敏感词局部更新（P1-23）：**不允许改词本身**。
+
+    改词等于换一个词（唯一约束、归一化结果、命中日志里的词全部随之漂移），
+    语义上是"删一条 + 加一条"——走增删两条审计比一条 `update` 更容易追溯。
+    """
+
+    action: str | None = Field(default=None, pattern="^(block|mask|allow)$")
+    category: str | None = Field(default=None, max_length=30)
+    enabled: bool | None = None
+
+
 class CommentHideIn(BaseModel):
     """评论隐藏入参（P1-22）：理由**必填**——与 NewsHideIn 同一处方。
 

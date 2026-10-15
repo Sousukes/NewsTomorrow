@@ -188,10 +188,17 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | POST | `/api/admin/news/{id}/hide` | ✅ 管理员 | **软下架**（可恢复）：理由必填（空/纯空白 422——「留痕是准入条件」），≤300 字；**幂等**（重复下架不覆盖原理由、不重复记审计） |
 | POST | `/api/admin/news/{id}/restore` | ✅ 管理员 | 恢复已下架资讯（**幂等**）；清空 `hidden_at`/`hidden_reason`；公开四路查询实时恢复可见，无需等下一轮抓取 |
 | PATCH | `/api/admin/news/{id}` | ✅ 管理员 | 局部更新（当前仅 `isTop` 置顶开关）；字段级 diff 审计，**无变化不记** |
-| GET | `/api/admin/comments?status=&keyword=&newsId=&limit=&cursor=` | ✅ 管理员 | **管理端评论列表**（P1-22）：`status` 取 `all`（默认，**含已隐藏**）/ `visible` / `hidden`，非法值 422；`keyword` 评论内容 ILIKE；`newsId` 按所属资讯过滤；已软删除一概不返回；排序 `created_at DESC, id DESC`；`total` 始终返回 |
+| GET | `/api/admin/comments?status=&keyword=&newsId=&limit=&cursor=` | ✅ 管理员 | **管理端评论列表**（P1-22/23）：`status` 取 `all`（默认，**含已隐藏**）/ `visible` / `hidden` / `pending`（待复核），非法值 422；`keyword` 评论内容 ILIKE；`newsId` 按所属资讯过滤；已软删除一概不返回；排序 `created_at DESC, id DESC`；`total` 始终返回 |
 | GET | `/api/admin/comments/{id}` | ✅ 管理员 | 管理端单条评论（含隐藏三件套与所属资讯标题）；不存在 40405（与公开端 40401 刻意分开） |
 | POST | `/api/admin/comments/{id}/hide` | ✅ 管理员 | **软隐藏**（可恢复）：理由必填（空/纯空白 422——「留痕是准入条件」），≤300 字；**幂等**（重复隐藏不覆盖原理由、不重复记审计）；隐藏后公开五路（主列表/回复/预览/计数/不可交互）实时不可见 |
 | POST | `/api/admin/comments/{id}/restore` | ✅ 管理员 | 恢复已隐藏评论（**幂等**）；清空 `hidden_at`/`hidden_reason`；计数与热度分同步加回，公开查询实时恢复可见 |
+| POST | `/api/admin/comments/{id}/review` | ✅ 管理员 | **通过人工复核**（P1-23，幂等）：只清 `pending_review` 并写 `reviewed_at`，不改可见性与计数——脱敏评论本来就可见，复核是"人看过了"这个事实；仍不合适应走 `hide` |
+| GET | `/api/admin/words?keyword=&action=&enabled=&limit=&offset=` | ✅ 管理员 | **敏感词库**（P1-23）：`action` 取 `block`/`mask`/`allow`，非法值 422；按 `hit_count DESC, id DESC`（高频词要么是热点、要么是误杀大户）；`total` 为筛选后的总数 |
+| POST | `/api/admin/words` | ✅ 管理员 | 新增敏感词：归一化后不足 `MODERATION_MIN_WORD_LEN` 个有效字符 → 42202（空格与标点不计）；重复 → 40905；**保存即生效**（本进程缓存立即失效） |
+| PATCH | `/api/admin/words/{id}` | ✅ 管理员 | 局部更新（动作/分组/启用），**不允许改词本身**；字段级 diff 审计，无变化不记 |
+| DELETE | `/api/admin/words/{id}` | ✅ 管理员 | 删除敏感词（审计留快照；停用通常比删除更合适）；不存在 40406 |
+| POST | `/api/admin/words/reload` | ✅ 管理员 | 强制重建**本进程**词库索引（其他实例靠 TTL 兜底，需即时同步时调它） |
+| GET | `/api/admin/moderation/hits?word=&action=&field=&limit=&cursor=` | ✅ 管理员 | **命中日志**（P1-23，只读）：`field` 取 `content`/`name`；`snippet` 为**原文**片段（脱敏不可逆，误杀复盘与申诉的唯一证据）；被拦截的命中 `commentId` 为 `NULL` |
 
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
@@ -621,7 +628,10 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0021_hot_score_at`（热度重算锚点 `news.hot_score_at`，可空无默认——NULL 即
   「从未算过」天然覆盖存量；**刻意不建索引**，表有 prune 上限，全表找过期行足够便宜）、
   `0022_comment_soft_hide`（评论软隐藏 `comments.hidden` / `hidden_at` / `hidden_reason`，
-  `hidden` 非空 `server_default=false`，**刻意不建索引**——隐藏集小，与 `is_deleted` 同理）。
+  `hidden` 非空 `server_default=false`，**刻意不建索引**——隐藏集小，与 `is_deleted` 同理）、
+  `0023_sensitive_words`（敏感词库 `sensitive_words` + 命中日志 `sensitive_hits`，
+  `word` 唯一索引、日志记词本身而非外键；`comments` 增 `pending_review` / `reviewed_at`，
+  `pending_review` 非空 `server_default=false` 且**不建索引**——它与 `hidden` 正交且短暂）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -815,10 +825,107 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
   主评论消失后，失去语境的回复不应继续裸露在讨论区；回复行本身保留，可追溯。
 - **通知**：主评论广播给同样评论过该资讯的其他用户；回复只通知被回复者。
 
+## 评论内容审核：敏感词（P1-23）
+
+> 迁移 `0023_sensitive_words`；引擎 `app/moderation.py`；管理端 `/api/admin/words*`。
+
+### 接入位置：只在**写路径**的服务端
+
+唯一写入口 `POST /api/news/{news_id}/comments`（主评论与回复都走它），落库**之前**检测：
+
+- **为什么不在读路径**：列表/详情每秒被读很多次，评论一天写不了几条——成本放在写路径，读路径零开销；
+- **为什么不在前端**：前端校验只防误触，防不了直接调 API。服务端是唯一可信边界；
+- **为什么不在落库后补救**：block 的语义是"这条不该存在"，先落库再删会留下可观测的时间窗。
+
+### 三种动作
+
+| 动作 | 语义 | 适用 |
+| --- | --- | --- |
+| `block` | 拒绝提交（**不落库**），返回 40005 | 高危内容 |
+| `mask` | 替换为 `*`，**照常发布**并置 `pending_review` | 默认（`MODERATION_DEFAULT_ACTION`） |
+| `allow` | 白名单：被它**完全包裹**的命中区间豁免 | 降误杀（如「福利待遇」豁免「福利」） |
+
+默认 mask 而非 block：机器的判断是概率性的，"先脱敏 + 让人看一眼"的代价远小于
+"把用户的话直接吞掉"——后者不可逆。
+
+### 匹配策略（对抗四类绕过）
+
+归一化由 `moderation.normalize()` 完成，返回 `(归一化串, 原文下标映射)`：
+
+1. **大小写**：`casefold()`（比 `lower` 更彻底，覆盖 ß → ss）；
+2. **全角/半角与兼容字符**：**逐字符** NFKC（整串会改变长度、丢下标）；
+3. **空格 / 标点 / 零宽 / emoji 干扰**：只保留 Unicode 类别 `L*`（字母，含 CJK/假名/谚文）
+   与 `N*`（数字），其余全部丢弃——「傻 逼」「傻-逼」「傻​逼」归一后与「傻逼」同形；
+4. **重复与变形**（如「好好好好好」压缩）**不做**：误杀率高，交给人工复核。
+
+脱敏改的是**原文**（靠下标映射定位），长度取**词长**而非原文区间长度——
+否则等于告诉对方"绕过去几个字符就能过"。
+
+算法是 **Aho-Corasick 自动机**（`_Automaton`），`O(n + 命中数)`，不是"逐词 `in` 判断"。
+
+### 性能
+
+- 评论正文上限 500 字，单次扫描纯内存、数十微秒级；
+- **检测路径不查库**：词库缓存在进程内，只有 TTL（默认 30s）到期才回库查一次
+  **指纹**（`COUNT(*) + MAX(updated_at)`），指纹没变继续用旧索引；
+- 重建索引是唯一有成本的动作（2000 词约几十毫秒），且只发生在**改词时**，
+  不在请求关键路径上。
+
+### 热更新
+
+- 管理端增删改词 → `engine.invalidate()` → **本进程**下一次检测即重建（保存即生效）；
+- 其他实例靠 TTL 兜底（30s 内感知），需要即时同步时调 `POST /admin/words/reload`。
+  刻意不做跨进程广播：为一个"晚 30 秒生效"换一个 Redis 依赖不划算。
+
+### 误杀控制（每条都被真实场景逼出来）
+
+- 默认 mask；`allow` 白名单豁免；
+- **最短词长** `MODERATION_MIN_WORD_LEN`（默认 2）挡在入库（42202）——1 字词在正常表达里遍地都是；
+- **昵称命中一律降级为 mask**：昵称是账号级属性，用户没法在评论框里改它；
+  因为昵称命中而拒绝发言 = 让用户带着"我什么都没做错"的困惑被永久禁言；
+- **block 提示不回显命中词**：只说"包含不当内容"——回显等于给绕过者一份对照表；
+- **命中日志留原文片段**（`snippet`，命中位置 ±30 字）：脱敏不可逆，误杀复盘与申诉只能靠它；
+- **停用优于删除**：删除后命中日志里那个词会失去对应配置，复盘时读不出它当年是 block 还是 mask。
+
+### 数据结构（迁移 0023）
+
+- `sensitive_words`：`word`(唯一索引) / `action` / `category` / `enabled` / `hit_count` /
+  `created_by` / `created_at` / `updated_at`（`updated_at` 参与指纹）；
+- `sensitive_hits`：记**词本身**而非 `word_id`（删词后日志仍可读）；`field` 区分正文/昵称；
+  `comment_id` 在 block 时为 `NULL`；`snippet` 为原文片段；
+- `comments` 增 `pending_review` + `reviewed_at`。与 `hidden` **正交**：
+  `hidden` = 已处置、不可见；`pending_review` = 未处置、可见（只是被脱敏）。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MODERATION_ENABLED` | `true` | 总开关（关闭后评论完全不检测，走人工治理） |
+| `MODERATION_CHECK_NAME` | `true` | 是否检测昵称（命中只脱敏，绝不阻断） |
+| `MODERATION_CACHE_TTL_SECONDS` | `30` | 词库指纹检查间隔（0 = 每次请求都查库，仅测试用） |
+| `MODERATION_MIN_WORD_LEN` | `2` | 入库最短有效字符数（归一化后计） |
+| `MODERATION_MASK_CHAR` | `*` | 脱敏替换字符 |
+| `MODERATION_DEFAULT_ACTION` | `mask` | 新增词的默认动作 |
+| `MODERATION_MAX_WORDS` | `20000` | 词库上限（超出截断并告警，防误导入拖垮重建） |
+
+### 管理端接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/admin/words` | 词库（keyword/action/enabled 筛选，limit+offset，按 `hit_count` 降序） |
+| POST | `/api/admin/words` | 新增（太短 42202 / 重复 40905），保存即生效 |
+| PATCH | `/api/admin/words/{id}` | 改动作/分组/启用（**不许改词本身**；字段级 diff 审计） |
+| DELETE | `/api/admin/words/{id}` | 删除（审计留快照） |
+| POST | `/api/admin/words/reload` | 强制重建本进程索引 |
+| GET | `/api/admin/moderation/hits` | 命中日志（只读；word/action/field 筛选 + 游标分页） |
+| POST | `/api/admin/comments/{id}/review` | 通过人工复核（幂等，只清 `pending_review`） |
+
+审计动作：`word.create` / `word.update` / `word.delete` / `word.reload` / `comment.review`。
+
 ## 单元测试
 
 ```bash
-pytest -q          # 467 项
+pytest -q          # 505 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -938,6 +1045,15 @@ pytest -q          # 467 项
   「抓取关停时热度照建照跑、抓取一次不执行」、抓取单轮不再顺带重算热度
   （结构性解耦）、每轮异常都不杀循环、`_hot_job` 失败只落 `lastError` 恢复即清零、
   `/api/health.hotRecompute` 四键形状、`hot_status()` 返回副本。
+- `tests/test_moderation.py`（38 项）：**敏感词自动审核**（P1-23）——归一化（5 种绕过变体：
+  空格 / 标点 / 零宽 / 全角空格 / 全角+点号隔断，归一后与原文同形）、block 不落库但**仍留痕**
+  （`commentId` 为 `NULL`）、`hit_count` 累加、mask 脱敏后发布且置 `pending_review`、
+  **脱敏长度按词长**（变形不泄露"绕过去了几个字符"）、多词一次提交、同词两次只记一行、
+  区间重叠取最严动作、**allow 完全包裹才豁免**（部分重叠仍命中）、allow 不写日志、
+  **昵称命中只脱敏不阻断**（昵称不是用户此刻能改的）、昵称开关可关、
+  **新词/停用立即生效**（热更新）、`reload`、CRUD 与审计、**太短 42202 / 重复 40905 /
+  不存在 40406**、非管理员 40301、命中日志筛选、`pending` 筛选与复核（幂等 + 40405）、
+  总开关关闭后不检测、回复同样受检、正常评论零影响。
 - `tests/test_me.py`（18 项）：**收藏 / 浏览历史云端同步**——鉴权（6 个端点）、收藏增删幂等、
   并集合并且不丢数据/不误删、非法 id 跳过、历史去重与置顶、超限裁剪、被动副作用静默、
   **跨用户隔离**、**资讯清理时标记级联清除**。
@@ -952,10 +1068,14 @@ pytest -q          # 467 项
 > 重复下架不抹理由、审计条数）、置顶驼峰与蛇形忽略、游标分页，
 > `/api/admin/comments` 的列表形状与筛选、隐藏→恢复闭环（公开五路实时消失/回来、
 > 计数 -1/+1、点赞 40401 与回复 40003、重复隐藏不抹理由、审计条数、40405、
-> 蛇形 `news_id` 被静默忽略）
-> （共 **152 项**；mock 后端同样支持，见前端 README）。
+> 蛇形 `news_id` 被静默忽略），
+> 以及 `/api/admin/words` 与 `/api/admin/moderation/hits` 的词库 CRUD 与命中日志
+> （太短 42202 / 重复 40905 / 不存在 40406、**停用后立即不再命中**（热更新）、
+> block 提示不回显命中词且仍留痕、mask 脱敏按词长、allow 豁免、**空格/标点/全角/
+> 零宽隔断全部拦住**、命中筛选与游标、复核幂等 + 40405、收尾自销临时词与演示评论）
+> （共 **194 项**；mock 后端同样支持，见前端 README）。
 >
-> ⚠️ 真实后端跑全量契约（152 项 ≈ 150+ 请求）会撞上默认限流
+> ⚠️ 真实后端跑全量契约（194 项 ≈ 190+ 请求）会撞上默认限流
 > （`RATE_LIMIT_PER_MINUTE=120`，表现为后段检查报「请求过于频繁」而非真实结论）。
 > 本地验证时以 `RATE_LIMIT_ENABLED=false` 启动后端即可——限流器本身由
 > `tests/test_units.py` 覆盖，契约脚本不重复校验它。
@@ -966,17 +1086,18 @@ pytest -q          # 467 项
 
 | HTTP | code | 场景 |
 | --- | --- | --- |
-| 400 | 40001 / 40002 / 40003 / 40004 | 手机号格式错误 / 评论内容为空 / 分页游标无效 / RSS 源地址不是 http(s) |
+| 400 | 40001 / 40002 / 40003 / 40004 / 40005 | 手机号格式错误 / 评论内容为空 / 分页游标无效 / RSS 源地址不是 http(s) / **评论包含不当内容**（敏感词 block，**不回显命中词**） |
 | 401 | 40100 | 未登录或 token 失效（含被 `token_version` 吊销） |
 | 401 | 40101 | 手机号或密码错误 |
 | 403 | 40301 | 无权限（非管理员调用 `/api/news/refresh`、`/api/admin/*`；白名单为空时该能力整体关闭） |
 | 403 | 40302 | 只能删除自己发表的评论 |
-| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除） |
+| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 / 40406 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除）/ 敏感词不存在 |
 | 409 | 40901 | 手机号已注册 |
 | 409 | 40902 | RSS 源标识（`key`）已存在 |
 | 409 | 40903 | 该手机号已是管理员（含 env 与库两个来源） |
 | 409 | 40904 | 已是最后一位管理员，不能移除（末位保护） |
-| 422 | 42200 / 42201 | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持 |
+| 409 | 40905 | 该敏感词已存在 |
+| 422 | 42200 / 42201 / 42202 | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持或频道不存在 / **敏感词有效字符不足**（`MODERATION_MIN_WORD_LEN`，空格与标点不计） |
 | 429 | 42900 / 42901 | 触发限流（普通 / 登录） |
 
 > 注：`40901`–`40904` 刻意分开——同一错误码承载多种语义会让前端文案错配。

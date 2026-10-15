@@ -1,5 +1,5 @@
 """管理端路由：RSS 源配置（可运行时增删启停）+ 管理员白名单（P1-14）+ 资讯审核（P1-20）
-+ 评论治理（P1-22）。
++ 评论治理（P1-22）+ 敏感词库与命中日志（P1-23）。
 
 鉴权与 `POST /api/news/refresh` 一致：需登录且具备管理能力——
 `ADMIN_PHONES` 环境变量 **∪** `admin_users` 表白名单（P1-14 起）；
@@ -16,7 +16,11 @@
   （恢复无需等下一轮抓取），聚合按 id 去重也不会重复入库；
 - **评论软隐藏**（P1-22）：与软下架同一处方——理由必填 + 审计留痕 +
   公开四路实时过滤 + 幂等；计数/热度联动让「显示 N 条却看到 N-1 条」
-  的旧 bug（P1-12）不以另一种形式回来。
+  的旧 bug（P1-12）不以另一种形式回来；
+- **敏感词库**（P1-23）：运营自助维护（block 拦截 / mask 脱敏待复核 /
+  allow 白名单豁免），改动**立即失效本进程缓存**（保存即生效，无需重启），
+  并提供 `reload` 供集群下手动同步；命中日志是误杀复盘与申诉的唯一证据，
+  故只读不可改。
 """
 import base64
 import binascii
@@ -28,15 +32,40 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse
 
-from ..config import ADMIN_PHONES, FEED_HEALTH_KEEP_DAYS, FEED_HEALTH_LIST_DAYS
+from ..config import (
+    ADMIN_PHONES,
+    FEED_HEALTH_KEEP_DAYS,
+    FEED_HEALTH_LIST_DAYS,
+    MODERATION_MIN_WORD_LEN,
+)
 from ..database import get_db
 from ..deps import get_current_user
 from ..feeds.health import daily_points, recent_failures, summarize, summarize_many, window_days
 from ..feeds.sources import BUILTIN_SOURCES, CHANNEL_KEYS, ensure_seeded
-from ..models import AdminAuditLog, AdminUser, Comment, News, RssSource, User, now_str
+from ..moderation import engine, normalize
+from ..models import (
+    AdminAuditLog,
+    AdminUser,
+    Comment,
+    News,
+    RssSource,
+    SensitiveHit,
+    SensitiveWord,
+    User,
+    now_str,
+)
 from ..ranking import bump_hot_score
 from ..response import ok
-from ..schemas import AdminIn, CommentHideIn, NewsHideIn, NewsTopIn, SourceIn, SourceUpdateIn
+from ..schemas import (
+    AdminIn,
+    CommentHideIn,
+    NewsHideIn,
+    NewsTopIn,
+    SourceIn,
+    SourceUpdateIn,
+    WordIn,
+    WordUpdateIn,
+)
 # ILIKE 转义只保留一份实现：规则虽短，但漏转义 `%` 等于把通配符交给用户输入
 # （既是错误结果，也是潜在的信息收集面），不允许两边各写一遍后悄悄漂移。
 from .news import _escape_like
@@ -60,6 +89,12 @@ AUDIT_NEWS_UPDATE = "news.update"
 # P1-22：评论治理（软隐藏/恢复）
 AUDIT_COMMENT_HIDE = "comment.hide"
 AUDIT_COMMENT_RESTORE = "comment.restore"
+# P1-23：敏感词库与复核
+AUDIT_WORD_CREATE = "word.create"
+AUDIT_WORD_UPDATE = "word.update"
+AUDIT_WORD_DELETE = "word.delete"
+AUDIT_WORD_RELOAD = "word.reload"
+AUDIT_COMMENT_REVIEW = "comment.review"
 
 # 管理端资讯排序键：published_at 为空按空串处理（倒序时排最后），与公开列表同口径
 _PUB = func.coalesce(News.published_at, "")
@@ -560,6 +595,11 @@ def _comment_out(c: Comment, *, news_title: str = "", reply_count: int = 0) -> d
         "hidden": bool(c.hidden),
         "hiddenAt": c.hidden_at,
         "hiddenReason": c.hidden_reason,
+        # P1-23：待复核 = 命中敏感词被脱敏后发布，还没被人工看过。
+        # 与 hidden 正交（hidden 是已处置且不可见，pending 是未处置且可见），
+        # 运营在列表里要能同时看见两种标记，否则会重复处置或漏处置。
+        "pendingReview": bool(c.pending_review),
+        "reviewedAt": c.reviewed_at,
     }
 
 
@@ -598,7 +638,8 @@ def _reply_counts(db: Session, items: list[Comment]) -> dict[str, int]:
 
 @router.get("/comments", response_model=None)
 def list_comments_admin(
-    status: str = Query("all", pattern="^(all|visible|hidden)$"),
+    # pending（P1-23）：命中敏感词被脱敏、等待人工复核的评论
+    status: str = Query("all", pattern="^(all|visible|hidden|pending)$"),
     keyword: str = Query("", max_length=50),
     newsId: str | None = Query(None, max_length=32),
     limit: int = Query(20, ge=1, le=100),
@@ -609,7 +650,8 @@ def list_comments_admin(
     """管理端评论列表（P1-22）：筛选 + 搜索 + 游标分页。
 
     - `status`：`all`（默认，**含已隐藏**——运营要能核验自己的处置）/
-      `visible` / `hidden`；已软删除的一概不返回（作者侧不可逆行为）；
+      `visible` / `hidden` / `pending`（P1-23 脱敏待复核）；已软删除的一概
+      不返回（作者侧不可逆行为）；
     - `keyword`：评论内容 ILIKE（转义规则与公开搜索同一实现）；
     - `newsId`：按资讯过滤（「这篇文章下有哪些评论被处置过」）；
     - 排序 `created_at DESC, id DESC`：与公开主列表同口径的时间线，
@@ -621,6 +663,8 @@ def list_comments_admin(
         q = q.filter(Comment.hidden.is_(False))
     elif status == "hidden":
         q = q.filter(Comment.hidden.is_(True))
+    elif status == "pending":
+        q = q.filter(Comment.pending_review.is_(True))
     if newsId:
         q = q.filter(Comment.news_id == newsId)
     kw = keyword.strip()
@@ -771,6 +815,274 @@ def restore_comment(
     counts = _reply_counts(db, [c])
     return ok(
         _comment_out(c, news_title=title, reply_count=counts.get(c.id, 0)), message="已恢复"
+    )
+
+
+# ---------------------------------------------------------------- 敏感词库与命中日志（P1-23）
+
+
+def _word_out(w: SensitiveWord) -> dict:
+    return {
+        "id": w.id,
+        "word": w.word,
+        "action": w.action,
+        "category": w.category,
+        "enabled": bool(w.enabled),
+        # 命中次数：高频词要么是热点、要么是误杀大户——两种情况运营都必须
+        # 看见，否则词库会悄悄腐化（一堆没人管的词每天在拦正常发言）
+        "hitCount": w.hit_count or 0,
+        "createdBy": w.created_by,
+        "createdAt": w.created_at,
+        "updatedAt": w.updated_at,
+    }
+
+
+def _hit_out(h: SensitiveHit) -> dict:
+    return {
+        "id": h.id,
+        "word": h.word,
+        "action": h.action,
+        "field": h.field,
+        "commentId": h.comment_id,
+        "newsId": h.news_id,
+        "userId": h.user_id,
+        "userName": h.user_name,
+        # **原文**片段：脱敏不可逆，判断误杀与受理申诉全靠它
+        "snippet": h.snippet,
+        "createdAt": h.created_at,
+    }
+
+
+def _word_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail={"code": 40406, "message": "敏感词不存在"})
+
+
+@router.get("/words", response_model=None)
+def list_words(
+    keyword: str = Query("", max_length=50),
+    action: str = Query("", pattern="^(|block|mask|allow)$"),
+    enabled: bool | None = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """敏感词库列表。
+
+    用 `limit + offset` 而非游标：运营要的是「一遍扫完 + 能跳页核对」，
+    词库量级（百~千）也不支持 keyset 的那点性能收益。
+    """
+    _require_admin(user, db)
+    q = db.query(SensitiveWord)
+    kw = keyword.strip()
+    if kw:
+        like = f"%{_escape_like(kw)}%"
+        q = q.filter(SensitiveWord.word.ilike(like, escape="\\"))
+    if action:
+        q = q.filter(SensitiveWord.action == action)
+    if enabled is not None:
+        q = q.filter(SensitiveWord.enabled.is_(enabled))
+    total = q.count()
+    rows = q.order_by(SensitiveWord.hit_count.desc(), SensitiveWord.id.desc()).limit(limit).offset(offset).all()
+    return ok({"list": [_word_out(w) for w in rows], "total": total})
+
+
+@router.post("/words", response_model=None)
+def create_word(
+    body: WordIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """新增敏感词。
+
+    - 归一化后不足 `MODERATION_MIN_WORD_LEN` 个有效字符 → **42202**：1 字词
+      在正常表达里遍地都是，挡在入库这一步比事后救火便宜。
+      （刻意不复用 42201——它已承载「频道不存在 / 排序方式不支持」两种语义，
+      同一个码挂三种场景会让前端文案错配；）
+    - 重复词 → 40905（唯一约束在库里，但提前判一次才能给出可解释的错误）。
+    """
+    _require_admin(user, db)
+    word = body.word  # schema 已 strip
+    norm, _ = normalize(word)
+    if len(norm) < MODERATION_MIN_WORD_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": 42202,
+                "message": f"敏感词至少需 {MODERATION_MIN_WORD_LEN} 个有效字符（空格与标点不计）",
+            },
+        )
+    if db.query(SensitiveWord).filter(SensitiveWord.word == word).first() is not None:
+        raise HTTPException(status_code=409, detail={"code": 40905, "message": "该敏感词已存在"})
+    ts = now_str()
+    row = SensitiveWord(
+        word=word,
+        action=body.action,
+        category=body.category,
+        enabled=body.enabled,
+        hit_count=0,
+        created_by=user.phone,
+        created_at=ts,
+        updated_at=ts,
+    )
+    db.add(row)
+    record_audit(
+        db,
+        user.phone,
+        AUDIT_WORD_CREATE,
+        word,
+        {"word": word, "action": body.action, "category": body.category, "enabled": body.enabled},
+    )
+    db.commit()
+    db.refresh(row)
+    # 保存即生效：让本进程的词库缓存立刻失效（集群其他实例靠 TTL 兜底）
+    engine.invalidate()
+    logger.info("管理员 %s 新增敏感词 %s（%s）", user.phone, word, body.action)
+    return ok(_word_out(row), message="已添加")
+
+
+@router.patch("/words/{word_id}", response_model=None)
+def update_word(
+    word_id: int,
+    body: WordUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """局部更新敏感词（**不允许改词本身**：改词等于删一条加一条）。"""
+    _require_admin(user, db)
+    row = db.get(SensitiveWord, word_id)
+    if row is None:
+        raise _word_not_found()
+    changes: dict[str, list] = {}
+    if body.action is not None and body.action != row.action:
+        changes["action"] = [row.action, body.action]
+        row.action = body.action
+    if body.category is not None and body.category != row.category:
+        changes["category"] = [row.category, body.category]
+        row.category = body.category
+    if body.enabled is not None and body.enabled != bool(row.enabled):
+        changes["enabled"] = [bool(row.enabled), body.enabled]
+        row.enabled = body.enabled
+    if not changes:
+        return ok(_word_out(row))
+    row.updated_at = now_str()
+    record_audit(db, user.phone, AUDIT_WORD_UPDATE, row.word, {"changes": changes})
+    db.commit()
+    db.refresh(row)
+    engine.invalidate()
+    return ok(_word_out(row), message="已更新")
+
+
+@router.delete("/words/{word_id}", response_model=None)
+def delete_word(
+    word_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """删除敏感词（审计留快照：删错了要能知道原来是什么）。
+
+    停用（`enabled=false`）通常比删除更合适——删除后命中日志里那个词会失去
+    对应配置，复盘时读不出它当年是 block 还是 mask。
+    """
+    _require_admin(user, db)
+    row = db.get(SensitiveWord, word_id)
+    if row is None:
+        raise _word_not_found()
+    snapshot = _word_out(row)
+    record_audit(db, user.phone, AUDIT_WORD_DELETE, row.word, {"snapshot": snapshot})
+    db.delete(row)
+    db.commit()
+    engine.invalidate()
+    return ok(snapshot, message="已删除")
+
+
+@router.post("/words/reload", response_model=None)
+def reload_words(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """强制重建本进程的词库索引。
+
+    改词已经会自动失效本进程缓存，这个端点是给**其他实例**用的：
+    集群下 B 实例要等 TTL 才感知到 A 实例的改动，需要即时生效时点一下它。
+    """
+    _require_admin(user, db)
+    engine.invalidate()
+    engine.ensure(db)
+    count = (
+        db.query(SensitiveWord).filter(SensitiveWord.enabled.is_(True)).count()
+    )
+    record_audit(db, user.phone, AUDIT_WORD_RELOAD, "", {"count": count})
+    db.commit()
+    return ok({"count": count}, message="词库已重载")
+
+
+@router.get("/moderation/hits", response_model=None)
+def list_hits(
+    word: str = Query("", max_length=100),
+    action: str = Query("", pattern="^(|block|mask)$"),
+    field: str = Query("", pattern="^(|content|name)$"),
+    limit: int = Query(20, ge=1, le=100),
+    cursor: int | None = Query(None, description="上一页末条的 id"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """敏感词命中日志（只读）。
+
+    它的价值不在"看出事了"，而在**回答误杀**：哪个人、哪句话、命中哪个词、
+    上下文是什么。脱敏后正文不可复原，这是唯一的证据来源——故只读、不清理。
+    """
+    _require_admin(user, db)
+    q = db.query(SensitiveHit)
+    if word.strip():
+        q = q.filter(SensitiveHit.word == word.strip())
+    if action:
+        q = q.filter(SensitiveHit.action == action)
+    if field:
+        q = q.filter(SensitiveHit.field == field)
+    total = q.count()
+    if cursor is not None:
+        q = q.filter(SensitiveHit.id < cursor)
+    rows = q.order_by(SensitiveHit.id.desc()).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    return ok(
+        {
+            "list": [_hit_out(h) for h in items],
+            "total": total,
+            "hasMore": has_more,
+            "nextCursor": items[-1].id if has_more and items else None,
+        }
+    )
+
+
+@router.post("/comments/{comment_id}/review", response_model=None)
+def review_comment(
+    comment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """通过人工复核（**幂等**）：认定脱敏后的评论可以照常展示。
+
+    复核只清 `pending_review`，不改可见性、不动计数——评论从一开始就可见
+    （只是被脱敏），复核是"人看过了"这个事实，不是"重新放行"。
+    认为仍不合适时应当走**隐藏**（`POST .../hide`），而不是留着待复核标记。
+    """
+    _require_admin(user, db)
+    c = db.get(Comment, comment_id)
+    if c is None or c.is_deleted:
+        raise _comment_not_found()
+    news = db.query(News).filter(News.id == c.news_id).first()
+    title = news.title if news is not None else ""
+    if c.pending_review:
+        c.pending_review = False
+        c.reviewed_at = now_str()
+        record_audit(
+            db,
+            user.phone,
+            AUDIT_COMMENT_REVIEW,
+            comment_id,
+            {"content": c.content[:50], "newsTitle": title, "userName": c.user_name},
+        )
+        db.commit()
+        db.refresh(c)
+        logger.info("管理员 %s 复核通过评论 %s", user.phone, comment_id)
+    counts = _reply_counts(db, [c])
+    return ok(
+        _comment_out(c, news_title=title, reply_count=counts.get(c.id, 0)), message="已通过复核"
     )
 
 

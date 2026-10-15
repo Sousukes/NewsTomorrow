@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     false as sa_false,
+    true as sa_true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -149,6 +150,15 @@ class Comment(Base):
     # 隐藏理由：**必填**（trim 后 ≤300，空则 42200）——「留痕是准入条件」。
     # 恢复时清空（理由只对隐藏状态有意义，留着会让下一次隐藏的审计张冠李戴）。
     hidden_reason = Column(String(300))
+    # 待人工复核（P1-23）：命中敏感词被**脱敏后发布**的评论不是"通过了审核"，
+    # 而是"机器先兜住、人再看一眼"。与 `hidden` 正交：
+    #   hidden  = 已处置、公开不可见；
+    #   pending = 未处置、公开可见（内容已脱敏）。
+    # 与 hidden / is_deleted 同处方——**不建索引**：待复核集预期很小，
+    # 索引只会拖慢每次评论写入。
+    pending_review = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    # 复核时间：复核动作同样留痕（审计 comment.review），故记时间而非只清标记
+    reviewed_at = Column(String(30))
 
     news = relationship("News", back_populates="comments")
 
@@ -406,4 +416,75 @@ class AdminUser(Base):
     phone = Column(String(20), primary_key=True)
     note = Column(String(100), nullable=False, default="")  # 备注（如「运营-张三」）
     added_by = Column(String(20), nullable=False, default="")  # 操作者手机号（审计用）
+    # P1-23 补平：迁移 0015 建表时就带了这一列，但模型里一直没有——
+    # 「迁移超前于模型」会让 `alembic check` 恒红，掩盖真正的漂移。
+    # 索引同样要补：0015 建了 `ix_admin_users_created_at`，模型不带 index=True
+    # 的话 check 会一直要求删掉它。
+    created_at = Column(String(30), nullable=False, default=now_str, index=True)
+
+
+class SensitiveWord(Base):
+    """敏感词库（P1-23）：运营可维护，三种动作而非一刀切。
+
+    为什么落库而不是写进配置文件：改词是**运营动作**且频率不低（新黑话、
+    新引流方式每周都在变），配置文件意味着每改一个词都要发版重启。
+
+    - `block`：直接拒绝提交（高危内容，让它根本没有出现在页面上的机会）；
+    - `mask`：脱敏后照常发布 + 置 `pending_review` 交人工复核。**默认**——
+      机器的判断是概率性的，"先脱敏再让人看"比"直接吞掉用户的话"代价小得多；
+    - `allow`：**白名单豁免**。命中它的区间不再按敏感处理，是降低误杀的主要
+      手段（短词「射」会命中「射击」「射手」，把后者加白即可）。
+    - `enabled=False` 是停用而非删除：删错的词要能一秒恢复。
+    - `hit_count`：累计命中次数。高频词要么是热点、要么是误杀大户——两种情况
+      运营都必须看见，否则词库会悄悄腐化（加了一堆没人管的词，谁也不知道
+      它每天在拦掉正常发言）。
+    - `updated_at` 参与**热更新指纹**（`MAX(updated_at)` + `COUNT(*)`）：
+      进程据此判断要不要重建匹配索引，比整表拉取便宜得多。
+    """
+
+    __tablename__ = "sensitive_words"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 唯一：重复词会让「改哪个」变得不确定，也意味着索引里有两个相同模式。
+    word = Column(String(100), nullable=False, unique=True, index=True)
+    action = Column(String(10), nullable=False, default="mask")
+    category = Column(String(30), nullable=False, default="")  # 分组：广告/辱骂/违禁…
+    enabled = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+    hit_count = Column(Integer, nullable=False, default=0)
+    created_by = Column(String(20), nullable=False, default="")  # 加词的运营（手机号）
+    created_at = Column(String(30), default=now_str)
+    updated_at = Column(String(30), default=now_str, index=True)
+
+
+class SensitiveHit(Base):
+    """敏感词命中日志（P1-23）：脱敏会丢原文，复盘与申诉全靠这一行。
+
+    脱敏后正文里的原文**不可复原**（这是脱敏的目的）。于是"这条是不是误杀"
+    只能靠命中时留的证据回答——没有日志，误杀就是无头案，申诉也无从受理。
+
+    - 记**词本身**而非 `word_id`：词被删掉后，日志仍要读得懂（同期数据不能
+      因为后来的维护动作变成一堆悬空外键）。
+    - `snippet` 存**原文片段**：判断误杀需要上下文（"他说的是不是别的意思"）。
+    - `field` 区分正文 / 昵称：昵称误杀率与正文不是一个量级，统计时必须分开看。
+    - `comment_id` 在 block 场景为 NULL（没写成评论）——拦截也是要留痕的，
+      否则"到底拦了多少人"是个黑箱，也无法识别"反复尝试绕过"的行为。
+    """
+
+    __tablename__ = "sensitive_hits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    word = Column(String(100), nullable=False)
+    action = Column(String(10), nullable=False)  # block | mask（allow 不记）
+    field = Column(String(10), nullable=False, default="content")  # content | name
+    comment_id = Column(String(64), nullable=True)
+    news_id = Column(String(32), nullable=True)
+    user_id = Column(Integer, nullable=True)
+    user_name = Column(String(50), nullable=False, default="")
+    snippet = Column(String(300), nullable=False, default="")
+    created_at = Column(String(30), nullable=False, default=now_str, index=True)
+
+    __table_args__ = (
+        # 「这个词命中过多少次 / 最近命中」按词查且要按时间倒序
+        Index("ix_sensitive_hits_word_id", "word", "id"),
+    )
     created_at = Column(String(30), nullable=False, default=now_str, index=True)

@@ -348,6 +348,13 @@ export interface AdminCommentItem {
   hiddenAt: string | null;
   /** 隐藏理由（必填，≤300 字）；恢复后为 null */
   hiddenReason: string | null;
+  /**
+   * 是否**待人工复核**（P1-23）：命中敏感词被脱敏后发布的评论。
+   * 与 `hidden` 正交——hidden 是「已处置、不可见」，pending 是「未处置、可见」。
+   */
+  pendingReview: boolean;
+  /** 人工复核通过的时间；未复核为 null */
+  reviewedAt: string | null;
 }
 
 /** GET /api/admin/comments 的信封（筛选后的总数 + 游标分页） */
@@ -361,8 +368,8 @@ export interface AdminCommentListResult {
 
 /** 管理端评论列表查询（不传的项后端用默认值） */
 export interface AdminCommentQuery {
-  /** all（默认，含已隐藏）| visible | hidden */
-  status?: 'all' | 'visible' | 'hidden';
+  /** all（默认，含已隐藏）| visible | hidden | pending（脱敏待复核） */
+  status?: 'all' | 'visible' | 'hidden' | 'pending';
   /** 评论内容关键词（服务端 ILIKE） */
   keyword?: string;
   /** 按所属资讯过滤 */
@@ -375,4 +382,98 @@ export interface AdminCommentQuery {
 /** 隐藏入参：理由必填（trim 后 ≤300，空则 422）——与 NewsHideInput 同一处方 */
 export interface CommentHideInput {
   reason: string;
+}
+
+// ---------------------------------------------------------------- 敏感词库（P1-23）
+
+/** 敏感词动作：拦截 / 脱敏待复核 / 白名单豁免 */
+export type WordAction = 'block' | 'mask' | 'allow';
+
+/**
+ * 敏感词行（对应 GET /api/admin/words 的条目）。
+ *
+ * `action` 决定命中后怎么处理——三选一而不是开关：
+ *   - `block`：直接拒绝提交（高危内容，不给它出现在页面上的机会）；
+ *   - `mask`：脱敏后照常发布并置待复核（默认，机器判断是概率性的）；
+ *   - `allow`：**白名单**，命中它的区间豁免（降误杀的主要手段）。
+ */
+export interface SensitiveWordItem {
+  id: number;
+  word: string;
+  action: WordAction;
+  /** 分组（广告 / 辱骂 / 违禁…），可为空串 */
+  category: string;
+  /** 停用而非删除：删错了要能一秒恢复 */
+  enabled: boolean;
+  /** 累计命中次数：高频词要么是热点、要么是误杀大户 */
+  hitCount: number;
+  createdBy: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** GET /api/admin/words 的信封 */
+export interface WordListResult {
+  list: SensitiveWordItem[];
+  total: number;
+}
+
+/** 敏感词列表查询（不传的项后端用默认值） */
+export interface WordQuery {
+  keyword?: string;
+  action?: WordAction | '';
+  enabled?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/** 新增敏感词入参（多词字段走驼峰；词太短 42201、重复 40905） */
+export interface WordInput {
+  word: string;
+  action?: WordAction;
+  category?: string;
+  enabled?: boolean;
+}
+
+/** 局部更新入参（**不允许改词本身**：改词等于删一条加一条） */
+export interface WordUpdateInput {
+  action?: WordAction;
+  category?: string;
+  enabled?: boolean;
+}
+
+/** 命中日志行（只读：脱敏不可逆，它是误杀复盘与申诉的唯一证据） */
+export interface SensitiveHitItem {
+  id: number;
+  word: string;
+  /** block | mask（白名单命中不记日志） */
+  action: 'block' | 'mask';
+  /** 检测字段：正文 / 昵称 */
+  field: 'content' | 'name';
+  /** 拦截时没有评论，故可空 */
+  commentId: string | null;
+  newsId: string | null;
+  userId: number | null;
+  userName: string;
+  /** **原文**片段（带上下文），脱敏后的正文里已经找不回来了 */
+  snippet: string;
+  createdAt: string;
+}
+
+/** GET /api/admin/moderation/hits 的信封（游标分页） */
+export interface HitListResult {
+  list: SensitiveHitItem[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: number | null;
+}
+
+/** 命中日志查询（不传的项后端用默认值） */
+export interface HitQuery {
+  word?: string;
+  action?: 'block' | 'mask' | '';
+  field?: 'content' | 'name' | '';
+  limit?: number;
+  /** 上一页末条的 id（服务端下发，客户端不解析） */
+  cursor?: number | null;
 }

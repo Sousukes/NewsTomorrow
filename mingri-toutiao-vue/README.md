@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **357** 项，覆盖：
+- **单元测试**：Vitest 共 **404** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -40,7 +40,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   - `stores/user` 管理能力标志 `isAdmin`（6）：登录响应带 `isAdmin=true` 时置位、**缺省不授予特权**、
     **落盘后刷新页面运营入口不消失**、登出归位（不把上个账号的特权留给匿名态）、
     **未登录时忽略 prefs 里的 isAdmin**（token 失效不得留下管理入口）、普通账号仍为 false
-  - `api/admin`（66）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
+  - `api/admin`（81）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
     `ensureRealBackend` 守卫、行数据归一化（缺 `key` 的脏行丢弃、`lastError` 空串转 null、
     **`respectRobots` 缺失时按更保守的一方兜底为 `true`、显式 `false` 原样透出**）、
     五个源管理接口的路径/方法/错误透传；
@@ -64,6 +64,14 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     likes/replyCount 垃圾值归零；`hideComment` 的 POST/id 编码/理由请求体/响应透出与
     「响应无法解析」报错、`restoreComment` POST 无请求体、422 向上抛）；
     **mock 模式下三个评论函数一律拒绝**（与源管理同——不伪造可变的治理数据）
+    **敏感词与复核**（P1-23：`fetchWords` 查询串拼接（keyword/action/**布尔 enabled**/
+    limit/offset）、**未知 action 一律降级 `mask`**（宁可先脱敏也不吞掉发言）、
+    字段缺失兜底（hitCount→0、enabled→true）、list 非数组当空列表不抛错；
+    `createWord`/`updateWord`/`deleteWord` 的方法与请求体（`updateWord` **只传要改的字段**）、
+    `reloadWords` 返回生效条数且缺失回落 0、`fetchModerationHits` 的 field/word/cursor
+    查询串与信封解析、**`commentId` 缺失落成 null**（"被拦截、没落库"的唯一信号）、
+    `reviewComment` 的 POST 与 `pendingReview`/`reviewedAt` 兜底、40405 向上抛；
+    **mock 模式下七个敏感词函数一律拒绝**）
   - `views/AdminUsers`（11）：管理员白名单渲染（含 `registered` 已注册/预授权与 `addedBy`）、
     env 计数说明、添加成功清空表单并刷新、**手机号格式前端拦截不发请求**、冲突 409 展示服务端文案、
     移除二次确认、**末位保护 409 保留行并报服务端语义**、加载失败与 403 转无权限态、
@@ -97,7 +105,18 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     恢复回可见态、恢复失败留层）；
     **置顶与更多**（**乐观更新立即换文案** + PATCH 焊死 `{isTop: true}`、失败回滚、
     加载更多带 cursor 追加、无更多不出按钮、**「历史」按钮跳 `/admin/audit?target=<id>`**）
-  - `views/AdminComments`（22）：基础渲染（无权限态「无权限管理评论」/ 《资讯》标签 /
+  - `views/AdminWords`（26）：基础渲染（词/动作 chip/分组/命中次数/添加人、无权限态、
+    403 态、错误横幅、**空词库文案点明"没有词就不会拦截"**、**已停用词整行降透明度 +
+    「已停用」chip 且按钮反过来是「启用」**）；**新增**（空词前端拦截不发请求、
+    成功就地插入 + 清空输入 + toast 说明"立即生效"、后端 42201/40905 错误留在表单下方、
+    动作与分组随表单提交）；**启停与删除**（`updateWord` 只传 `{enabled}`、就地更新行、
+    **删除二次确认**（第一次点击只展开确认、可取消）、删除后行移除且 total 递减、
+    重载索引提示生效条数）；**筛选**（动作 chips 带 action 重请求且再点取消、
+    「仅看已启用」带 enabled=true、搜索回车带 keyword、
+    **清除筛选必须重新拉取**——状态复位 ≠ 数据复位）；**命中日志**（行含命中词/
+    已拦截或已脱敏/正文或昵称/片段/作者/时间、**未落库的显示「未落库」而不是评论 id**、
+    字段筛选带 field 重请求、cursor 追加、无更多不出按钮、顶部说明归一化策略）
+  - `views/AdminComments`（28）：基础渲染（无权限态「无权限管理评论」/ 《资讯》标签 /
     主评论与回复 chip / 正文 / 时间 / 赞与回复数 / 共 N 条 / **已隐藏行整行降透明度 +
     红 chip + 理由 + 隐藏于** + 恢复按钮 / 403 态 / 错误横幅 / 空态）；
     **筛选与搜索**（全部/可见/已隐藏三态 chips 带参重请求 + **已隐藏态标红**（它是处置态，
@@ -107,7 +126,11 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     成功行更新 + toast、失败留层不关、**可见筛选下隐藏后行移除且 total 递减**、
     恢复回可见态、恢复失败横幅）；
     **加载更多与历史**（cursor 追加、无更多不出按钮、
-    **「历史」按钮跳 `/admin/audit?target=<id>`**）
+    **「历史」按钮跳 `/admin/audit?target=<id>`**）；
+    **待复核**（P1-23：**黄 chip「待复核」+「通过复核」按钮**，且不套用已隐藏的降透明度
+    （脱敏评论仍可见）、非待复核行没有复核入口、**「待复核」筛选带 status=pending 重请求
+    且再点取消**、复核成功清标记 + toast、**待复核筛选下复核成功后行移除**（只复位状态
+    不清数据会停在旧结果）、复核失败错误进横幅且行保持待复核）
   - `components/SourceHealthTrend`（17）：四指标渲染（成功率/成功轮均条数/抓取轮次/失败次数）、
     **空窗口不给图**、`rate` 为 null 显示"—"而非 0%、**格子按 `days` 铺满再按日期落点**、
     无数据日留浅底空格（**不伪装失败**）、全失败日柱高强制 6% 不塌成零像素、
@@ -395,7 +418,8 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 | `/admin/users` | `AdminUsers` | **管理员管理**（P1-14）：应用内增删「指定账号」——双源说明（env break-glass + 库白名单）、添加并支持预授权、注册状态标记、移除确认与末位保护提示、**env 管理员为 0 时提示应急通道缺失** |
 | `/admin/audit` | `AdminAudit` | **运营审计**（P1-15）：时间线展示谁改了什么——中文动作标签、对象、操作者、字段级变更（旧→新）、游标分页「加载更多」；带 `?target=` 进入时只看该对象；P1-18 新增**自动禁用源**条目（`system` 显示为「系统自动执行」，并带连续失败次数与最后错误自证原因） |
 | `/admin/news` | `AdminNews` | **资讯审核与下架**（P1-20）：全部/可见/已下架三态 chips + 关键词搜索（服务端筛选）、频道标签、置顶 chip、**已下架行红 chip + 理由 + 下架时间**；**下架弹窗理由必填**（空理由/超 300 字前端拦截，「留痕是准入条件」）、一键恢复、置顶开关（乐观更新 + 失败回滚）、游标「加载更多」、每行「历史」直达审计时间线 |
-| `/admin/comments` | `AdminComments` | **评论治理**（P1-22）：全部/可见/已隐藏三态 chips + 关键词搜索（服务端筛选）、**已隐藏行降透明度 + 红 chip + 理由 + 隐藏于**、隐藏理由必填（前端拦截）、一键恢复、游标「加载更多」、每行「历史」直达审计 |
+| `/admin/comments` | `AdminComments` | **评论治理**（P1-22）：全部/可见/已隐藏/**待复核**四态 chips + 关键词搜索（服务端筛选）、**已隐藏行降透明度 + 红 chip + 理由 + 隐藏于**、隐藏理由必填（前端拦截）、一键恢复、游标「加载更多」、每行「历史」直达审计；P1-23 新增**待复核黄 chip + 「通过复核」**（只清标记，不改可见性） |
+| `/admin/words` | `AdminWords` | **敏感词库**（P1-23）：拦截/脱敏/白名单三类词的新增（动作 + 分组）与启停/删除（二次确认）、**「重载索引」**手动同步其他实例、按动作与启用筛选；下方**命中日志**（正文/昵称筛选、原文片段、未落库标注、游标「加载更多」）——脱敏不可逆，它判断误杀的唯一证据 |
 
 > 底部 `TabBar` 仅对带 `meta.tab` 的路由（首页/视频/消息/我的）显示；详情、评论、图集、登录、搜索类整页不显示。
 
@@ -452,6 +476,16 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   服务端 42200 向上抛）、`restoreComment(id)` → `POST /admin/comments/:id/restore`。
   行数据经 `toAdminComment()` 归一化：缺 `id` 的脏行丢弃、`hidden` 三件套缺失按**可见**兜底、
   `userName` 缺失回落「匿名」、`userId` 缺失回落 `null`、likes/replyCount 垃圾值归零。
+  另含敏感词库与复核七接口（P1-23，同样只有真实后端）：`fetchWords({ keyword, action,
+  enabled, limit, offset })` → `GET /admin/words`（limit+offset，按命中次数降序）、
+  `createWord(input)` → `POST /admin/words`、`updateWord(id, input)` → `PATCH /admin/words/:id`
+  （**只传要改的字段**）、`deleteWord(id)` → `DELETE /admin/words/:id`、
+  `reloadWords()` → `POST /admin/words/reload`（返回生效条数）、
+  `fetchModerationHits({ word, action, field, limit, cursor })` → `GET /admin/moderation/hits`、
+  `reviewComment(id)` → `POST /admin/comments/:id/review`（幂等，只清 `pendingReview`）。
+  行数据经 `toWord()` / `toHit()` 归一化：**未知 `action` 一律降级 `mask`**（数据异常时
+  宁可"先脱敏留给人看"，也不把用户发言直接吞掉——与后端 `MODERATION_DEFAULT_ACTION` 同口径）、
+  命中行的 `commentId` 缺失落成 `null`（"被拦截、没落库"的唯一信号，不编造 id）。
 
 > store 采用**离线优先**：本地先更新并持久化，真实模式下再后台与服务端同步（失败静默，不影响交互）。
 
@@ -485,7 +519,7 @@ npm run dev:api     # 终端 2（把 .env.api 指向 3001 即切换）
 
 ```bash
 node scripts/contract-check.mjs    # 需后端已启动 + DEMO_PASSWORD（47 项，含 18 项二级评论契约）
-# 追加校验管理端接口（当前账号须具备管理能力，共 152 项：源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + 资讯审核 31 + 评论治理 38）
+# 追加校验管理端接口（当前账号须具备管理能力，共 194 项：源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + 资讯审核 31 + 评论治理 38 + 敏感词 42）
 DEMO_PASSWORD=123456 CHECK_ADMIN=1 node scripts/contract-check.mjs
 ```
 
@@ -567,13 +601,13 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **工程基建**：ESLint + Prettier + `npm run verify` + GitHub Actions CI
 - [x] 全局错误边界（`ErrorBoundary` + `app.config.errorHandler`），消除白屏
 - [x] **无限滚动**：`useInfiniteList` + store `loadMore`（去重/并发幂等/末页判定）+ 骨架屏与底部状态
-- [x] **单元测试**：Vitest 357 项（前端）+ pytest 467 项（后端），已接入 CI
+- [x] **单元测试**：Vitest 404 项（前端）+ pytest 505 项（后端），已接入 CI
 - [x] API 层：`api/`（news / comments / auth + http 客户端，token 注入、`{code,data}` 解包），未配后端自动走 mock
 - [x] store 全面接 API（news/comments 离线优先 + 后台同步；user 增 token 与 login/logout）
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放
 - [x] Storybook 工程化（`@storybook/vue3-vite`，7 个组件 stories + 静态构建）
 - [x] **FastAPI + SQLite 后端**（`../server-api/`）：JWT 鉴权、PBKDF2 密码、资讯/评论/认证接口、SQLite 持久化
-- [x] 前后端契约自动化校验（`scripts/contract-check.mjs`，**47 项全通过**，含 `/me` 收藏与历史、排序三模式与非法 `sort` 422、热搜词与搜索即统计、**二级评论 18 项**；`CHECK_ADMIN=1` 另加管理端 **105 项**——源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + **P1-20 资讯审核 31** + **P1-22 评论治理 38**）
+- [x] 前后端契约自动化校验（`scripts/contract-check.mjs`，**47 项全通过**，含 `/me` 收藏与历史、排序三模式与非法 `sort` 422、热搜词与搜索即统计、**二级评论 18 项**；`CHECK_ADMIN=1` 另加管理端 **147 项**——源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + **P1-20 资讯审核 31** + **P1-22 评论治理 38** + **P1-23 敏感词 42**）
 - [x] **数据源迁移到 PostgreSQL 18.6**（JSONB 生效，SQLite 全量数据已迁移并保留回退）
 - [x] **收藏 / 浏览历史云端同步**：`api/me.ts` + `stores/user.ts`（离线优先、登录后**并集合并**、
   写操作乐观更新 + 后台推送、登出清空本地标记防串号）；服务端 `user_favorites` / `user_history`
@@ -617,6 +651,14 @@ npm run build-storybook# 产出静态站 storybook-static/
   管理端 40405 与公开端 40401 刻意分开；计数热度联动（`was_visible` 守卫防重复隐藏
   重复扣减）；幂等（重复隐藏不覆盖原理由、恢复清空理由防张冠李戴）；
   审计新增 `comment.hide`/`comment.restore` 两动作；mock 后端三端点 + 演示评论种子同步支持
+- [x] **评论敏感词自动审核**（P1-23）：落库**之前**的服务端校验（`app/moderation.py`），
+  归一化吃掉大小写 / 全半角 / 空格标点零宽干扰，Aho-Corasick 一次扫描；三种动作——
+  `block` 拒绝提交（提示**不回显命中词**）、`mask` 脱敏后发布并置**待复核**、
+  `allow` 白名单豁免（降误杀）。新增 `/admin/words` 管理页（新增/启停/删除 + 重载索引 +
+  下方命中日志——**原文片段是误杀复盘的唯一证据**，被拦截的标「未落库」）；
+  评论治理页新增「待复核」筛选与「通过复核」（只清标记，不改可见性；仍不合适应走隐藏）。
+  词库改完**立即生效**（本进程缓存失效，其他实例靠 TTL 或手动重载）；
+  mock 后端七端点 + 词库/命中/待复核种子同步支持
 
 ### 待完成 / 依赖后端
 

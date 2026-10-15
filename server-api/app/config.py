@@ -151,3 +151,31 @@ FEED_HEALTH_KEEP_DAYS = max(1, int(_env("FEED_HEALTH_KEEP_DAYS", "30")))
 # 源列表上「近期成功率」的统计窗口（天）。它回答的不是"现在挂没挂"，
 # 而是"这个源最近靠不靠谱"——7 天足以看出退化，又不至于被一次偶发抖动带偏。
 FEED_HEALTH_LIST_DAYS = max(1, int(_env("FEED_HEALTH_LIST_DAYS", "7")))
+
+# ---- 评论内容审核：敏感词（P1-23）----
+# 总开关。关闭后词库仍在、管理端仍可维护，但提交链路不再检测——
+# 出问题（大面积误杀）时的**一键止血**，不需要发版。
+MODERATION_ENABLED = _env("MODERATION_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+# 是否连**昵称**一起检测。昵称是账号级属性但会随评论展示，脏昵称等于
+# 让绕过者换个地方贴。默认开；误杀敏感的场景可关（昵称的语言组合远比正文随机）。
+MODERATION_CHECK_NAME = _env("MODERATION_CHECK_NAME", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# 词库缓存有效期（秒）。到期才回库查一次「指纹」（MAX(updated_at)+COUNT(*)），
+# 指纹没变就继续用内存索引——**检测本身永不查库**，这是性能的关键。
+# 管理端改词会主动失效本进程缓存（保存即生效），TTL 只是集群下其他实例的兜底。
+MODERATION_CACHE_TTL_SECONDS = max(0, int(_env("MODERATION_CACHE_TTL_SECONDS", "30")))
+# 词库最短长度（**按归一化后的字符数计**）。1 字词的误杀率不可接受
+# （单字「射」「毒」「杀」在正常表达里遍地都是），默认挡在入库这一步。
+MODERATION_MIN_WORD_LEN = max(1, int(_env("MODERATION_MIN_WORD_LEN", "2")))
+# 脱敏替换字符
+MODERATION_MASK_CHAR = _env("MODERATION_MASK_CHAR", "*")[:1] or "*"
+# 兜底动作：库中 action 缺失/未知时按此处理。刻意取 mask 而非 block——
+# 数据异常时应当降级为"先脱敏留给人看"，而不是把用户的发言直接吞掉。
+MODERATION_DEFAULT_ACTION = _env("MODERATION_DEFAULT_ACTION", "mask").lower()
+# 词库规模上限（条）。防止误导入百万级词表把内存与构建时间拖垮；
+# 超出部分在加载时截断并告警——宁可少拦几个词，也不能让评论提交变慢。
+MODERATION_MAX_WORDS = max(100, int(_env("MODERATION_MAX_WORDS", "20000")))

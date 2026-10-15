@@ -6,18 +6,25 @@ vi.mock('@/api/config', () => ({ USE_MOCK: false, API_BASE: '/api' }));
 import {
   ADMIN_SOURCES_SUPPORTED,
   createSource,
+  createWord,
   deleteSource,
+  deleteWord,
   fetchAdminComments,
   fetchAdminNews,
+  fetchModerationHits,
   fetchSourceHealth,
   fetchSources,
+  fetchWords,
   hideComment,
   hideNews,
+  reloadWords,
   resetSources,
   restoreComment,
   restoreNews,
+  reviewComment,
   updateNewsTop,
   updateSource,
+  updateWord,
 } from '@/api/admin';
 
 function respond(data: unknown): Response {
@@ -798,6 +805,188 @@ describe('api/admin（评论治理，P1-22）', () => {
   });
 });
 
+// P1-23：敏感词库与命中日志。
+// 这一层要盯的是**兜底方向**：未知 action 一律降级为 mask（"先脱敏留给人看"），
+// 而不是把用户发言直接吞掉；命中日志的 commentId 缺失要落成 null 而不是假 id——
+// 它是「这条被拦下了、没落库」的唯一信号。
+describe('api/admin（敏感词库，P1-23）', () => {
+  const RAW_WORD = {
+    id: 1,
+    word: '博彩',
+    action: 'mask',
+    category: '违规推广',
+    enabled: true,
+    hitCount: 12,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:00:00',
+    updatedAt: '2026-10-15T09:05:00',
+  };
+
+  /** 复核接口的返回体就是评论治理的行形状（只留 toAdminComment 必需的字段） */
+  const RAW_COMMENT_SHAPE = {
+    id: 'c_1',
+    newsId: 'n_1',
+    newsTitle: '某 AI 新品发布',
+    userId: 7,
+    userName: '网友甲',
+    content: '这是一条评论内容',
+    createdAt: '2026-10-15T09:00:00',
+    likes: 3,
+    parentId: null,
+    rootId: null,
+    replyCount: 2,
+    isDeleted: false,
+    hidden: false,
+    hiddenAt: null,
+    hiddenReason: null,
+  };
+
+  const RAW_HIT = {
+    id: 9,
+    word: '博彩',
+    action: 'mask',
+    field: 'content',
+    commentId: 'c_1',
+    newsId: 'n_1',
+    userId: 7,
+    userName: '网友甲',
+    snippet: '这评论区怎么全是博彩广告',
+    createdAt: '2026-10-15T10:50:00',
+  };
+
+  const stub = (data: unknown) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond(data)),
+    );
+  };
+
+  it('fetchWords 不带参数时请求裸路径，并解析信封', async () => {
+    stub({ list: [RAW_WORD], total: 1 });
+    const page = await fetchWords();
+    const [url] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/words');
+    expect(page.total).toBe(1);
+    expect(page.list[0]).toEqual(RAW_WORD);
+  });
+
+  it('fetchWords 的 keyword/action/enabled 都进查询串（enabled 是布尔，不能丢）', async () => {
+    stub({ list: [], total: 0 });
+    await fetchWords({ keyword: '博彩', action: 'block', enabled: true, limit: 50, offset: 20 });
+    const [url] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toContain('keyword=');
+    expect(url).toContain('action=block');
+    expect(url).toContain('enabled=true');
+    expect(url).toContain('limit=50');
+    expect(url).toContain('offset=20');
+  });
+
+  it('未知 action 降级为 mask：宁可先脱敏，也不吞掉发言', async () => {
+    stub({ list: [{ ...RAW_WORD, action: 'ban' }], total: 1 });
+    const [w] = (await fetchWords()).list;
+    expect(w.action).toBe('mask');
+  });
+
+  it('字段缺失按兜底处理：hitCount 为 0、enabled 为 true', async () => {
+    stub({ list: [{ id: 2, word: '加微信' }], total: 1 });
+    const [w] = (await fetchWords()).list;
+    expect(w.hitCount).toBe(0);
+    expect(w.enabled).toBe(true);
+    expect(w.word).toBe('加微信');
+  });
+
+  it('list 不是数组时当空列表，不抛错', async () => {
+    stub({ total: 0 });
+    expect((await fetchWords()).list).toEqual([]);
+  });
+
+  it('createWord 走 POST 并带上 word/action/category/enabled', async () => {
+    stub(RAW_WORD);
+    const w = await createWord({ word: '博彩', action: 'mask', category: '违规推广' });
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/words');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({
+      word: '博彩',
+      action: 'mask',
+      category: '违规推广',
+    });
+    expect(w.word).toBe('博彩');
+  });
+
+  it('updateWord 走 PATCH 且只传要改的字段（enabled 之类）', async () => {
+    stub({ ...RAW_WORD, enabled: false });
+    const w = await updateWord(1, { enabled: false });
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/words/1');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({ enabled: false });
+    expect(w.enabled).toBe(false);
+  });
+
+  it('deleteWord 走 DELETE，不要求解析响应', async () => {
+    stub({ id: 1 });
+    await deleteWord(1);
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/words/1');
+    expect(init.method).toBe('DELETE');
+  });
+
+  it('reloadWords 返回生效条数，后端没给就当 0', async () => {
+    stub({ count: 4 });
+    expect(await reloadWords()).toBe(4);
+    stub({});
+    expect(await reloadWords()).toBe(0);
+  });
+
+  it('fetchModerationHits 解析信封并按字段筛选', async () => {
+    stub({ list: [RAW_HIT], total: 1, hasMore: true, nextCursor: 8 });
+    const page = await fetchModerationHits({ field: 'name', word: '博彩', cursor: 12 });
+    const [url] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toContain('field=name');
+    expect(url).toContain('word=');
+    expect(url).toContain('cursor=12');
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).toBe(8);
+    expect(page.list[0]).toEqual(RAW_HIT);
+  });
+
+  it('命中日志 commentId 缺失 → null（"被拦截、没落库"的唯一信号）', async () => {
+    stub({ list: [{ ...RAW_HIT, commentId: null }], total: 1, hasMore: false });
+    const [h] = (await fetchModerationHits()).list;
+    expect(h.commentId).toBeNull();
+  });
+
+  it('reviewComment 走 POST，并解析 pendingReview/reviewedAt 兜底', async () => {
+    stub({
+      ...RAW_COMMENT_SHAPE,
+      pendingReview: false,
+      reviewedAt: '2026-10-15T12:00:00',
+    });
+    const c = await reviewComment('c_1');
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/comments/c_1/review');
+    expect(init.method).toBe('POST');
+    expect(c.pendingReview).toBe(false);
+    expect(c.reviewedAt).toBe('2026-10-15T12:00:00');
+  });
+
+  it('reviewComment 响应缺 pendingReview 时按 false 兜底（复核过就是没有待办）', async () => {
+    stub(RAW_COMMENT_SHAPE);
+    const c = await reviewComment('c_1');
+    expect(c.pendingReview).toBe(false);
+    expect(c.reviewedAt).toBeNull();
+  });
+
+  it('后端 40405（评论已删除）向上抛错，供页面原地展示', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fail(404, '评论不存在或已删除')),
+    );
+    await expect(reviewComment('c_1')).rejects.toThrow('评论不存在或已删除');
+  });
+});
+
 describe('api/admin（mock 模式）', () => {
   it('USE_MOCK=true 时明确拒绝，而不是伪造一份可增删的假列表', async () => {
     vi.resetModules();
@@ -828,6 +1017,21 @@ describe('api/admin（mock 模式）', () => {
     await expect(mod.fetchAdminComments()).rejects.toThrow('mock 模式');
     await expect(mod.hideComment('c_1', { reason: 'x' })).rejects.toThrow('mock 模式');
     await expect(mod.restoreComment('c_1')).rejects.toThrow('mock 模式');
+    vi.doUnmock('@/api/config');
+    vi.resetModules();
+  });
+
+  it('USE_MOCK=true 时敏感词与复核接口同样明确拒绝', async () => {
+    vi.resetModules();
+    vi.doMock('@/api/config', () => ({ USE_MOCK: true, API_BASE: '' }));
+    const mod = await import('@/api/admin');
+    await expect(mod.fetchWords()).rejects.toThrow('mock 模式');
+    await expect(mod.createWord({ word: '博彩' })).rejects.toThrow('mock 模式');
+    await expect(mod.updateWord(1, { enabled: false })).rejects.toThrow('mock 模式');
+    await expect(mod.deleteWord(1)).rejects.toThrow('mock 模式');
+    await expect(mod.reloadWords()).rejects.toThrow('mock 模式');
+    await expect(mod.fetchModerationHits()).rejects.toThrow('mock 模式');
+    await expect(mod.reviewComment('c_1')).rejects.toThrow('mock 模式');
     vi.doUnmock('@/api/config');
     vi.resetModules();
   });

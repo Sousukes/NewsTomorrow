@@ -6,6 +6,7 @@ vi.mock('@/api/admin', () => ({
   fetchAdminComments: vi.fn(async () => ({ list: [], total: 0, hasMore: false, nextCursor: null })),
   hideComment: vi.fn(async () => ({})),
   restoreComment: vi.fn(async () => ({})),
+  reviewComment: vi.fn(async () => ({})),
 }));
 
 const userState = { isLoggedIn: true, isAdmin: true };
@@ -39,6 +40,9 @@ const comment = (over: Partial<AdminCommentItem> = {}): AdminCommentItem => ({
   hidden: false,
   hiddenAt: null,
   hiddenReason: null,
+  // P1-23：默认"没有待复核"，需要该状态的用例自行覆盖
+  pendingReview: false,
+  reviewedAt: null,
   ...over,
 });
 
@@ -89,6 +93,7 @@ beforeEach(() => {
     comment({ hidden: true, hiddenAt: '2026-10-15T11:00:00', hiddenReason: '含广告信息' }),
   );
   vi.mocked(adminApi.restoreComment).mockResolvedValue(comment({ hidden: false }));
+  vi.mocked(adminApi.reviewComment).mockResolvedValue(comment({ pendingReview: false }));
 });
 
 describe('views/AdminComments', () => {
@@ -407,6 +412,115 @@ describe('views/AdminComments 隐藏与恢复', () => {
 
     expect(w.text()).toContain('恢复失败');
     expect(w.find('.admin__chip--hidden').exists()).toBe(true);
+  });
+});
+
+/* ------------------------------ 待复核（P1-23） ------------------------------ */
+
+describe('views/AdminComments 待复核', () => {
+  it('待复核行显示黄色标记与「通过复核」按钮，且不打断可见性', async () => {
+    mockList([comment({ pendingReview: true })]);
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.find('.admin__chip--pending').text()).toBe('待复核');
+    expect(btn(w, '通过复核').exists()).toBe(true);
+    // 脱敏评论仍是可见评论：不能套用"已隐藏"的降透明度样式
+    expect(w.findAll('.admin__item')[0].classes()).not.toContain('is-hidden');
+    // 仍可隐藏：认定不合适要走隐藏，不是把待复核标记留着不管
+    expect(btn(w, '隐藏').exists()).toBe(true);
+  });
+
+  it('非待复核行没有复核入口（标记是状态，不是常驻操作）', async () => {
+    mockList([comment()]);
+    const w = mountPage();
+    await settle(w);
+    // btn() 用全等查找且带非空断言，断言"不存在"必须走 some 而非 !.exists()
+    expect(w.findAll('button').some((b) => b.text() === '通过复核')).toBe(false);
+    expect(w.find('.admin__chip--pending').exists()).toBe(false);
+  });
+
+  it('「待复核」筛选带 status=pending 重新请求，再点一次取消', async () => {
+    mockList([comment({ pendingReview: true })]);
+    const w = mountPage();
+    await settle(w);
+
+    await btn(w, '待复核').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(adminApi.fetchAdminComments).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: 'pending' }),
+    );
+
+    await btn(w, '待复核').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(adminApi.fetchAdminComments).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: 'all' }),
+    );
+  });
+
+  it('复核成功后标记消失并 toast', async () => {
+    mockList([comment({ pendingReview: true })]);
+    vi.mocked(adminApi.reviewComment).mockResolvedValue(
+      comment({ pendingReview: false, reviewedAt: '2026-10-15T12:00:00' }),
+    );
+    const w = mountPage();
+    await settle(w);
+
+    await btn(w, '通过复核').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+
+    expect(adminApi.reviewComment).toHaveBeenCalledWith('c_1');
+    expect(w.text()).toContain('已通过复核');
+    expect(w.find('.admin__chip--pending').exists()).toBe(false);
+  });
+
+  it('在「待复核」筛选中复核成功后行从列表移除（不清数据会停在旧结果）', async () => {
+    mockList(
+      [
+        comment({ pendingReview: true }),
+        comment({ id: 'c_2', userName: '网友乙', content: '第二条评论', pendingReview: true }),
+      ],
+      2,
+    );
+    vi.mocked(adminApi.reviewComment).mockResolvedValue(
+      comment({ pendingReview: false, reviewedAt: '2026-10-15T12:00:00' }),
+    );
+    const w = mountPage();
+    await settle(w);
+
+    await btn(w, '待复核').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+    expect(w.findAll('.admin__item')).toHaveLength(2);
+
+    const row = w.findAll('.admin__item').find((i) => i.text().includes('这是一条评论内容'))!;
+    await row
+      .findAll('button')
+      .find((b) => b.text() === '通过复核')!
+      .trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+
+    expect(w.findAll('.admin__item')).toHaveLength(1);
+    expect(w.findAll('.admin__item .admin__name').map((n) => n.text())).toEqual(['网友乙']);
+    expect(w.text()).toContain('共 1 条');
+  });
+
+  it('复核失败时错误进横幅，行保持待复核', async () => {
+    mockList([comment({ pendingReview: true })]);
+    vi.mocked(adminApi.reviewComment).mockRejectedValue(new Error('评论不存在或已删除'));
+    const w = mountPage();
+    await settle(w);
+
+    await btn(w, '通过复核').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+
+    expect(w.text()).toContain('评论不存在或已删除');
+    expect(w.find('.admin__chip--pending').exists()).toBe(true);
   });
 });
 

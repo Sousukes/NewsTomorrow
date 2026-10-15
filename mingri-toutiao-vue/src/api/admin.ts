@@ -1,6 +1,7 @@
 /**
  * 管理端接口：RSS 源配置（后端 P1-9，界面 P1-10）+ 管理员白名单（P1-14）
- * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）+ 评论治理（P1-22）。
+ * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）+ 评论治理（P1-22）
+ * + 敏感词库与命中日志（P1-23）。
  *
  * 与 `api/me.ts` 的关键差别：**没有 mock 短路**。源配置与白名单只存在于
  * 后端数据库中，mock 模式下并无真实对象可操作——伪造一份"能增能删"的假列表
@@ -24,9 +25,13 @@ import type {
   AdminUserItem,
   AdminUserList,
   CommentHideInput,
+  HitListResult,
+  HitQuery,
   NewsHideInput,
   NewsTopInput,
   RssSourceItem,
+  SensitiveHitItem,
+  SensitiveWordItem,
   SourceCreateInput,
   SourceHealth,
   SourceHealthBrief,
@@ -35,6 +40,11 @@ import type {
   SourceHealthSummary,
   SourceInput,
   SourceListResult,
+  WordAction,
+  WordInput,
+  WordListResult,
+  WordQuery,
+  WordUpdateInput,
 } from '@/types';
 
 /** 当前构建是否具备源管理能力（mock 模式未连接后端，恒为 false） */
@@ -453,6 +463,9 @@ function toAdminComment(raw: unknown): AdminCommentItem | null {
     hidden: r.hidden === true,
     hiddenAt: typeof r.hiddenAt === 'string' && r.hiddenAt ? r.hiddenAt : null,
     hiddenReason: typeof r.hiddenReason === 'string' && r.hiddenReason ? r.hiddenReason : null,
+    // P1-23：待复核（命中敏感词被脱敏、等人工看一眼）。缺省 false（后端默认）
+    pendingReview: r.pendingReview === true,
+    reviewedAt: typeof r.reviewedAt === 'string' && r.reviewedAt ? r.reviewedAt : null,
   };
 }
 
@@ -509,4 +522,151 @@ export async function restoreComment(id: string): Promise<AdminCommentItem> {
   const item = toAdminComment(data);
   if (!item) throw new Error('恢复成功但响应无法解析');
   return item;
+}
+
+/** POST /admin/comments/:id/review —— 通过人工复核（幂等；只清待复核标记） */
+export async function reviewComment(id: string): Promise<AdminCommentItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/comments/${encodeURIComponent(id)}/review`, {
+    method: 'POST',
+  });
+  const item = toAdminComment(data);
+  if (!item) throw new Error('复核成功但响应无法解析');
+  return item;
+}
+
+// ---------------------------------------------------------------- 敏感词库（P1-23）
+
+const WORD_ACTIONS: WordAction[] = ['block', 'mask', 'allow'];
+
+function toWordAction(raw: unknown): WordAction {
+  // 未知动作一律按 mask 兜底：数据异常时降级为"先脱敏留给人看"，
+  // 而不是把用户的发言直接吞掉（与后端 MODERATION_DEFAULT_ACTION 同口径）
+  return WORD_ACTIONS.includes(raw as WordAction) ? (raw as WordAction) : 'mask';
+}
+
+function toWord(raw: unknown): SensitiveWordItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = Number(r.id);
+  const word = typeof r.word === 'string' ? r.word : '';
+  // 没有 id（更新/删除的锚点）或词本身的行无法操作，丢弃而不是渲染成空壳
+  if (!Number.isFinite(id) || !word) return null;
+  return {
+    id,
+    word,
+    action: toWordAction(r.action),
+    category: typeof r.category === 'string' ? r.category : '',
+    enabled: r.enabled !== false,
+    hitCount: Number.isFinite(Number(r.hitCount)) ? Number(r.hitCount) : 0,
+    createdBy: typeof r.createdBy === 'string' ? r.createdBy : '',
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : null,
+    updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : null,
+  };
+}
+
+function toHit(raw: unknown): SensitiveHitItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = Number(r.id);
+  const word = typeof r.word === 'string' ? r.word : '';
+  if (!Number.isFinite(id) || !word) return null;
+  return {
+    id,
+    word,
+    action: r.action === 'block' ? 'block' : 'mask',
+    field: r.field === 'name' ? 'name' : 'content',
+    commentId: typeof r.commentId === 'string' ? r.commentId : null,
+    newsId: typeof r.newsId === 'string' ? r.newsId : null,
+    userId: typeof r.userId === 'number' ? r.userId : null,
+    userName: typeof r.userName === 'string' ? r.userName : '',
+    // 原文片段是命中日志的唯一价值：脱敏后的正文里已经找不回来
+    snippet: typeof r.snippet === 'string' ? r.snippet : '',
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
+  };
+}
+
+/**
+ * GET /admin/words —— 敏感词库列表（P1-23）。
+ *
+ * 按命中次数降序：运营最先该看见的是"高频词"——它要么是热点，要么是误杀大户。
+ */
+export async function fetchWords(options: WordQuery = {}): Promise<WordListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.keyword?.trim()) params.set('keyword', options.keyword.trim());
+  if (options.action) params.set('action', options.action);
+  if (options.enabled !== undefined) params.set('enabled', String(options.enabled));
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.offset) params.set('offset', String(options.offset));
+  const qs = params.toString();
+  const data = await request<{ list?: unknown; total?: number }>(
+    `/admin/words${qs ? `?${qs}` : ''}`,
+  );
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toWord).filter((w): w is SensitiveWordItem => w !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+  };
+}
+
+/** POST /admin/words —— 新增敏感词（太短 42201，重复 40905） */
+export async function createWord(input: WordInput): Promise<SensitiveWordItem> {
+  ensureRealBackend();
+  const data = await request<unknown>('/admin/words', { method: 'POST', body: input });
+  const word = toWord(data);
+  if (!word) throw new Error('新增成功但响应无法解析');
+  return word;
+}
+
+/** PATCH /admin/words/:id —— 局部更新（动作 / 分组 / 启用；不传即不改） */
+export async function updateWord(id: number, input: WordUpdateInput): Promise<SensitiveWordItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/words/${id}`, { method: 'PATCH', body: input });
+  const word = toWord(data);
+  if (!word) throw new Error('更新成功但响应无法解析');
+  return word;
+}
+
+/** DELETE /admin/words/:id —— 删除敏感词（停用通常比删除更合适） */
+export async function deleteWord(id: number): Promise<void> {
+  ensureRealBackend();
+  await request<unknown>(`/admin/words/${id}`, { method: 'DELETE' });
+}
+
+/** POST /admin/words/reload —— 强制重建本进程词库索引（集群下手动同步） */
+export async function reloadWords(): Promise<number> {
+  ensureRealBackend();
+  const data = await request<{ count?: number }>('/admin/words/reload', { method: 'POST' });
+  return typeof data?.count === 'number' ? data.count : 0;
+}
+
+/**
+ * GET /admin/moderation/hits —— 敏感词命中日志（P1-23，只读）。
+ *
+ * 它的用途不是"看出事了"，而是**回答误杀**：谁、哪句话、命中哪个词、上下文
+ * 是什么。游标为自增 id，客户端原样回传。
+ */
+export async function fetchModerationHits(options: HitQuery = {}): Promise<HitListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.word?.trim()) params.set('word', options.word.trim());
+  if (options.action) params.set('action', options.action);
+  if (options.field) params.set('field', options.field);
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', String(options.cursor));
+  const qs = params.toString();
+  const data = await request<{
+    list?: unknown;
+    total?: number;
+    hasMore?: boolean;
+    nextCursor?: number | null;
+  }>(`/admin/moderation/hits${qs ? `?${qs}` : ''}`);
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toHit).filter((h): h is SensitiveHitItem => h !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+    hasMore: data?.hasMore === true,
+    nextCursor: typeof data?.nextCursor === 'number' ? data.nextCursor : null,
+  };
 }

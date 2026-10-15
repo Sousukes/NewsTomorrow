@@ -46,6 +46,12 @@ const menu = computed(() => {
       to: '/admin/comments',
     });
     items.push({
+      key: 'admin-words',
+      label: '敏感词库',
+      desc: '维护敏感词、查看命中日志',
+      to: '/admin/words',
+    });
+    items.push({
       key: 'admin-users',
       label: '管理员管理',
       desc: '指定可访问后台的账号',

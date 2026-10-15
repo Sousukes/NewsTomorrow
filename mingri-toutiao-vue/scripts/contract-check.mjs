@@ -1196,6 +1196,429 @@ const run = async () => {
     check('删除后治理视图不再返回（40405）', goneAfterDelete);
   }
 
+  // 16) 敏感词自动审核（P1-23）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //     核心口径：服务端唯一写入口检测；三种动作（block 拒绝 / mask 脱敏+待复核 /
+  //     allow 豁免）；归一化吃掉大小写·全半角·空格标点零宽干扰；改词**立即生效**；
+  //     命中留痕（含被拦截未落库的）。收尾删掉临时词与演示评论，不污染开发库。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const DEMO_NEWS = 'n4'; // 与 6/15 同一篇演示资讯
+    // 四个临时词刻意**互不为子串**：否则「短词」会顺带命中别的用例的文本，
+    // 让"停用后应当放行"这类断言莫名其妙变红（看起来像回归，其实是种子设计问题）
+    const W_BLOCK = '契约拦截词';
+    const W_MASK = '契约脱敏词';
+    const W_SUB = '契约检查'; // 短词：会误杀「契约检查子词」
+    const W_ALLOW = '契约检查子词'; // 白名单：把上面那条豁免掉
+
+    // 16.1 词库列表形状与筛选
+    const allWords = await request('/admin/words?limit=500', { token });
+    check(
+      'GET /admin/words 返回 {list,total}',
+      Array.isArray(allWords.list) && typeof allWords.total === 'number',
+      `${allWords.total} 条`,
+    );
+    check(
+      '词行含 word/action/category/enabled/hitCount 与时间戳',
+      (allWords.list ?? []).every(
+        (w) =>
+          typeof w.word === 'string' &&
+          ['block', 'mask', 'allow'].includes(w.action) &&
+          typeof w.enabled === 'boolean' &&
+          typeof w.hitCount === 'number' &&
+          typeof w.updatedAt === 'string',
+      ),
+    );
+
+    let badWordAction = false;
+    try {
+      await request('/admin/words?action=bogus', { token });
+    } catch {
+      badWordAction = true;
+    }
+    check('非法 action 筛选被拒（422）', badWordAction);
+
+    // 16.2 新增：太短 42202 / 重复 40905 / 正常新增
+    const beforeAdd = allWords.total ?? 0;
+    const wBlock = await request('/admin/words', {
+      method: 'POST',
+      token,
+      body: { word: W_BLOCK, action: 'block', category: '契约检查' },
+    });
+    check(
+      'POST /admin/words 新增成功（block）',
+      wBlock.word === W_BLOCK && wBlock.action === 'block',
+    );
+    check(
+      '新增后总数 +1',
+      (await request('/admin/words?limit=500', { token })).total === beforeAdd + 1,
+    );
+
+    let dupWord = false;
+    try {
+      await request('/admin/words', {
+        method: 'POST',
+        token,
+        body: { word: W_BLOCK, action: 'mask' },
+      });
+    } catch {
+      dupWord = true;
+    }
+    check('重复词被拒（40905）', dupWord);
+
+    let shortWord = '';
+    try {
+      // 归一化后只剩 1 个有效字符：空格与标点不计入长度（1 字词在正常表达里
+      // 遍地都是，挡在入库这一步比事后救火便宜）
+      await request('/admin/words', { method: 'POST', token, body: { word: '契!' } });
+    } catch (e) {
+      shortWord = e.message;
+    }
+    check(
+      '归一化后不足 2 字被拒（42202）且文案说明"空格与标点不计"',
+      shortWord.includes('有效字符'),
+      shortWord,
+    );
+
+    const wMask = await request('/admin/words', {
+      method: 'POST',
+      token,
+      body: { word: W_MASK, action: 'mask', category: '契约检查' },
+    });
+    const wSub = await request('/admin/words', {
+      method: 'POST',
+      token,
+      body: { word: W_SUB, action: 'mask', category: '契约检查' },
+    });
+    const wAllow = await request('/admin/words', {
+      method: 'POST',
+      token,
+      body: { word: W_ALLOW, action: 'allow', category: '契约检查' },
+    });
+    check('mask / allow 词均可入库', wMask.action === 'mask' && wAllow.action === 'allow');
+
+    // 16.3 命中日志基线：只数**本次运行新增**（持久库跨运行累积，绝对计数必挂）
+    const hitSnap = await request('/admin/moderation/hits?limit=1', { token });
+    const baseHitId = (hitSnap.list ?? [])[0]?.id ?? 0;
+
+    // 16.4 block：命中即拒绝提交，且**不留评论**
+    let blocked = false;
+    let blockMsg = '';
+    try {
+      await request(`/news/${DEMO_NEWS}/comments`, {
+        method: 'POST',
+        token,
+        body: { content: `这是一条${W_BLOCK}测试` },
+      });
+    } catch (e) {
+      blocked = true;
+      blockMsg = e.message;
+    }
+    check('block 词命中 → 提交被拒', blocked, blockMsg);
+    check(
+      'block 提示不回显命中词（回显=给绕过者对照表）',
+      blocked && !blockMsg.includes(W_BLOCK),
+      blockMsg,
+    );
+
+    // 绕过：空格 / 标点 / 全角隔断——归一化后与原文同形，必须照样拦住
+    const variants = [
+      `这是一条${W_BLOCK.slice(0, 2)} ${W_BLOCK.slice(2)}测试`, // 插空格
+      `这是一条${W_BLOCK.slice(0, 2)}-${W_BLOCK.slice(2)}测试`, // 插标点
+      `这是一条${W_BLOCK.slice(0, 2)}\u3000${W_BLOCK.slice(2)}测试`, // 全角空格
+      `这是一条${W_BLOCK.slice(0, 2)}\u200B${W_BLOCK.slice(2)}测试`, // 零宽字符
+    ];
+    let bypassBlocked = 0;
+    for (const v of variants) {
+      try {
+        await request(`/news/${DEMO_NEWS}/comments`, {
+          method: 'POST',
+          token,
+          body: { content: v },
+        });
+      } catch {
+        bypassBlocked += 1;
+      }
+    }
+    check(
+      `空格/标点/全角/零宽隔断均被拦截（归一化生效）`,
+      bypassBlocked === variants.length,
+      `${bypassBlocked}/${variants.length}`,
+    );
+
+    const hitsAfterBlock = await request(
+      `/admin/moderation/hits?word=${encodeURIComponent(W_BLOCK)}&limit=100`,
+      { token },
+    );
+    check(
+      '被拦截也留痕（拦截不能是黑箱）',
+      (hitsAfterBlock.list ?? []).filter((h) => h.id > baseHitId).length >= 5,
+      `${(hitsAfterBlock.list ?? []).filter((h) => h.id > baseHitId).length} 条`,
+    );
+    check(
+      '拦截的命中行 action=block 且 commentId 为 null（未落库）',
+      (hitsAfterBlock.list ?? [])
+        .filter((h) => h.id > baseHitId)
+        .every((h) => h.action === 'block' && h.commentId === null),
+    );
+
+    // 16.5 mask：脱敏后发布 + 置为待复核
+    const maskedComment = await request(`/news/${DEMO_NEWS}/comments`, {
+      method: 'POST',
+      token,
+      body: { content: `这是一条${W_MASK}测试` },
+    });
+    const star = '*'.repeat(W_MASK.length);
+    check(
+      'mask 命中 → 正文被脱敏（按**词长**替换，不是区间长度）',
+      maskedComment.content === `这是一条${star}测试`,
+      maskedComment.content,
+    );
+    check('mask 命中 → pendingReview=true', maskedComment.pendingReview === true);
+    check(
+      'mask 命中 → 评论照常可见（脱敏不是下架）',
+      (await request(`/news/${DEMO_NEWS}/comments`, { token })).list.some(
+        (c) => c.id === maskedComment.id,
+      ),
+    );
+
+    const hitsAfterMask = await request(
+      `/admin/moderation/hits?word=${encodeURIComponent(W_MASK)}&limit=100`,
+      { token },
+    );
+    const maskHit = (hitsAfterMask.list ?? []).find((h) => h.id > baseHitId);
+    check(
+      'mask 命中留痕：field=content、commentId 指向该评论、snippet 是原文',
+      !!maskHit &&
+        maskHit.field === 'content' &&
+        maskHit.commentId === maskedComment.id &&
+        maskHit.snippet.includes(W_MASK),
+      maskHit?.snippet,
+    );
+    check(
+      '脱敏后原文只留在命中日志里（snippet 是唯一证据）',
+      !!maskHit && !maskedComment.content.includes(W_MASK),
+    );
+
+    // 16.6 allow 白名单：短词的误杀靠它豁免
+    const allowedComment = await request(`/news/${DEMO_NEWS}/comments`, {
+      method: 'POST',
+      token,
+      body: { content: `这是${W_ALLOW}测试` },
+    });
+    check(
+      'allow 白名单豁免被包裹的短词命中',
+      allowedComment.content === `这是${W_ALLOW}测试` && allowedComment.pendingReview === false,
+      allowedComment.content,
+    );
+    const allowHits = await request(
+      `/admin/moderation/hits?word=${encodeURIComponent(W_SUB)}&limit=100`,
+      { token },
+    );
+    check(
+      '被豁免的命中不写日志（白名单不是"命中了但放行"）',
+      (allowHits.list ?? []).filter((h) => h.id > baseHitId).length === 0,
+    );
+    // 短词单独出现仍要命中（白名单只豁免指定片段）
+    const subComment = await request(`/news/${DEMO_NEWS}/comments`, {
+      method: 'POST',
+      token,
+      body: { content: `这是${W_SUB}之外的说法` },
+    });
+    check(
+      '短词单独出现仍命中（白名单只豁免指定片段）',
+      subComment.pendingReview === true,
+      subComment.content,
+    );
+
+    // 16.7 热更新：停用后**立即**不再命中（改词即失效本进程缓存）
+    await request(`/admin/words/${wBlock.id}`, {
+      method: 'PATCH',
+      token,
+      body: { enabled: false },
+    });
+    const afterDisable = await request(`/news/${DEMO_NEWS}/comments`, {
+      method: 'POST',
+      token,
+      body: { content: `停用后这条${W_BLOCK}应当放行` },
+    });
+    check(
+      '停用词立即生效（热更新，无需重启）',
+      afterDisable.content === `停用后这条${W_BLOCK}应当放行`,
+      afterDisable.content,
+    );
+    // 词库刻意不提供单条详情（列表 + 增删改已够用，省一个端点就少一处漂移）
+    const disabledRow = (await request('/admin/words?limit=500', { token })).list.find(
+      (w) => w.id === wBlock.id,
+    );
+    check(
+      '停用后列表里该词 enabled=false',
+      disabledRow?.enabled === false,
+      String(disabledRow?.enabled),
+    );
+
+    // 重新启用后再次命中：证明上面那条不是"碰巧没匹配"
+    await request(`/admin/words/${wBlock.id}`, { method: 'PATCH', token, body: { enabled: true } });
+    let reBlocked = false;
+    try {
+      await request(`/news/${DEMO_NEWS}/comments`, {
+        method: 'POST',
+        token,
+        body: { content: `重新启用后${W_BLOCK}` },
+      });
+    } catch {
+      reBlocked = true;
+    }
+    check('重新启用后再次命中（启停双向生效）', reBlocked);
+
+    const reloaded = await request('/admin/words/reload', { method: 'POST', token });
+    check(
+      'POST /admin/words/reload 返回生效条数',
+      typeof reloaded.count === 'number' && reloaded.count > 0,
+      String(reloaded.count),
+    );
+
+    // 16.8 命中日志：形状、筛选、游标分页（只读）
+    const hitPage = await request('/admin/moderation/hits?limit=20', { token });
+    check(
+      'GET /admin/moderation/hits 返回 {list,total,hasMore,nextCursor}',
+      Array.isArray(hitPage.list) &&
+        typeof hitPage.total === 'number' &&
+        typeof hitPage.hasMore === 'boolean' &&
+        'nextCursor' in hitPage,
+      `${hitPage.total} 条`,
+    );
+    check(
+      '命中行含 word/action/field/commentId/snippet/userName/createdAt',
+      (hitPage.list ?? []).every(
+        (h) =>
+          typeof h.word === 'string' &&
+          ['block', 'mask'].includes(h.action) &&
+          ['content', 'name'].includes(h.field) &&
+          'commentId' in h &&
+          typeof h.snippet === 'string' &&
+          typeof h.createdAt === 'string',
+      ),
+    );
+    const byField = await request('/admin/moderation/hits?field=content&limit=100', { token });
+    check(
+      'field=content 只返回正文命中',
+      (byField.list ?? []).every((h) => h.field === 'content'),
+    );
+    const byAction = await request('/admin/moderation/hits?action=block&limit=100', { token });
+    check(
+      'action=block 只返回拦截命中',
+      (byAction.list ?? []).every((h) => h.action === 'block'),
+    );
+    let badField = false;
+    try {
+      await request('/admin/moderation/hits?field=bogus', { token });
+    } catch {
+      badField = true;
+    }
+    check('非法 field 被拒（422）', badField);
+
+    const hp1 = await request('/admin/moderation/hits?limit=2', { token });
+    if (hp1.nextCursor) {
+      const hp2 = await request(`/admin/moderation/hits?limit=2&cursor=${hp1.nextCursor}`, {
+        token,
+      });
+      const ids1 = (hp1.list ?? []).map((h) => h.id);
+      check(
+        '命中日志游标翻页不重复',
+        (hp2.list ?? []).every((h) => !ids1.includes(h.id)),
+      );
+    }
+
+    // 16.9 人工复核：幂等、只清标记不改可见性
+    const pendingPage = await request('/admin/comments?status=pending&limit=100', { token });
+    check(
+      'status=pending 只返回待复核行',
+      (pendingPage.list ?? []).every((c) => c.pendingReview === true),
+      `${pendingPage.total} 条`,
+    );
+    check(
+      '刚脱敏的评论出现在待复核列表',
+      (pendingPage.list ?? []).some((c) => c.id === maskedComment.id),
+    );
+
+    const reviewed = await request(`/admin/comments/${maskedComment.id}/review`, {
+      method: 'POST',
+      token,
+    });
+    check(
+      '复核后 pendingReview=false 且写入 reviewedAt',
+      reviewed.pendingReview === false && !!reviewed.reviewedAt,
+      String(reviewed.reviewedAt),
+    );
+    check(
+      '复核不改可见性（它只是"人看过了"）',
+      reviewed.hidden === false &&
+        (await request(`/news/${DEMO_NEWS}/comments`, { token })).list.some(
+          (c) => c.id === maskedComment.id,
+        ),
+    );
+    const reviewedAgain = await request(`/admin/comments/${maskedComment.id}/review`, {
+      method: 'POST',
+      token,
+    });
+    check('复核幂等（重复调用不报错）', reviewedAgain.pendingReview === false);
+    const pendingAfter = await request('/admin/comments?status=pending&limit=100', { token });
+    check(
+      '复核后从待复核列表消失',
+      !(pendingAfter.list ?? []).some((c) => c.id === maskedComment.id),
+    );
+
+    let reviewMissing = false;
+    try {
+      await request('/admin/comments/__no_such_comment__/review', { method: 'POST', token });
+    } catch (e) {
+      reviewMissing = e.message === '评论不存在或已删除';
+    }
+    check('复核未知评论 40405', reviewMissing);
+
+    // 16.10 词库维护：改动作 / 删快照 / 删第二次 40406
+    const patched = await request(`/admin/words/${wMask.id}`, {
+      method: 'PATCH',
+      token,
+      body: { action: 'block', category: '契约检查改' },
+    });
+    check(
+      'PATCH 改动作与分组（不许改词本身）',
+      patched.action === 'block' && patched.category === '契约检查改' && patched.word === W_MASK,
+    );
+    const deleted = await request(`/admin/words/${wMask.id}`, { method: 'DELETE', token });
+    check('DELETE 返回删除前的快照（审计用）', deleted.word === W_MASK);
+    let deleteAgain = false;
+    try {
+      await request(`/admin/words/${wMask.id}`, { method: 'DELETE', token });
+    } catch {
+      deleteAgain = true;
+    }
+    check('删第二次 40406', deleteAgain);
+
+    // 16.11 收尾：删掉临时词与演示评论，避免污染开发库
+    for (const id of [wBlock.id, wSub.id, wAllow.id]) {
+      try {
+        await request(`/admin/words/${id}`, { method: 'DELETE', token });
+      } catch {
+        /* 已删或不存在：收尾不影响结论 */
+      }
+    }
+    for (const cid of [maskedComment.id, allowedComment.id, subComment.id, afterDisable.id]) {
+      try {
+        await request(`/news/${DEMO_NEWS}/comments/${cid}`, { method: 'DELETE', token });
+      } catch {
+        /* 同上 */
+      }
+    }
+    const wordsFinal = await request('/admin/words?limit=500', { token });
+    check(
+      '收尾后词库回到初始规模',
+      wordsFinal.total === beforeAdd,
+      `${wordsFinal.total} vs ${beforeAdd}`,
+    );
+  }
+
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);
   process.exit(fail === 0 ? 0 : 1);
 };

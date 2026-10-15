@@ -223,8 +223,296 @@ const comments = {
       hiddenAt: '2026-10-15T10:35:00',
       hiddenReason: '演示种子：含广告信息',
     },
+    {
+      id: 'c4',
+      name: '路过的老王',
+      seed: 'c4',
+      // P1-23 演示种子：命中「博彩」被自动脱敏后**照常发布**，等人工看一眼
+      content: '这评论区怎么全是 ** 广告，没人管吗？',
+      time: '10分钟前',
+      createdAt: '2026-10-15T10:50:00',
+      likes: 4,
+      liked: false,
+      userId: null,
+      mine: false,
+      parentId: null,
+      rootId: null,
+      _seq: 7,
+      pendingReview: true,
+      reviewedAt: null,
+    },
   ],
 };
+
+/* --------------------- 敏感词审核（P1-23） --------------------- */
+
+/**
+ * 后端 `app/moderation.py` 的简化镜像。
+ *
+ * mock 不追求算法性能（词库几十条，`indexOf` 足够），但**语义必须与后端一致**：
+ * 大小写/全半角归一化、空格与标点零宽干扰、白名单区间豁免、昵称命中一律降级
+ * 为脱敏、block 不回显命中词。否则前端在 mock 下调通的行为，接真实后端会全变
+ * ——这是 mock 最容易埋的坑：看起来能跑，接上真后端才发现开关没生效（#13 同类）。
+ */
+const MODERATION_ENABLED = String(process.env.MODERATION_ENABLED ?? 'true') !== 'false';
+const MODERATION_CHECK_NAME = String(process.env.MODERATION_CHECK_NAME ?? 'true') !== 'false';
+const MODERATION_MIN_WORD_LEN = 2;
+const MASK_CHAR = '*';
+const WORD_ACTIONS = ['block', 'mask', 'allow'];
+/** 命中片段的单侧上下文宽度，与后端 SNIPPET_CONTEXT 一致 */
+const SNIPPET_CONTEXT = 30;
+/** 动作严厉程度：区间重叠取最严（宁可脱敏也别放过） */
+const WORD_SEVERITY = { allow: 0, mask: 1, block: 2 };
+
+let wordSeq = 0;
+/** 词库：与后端 sensitive_words 同构 */
+const words = [
+  {
+    id: 1,
+    word: '加微信',
+    action: 'block',
+    category: '广告引流',
+    enabled: true,
+    hitCount: 3,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:00:00',
+    updatedAt: '2026-10-15T09:00:00',
+  },
+  {
+    id: 2,
+    word: '博彩',
+    action: 'mask',
+    category: '违规推广',
+    enabled: true,
+    hitCount: 12,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:05:00',
+    updatedAt: '2026-10-15T09:05:00',
+  },
+  {
+    id: 3,
+    word: '福利',
+    action: 'mask',
+    category: '违规推广',
+    enabled: true,
+    hitCount: 7,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:10:00',
+    updatedAt: '2026-10-15T09:10:00',
+  },
+  // 白名单：单看「福利」会误杀「福利待遇」，把整段加进来即豁免
+  {
+    id: 4,
+    word: '福利待遇',
+    action: 'allow',
+    category: '白名单',
+    enabled: true,
+    hitCount: 0,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:15:00',
+    updatedAt: '2026-10-15T09:15:00',
+  },
+];
+wordSeq = words.length;
+
+let hitSeq = 0;
+/** 命中日志：与后端 sensitive_hits 同构；snippet 留**原文**（脱敏不可逆） */
+const hits = [
+  {
+    id: 1,
+    word: '博彩',
+    action: 'mask',
+    field: 'content',
+    commentId: 'c4',
+    newsId: 'n4',
+    userId: null,
+    userName: '路过的老王',
+    snippet: '这评论区怎么全是博彩广告，没人管吗？',
+    createdAt: '2026-10-15T10:50:00',
+  },
+  // 被拦截：没有落库，所以 commentId 为 null——「拦了多少人」不能是黑箱
+  {
+    id: 2,
+    word: '加微信',
+    action: 'block',
+    field: 'content',
+    commentId: null,
+    newsId: 'n4',
+    userId: null,
+    userName: '我',
+    snippet: '加微信领资料，先到先得',
+    createdAt: '2026-10-15T10:55:00',
+  },
+  // 昵称命中：降级为脱敏（不阻断发言），但该条正文同时 block 了 → 也没落库
+  {
+    id: 3,
+    word: '博彩',
+    action: 'mask',
+    field: 'name',
+    commentId: null,
+    newsId: 'n4',
+    userId: null,
+    userName: '博彩小妹',
+    snippet: '博彩小妹',
+    createdAt: '2026-10-15T10:56:00',
+  },
+];
+hitSeq = hits.length;
+
+/**
+ * 归一化：逐字符 NFKC（全半角/兼容字符）→ 小写 → 只留字母与数字
+ * （丢弃空格、标点、零宽字符、符号、emoji）。
+ *
+ * 下标映射保留**原文**位置：脱敏要改的是原文，不是归一化后的串。
+ */
+function modNormalize(text) {
+  const src = String(text ?? '');
+  const chars = [];
+  const indexMap = [];
+  let i = 0;
+  for (const ch of src) {
+    // 逐字符 NFKC：整串 normalize 会改变长度（ﬁ → fi），逐字符才保住下标
+    const folded = ch.normalize('NFKC').toLowerCase();
+    for (const c of folded) {
+      // \p{L} 字母（含 CJK / 假名 / 谚文），\p{N} 数字；其余一律丢弃——
+      // 这一步就是「加空格 / 插零宽 / 用标点隔断」绕过的解法
+      if (/[\p{L}\p{N}]/u.test(c)) {
+        chars.push(c);
+        indexMap.push(i);
+      }
+    }
+    i += ch.length;
+  }
+  return { norm: chars.join(''), indexMap };
+}
+
+/** 归一化后剩余的有效字符数（判断「词是不是太短」用这个，不是原文长度） */
+const modLength = (text) => modNormalize(text).norm.length;
+
+/** 某类词在原文中的全部区间（原文下标，含首尾） */
+function modSpans(raw, action) {
+  const { norm, indexMap } = modNormalize(raw);
+  const out = [];
+  for (const w of words) {
+    if (w.enabled !== true || w.action !== action) continue;
+    const wn = modNormalize(w.word).norm;
+    if (!wn) continue;
+    let from = 0;
+    for (;;) {
+      const at = norm.indexOf(wn, from);
+      if (at < 0) break;
+      out.push({ word: w.word, start: indexMap[at], end: indexMap[at + wn.length - 1] });
+      from = at + 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * 扫一段文本：返回脱敏后的文本与命中列表。
+ *
+ * `forceMask` 用于昵称：昵称命中只脱敏，绝不阻断——昵称是账号级属性，
+ * 用户没法在评论框里改它，因为昵称而拒绝发言 = 无声禁言。
+ */
+function modScan(text, field, forceMask = false) {
+  const raw = String(text ?? '');
+  const empty = { text: raw, hits: [], blocked: false, masked: false };
+  if (!raw || !MODERATION_ENABLED) return empty;
+  const allow = modSpans(raw, 'allow');
+  // 白名单豁免：命中区间被某个 allow 词**完全包裹**才算豁免
+  const exempt = (s) => allow.some((a) => a.start <= s.start && s.end <= a.end);
+  const spans = [];
+  for (const action of ['block', 'mask']) {
+    for (const s of modSpans(raw, action)) {
+      if (exempt(s)) continue;
+      spans.push({ ...s, action });
+    }
+  }
+  if (!spans.length) return empty;
+
+  // 重叠合并：动作取最严、词取最长
+  spans.sort((x, y) => x.start - y.start || y.end - x.end);
+  const merged = [spans[0]];
+  for (const s of spans.slice(1)) {
+    const cur = merged[merged.length - 1];
+    if (s.start <= cur.end) {
+      cur.end = Math.max(cur.end, s.end);
+      cur.word = s.word.length > cur.word.length ? s.word : cur.word;
+      if (WORD_SEVERITY[s.action] > WORD_SEVERITY[cur.action]) cur.action = s.action;
+    } else {
+      merged.push(s);
+    }
+  }
+  // 昵称降级：block → mask
+  if (forceMask) for (const m of merged) if (m.action === 'block') m.action = 'mask';
+
+  let out = '';
+  let at = 0;
+  const hitsOut = [];
+  for (const m of merged) {
+    // 脱敏长度取**词长**而非原文区间长度：否则等于告诉对方"绕过去几个字符"
+    out += raw.slice(at, m.start) + MASK_CHAR.repeat(m.word.length);
+    at = m.end + 1;
+    hitsOut.push({
+      word: m.word,
+      action: m.action,
+      field,
+      start: m.start,
+      end: m.end,
+      snippet: raw.slice(Math.max(0, m.start - SNIPPET_CONTEXT), m.end + 1 + SNIPPET_CONTEXT),
+    });
+  }
+  out += raw.slice(at);
+  return {
+    text: out,
+    hits: hitsOut,
+    blocked: !forceMask && merged.some((m) => m.action === 'block'),
+    masked: merged.length > 0,
+  };
+}
+
+/** 一次评论提交的检测：正文 + 昵称 */
+function modInspect(content, name) {
+  const c = modScan(content, 'content');
+  const n = MODERATION_CHECK_NAME ? modScan(name, 'name', true) : { text: name, hits: [] };
+  return {
+    content: c.text,
+    name: n.text,
+    hits: [...c.hits, ...n.hits],
+    blocked: c.blocked,
+    masked: c.masked || n.hits.length > 0,
+  };
+}
+
+/**
+ * 落命中日志 + 累加词命中次数。与后端 `_record_hits` 同口径：
+ * 同一 `(字段, 词)` 一次提交只记一行——同一段话三次命中同一个词，对运营是
+ * 一件事不是三条事件，重复行会把"哪个词在误杀"淹掉。
+ */
+function modRecord(list, ctx) {
+  const seen = new Set();
+  const ts = new Date().toISOString();
+  for (const h of list) {
+    const key = `${h.field}|${h.word}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hitSeq += 1;
+    hits.unshift({
+      id: hitSeq,
+      word: h.word,
+      action: h.action,
+      field: h.field,
+      commentId: ctx.commentId ?? null,
+      newsId: ctx.newsId ?? null,
+      userId: null,
+      userName: ctx.userName ?? '我',
+      snippet: h.snippet,
+      createdAt: ts,
+    });
+    const row = words.find((x) => x.word === h.word);
+    if (row) row.hitCount = (row.hitCount ?? 0) + 1;
+  }
+}
 
 /** 回复 → 输出形态：附「回复 @谁」（父行查找），无嵌套计数 */
 function replyOut(r, parents) {
@@ -864,11 +1152,29 @@ const server = createServer(async (req, res) => {
         return fail(res, 400, 40003, '回复的评论不存在');
       }
     }
+    // P1-23：落库**之前**检测（唯一写入口，主评论与回复都走这里）
+    const cid = `c_${Date.now()}`;
+    const inspection = modInspect(text, '我');
+    if (inspection.hits.length) {
+      modRecord(inspection.hits, {
+        // 拦截时不落库 → 没有评论 id；但命中日志照样写（拦截也要留痕）
+        commentId: inspection.blocked ? null : cid,
+        newsId: a,
+        userName: '我',
+      });
+      if (inspection.blocked) {
+        // 提示不回显命中词：回显等于给绕过者一份"哪些词不能写"的对照表
+        return fail(res, 400, 40005, '评论包含不当内容，请修改后重试');
+      }
+    }
     const created = {
-      id: `c_${Date.now()}`,
-      name: '我',
+      id: cid,
+      name: inspection.name || '我',
       seed: 'me',
-      content: text,
+      content: inspection.content,
+      // 脱敏过就进待复核：机器判断是概率性的，让人看一眼比直接吞掉便宜
+      pendingReview: inspection.masked,
+      reviewedAt: inspection.masked ? null : undefined,
       time: '刚刚',
       // 与后端 create_comment 一致：created_at 是绝对 ISO 时间（排序唯一依据），
       // time 只是展示文案。管理端评论治理列表按它倒序。
@@ -1270,8 +1576,8 @@ const server = createServer(async (req, res) => {
 
   /* --------------------- 管理端：评论治理（P1-22） --------------------- */
 
-  /** status 三态，与后端 Query(pattern=...) 一致 */
-  const COMMENT_STATUSES = ['all', 'visible', 'hidden'];
+  /** status 四态，与后端 Query(pattern=...) 一致（pending 为 P1-23 新增） */
+  const COMMENT_STATUSES = ['all', 'visible', 'hidden', 'pending'];
 
   /** 跨文章找一条评论：评论按文章分桶存，治理端要按 id 定位 → { row, newsId } */
   function findComment(id) {
@@ -1315,6 +1621,9 @@ const server = createServer(async (req, res) => {
       hidden: row.hidden === true,
       hiddenAt: row.hiddenAt ?? null,
       hiddenReason: row.hiddenReason ?? null,
+      // P1-23：与 hidden 正交——hidden 是已处置不可见，pending 是未处置但可见
+      pendingReview: row.pendingReview === true,
+      reviewedAt: row.reviewedAt ?? null,
     };
   }
 
@@ -1339,6 +1648,7 @@ const server = createServer(async (req, res) => {
     let pairs = allCommentPairs().filter((p) => p.row.isDeleted !== true);
     if (status === 'visible') pairs = pairs.filter((p) => p.row.hidden !== true);
     else if (status === 'hidden') pairs = pairs.filter((p) => p.row.hidden === true);
+    else if (status === 'pending') pairs = pairs.filter((p) => p.row.pendingReview === true);
     if (newsId) pairs = pairs.filter((p) => p.newsId === newsId);
     const kw = keyword.trim().toLowerCase();
     if (kw) {
@@ -1428,12 +1738,193 @@ const server = createServer(async (req, res) => {
     return ok(res, adminCommentOut(found.row, found.newsId), '已恢复');
   }
 
+  // POST /admin/comments/:id/review（通过复核，幂等：只清待复核标记）
+  if (head === 'admin' && a === 'comments' && b && c === 'review' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const found = findComment(b);
+    if (!found || found.row.isDeleted) return fail(res, 404, 40405, '评论不存在或已删除');
+    if (found.row.pendingReview === true) {
+      found.row.pendingReview = false;
+      found.row.reviewedAt = new Date().toISOString();
+      const item = news.find((n) => n.id === found.newsId);
+      audit(operator, 'comment.review', found.row.id, {
+        content: String(found.row.content ?? '').slice(0, 50),
+        newsTitle: item?.title ?? '',
+        userName: found.row.name ?? '匿名',
+      });
+    }
+    return ok(res, adminCommentOut(found.row, found.newsId), '已通过复核');
+  }
+
   // GET /admin/comments/:id（40405 与公开端 40401 刻意分开）
   if (head === 'admin' && a === 'comments' && b && !c && method === 'GET') {
     if (!requireAdmin(req, res)) return;
     const found = findComment(b);
     if (!found || found.row.isDeleted) return fail(res, 404, 40405, '评论不存在或已删除');
     return ok(res, adminCommentOut(found.row, found.newsId));
+  }
+
+  /* --------------------- 管理端：敏感词库与命中日志（P1-23） --------------------- */
+
+  const wordOut = (w) => ({ ...w });
+
+  // GET /admin/words（按命中次数降序：高频词要么是热点，要么是误杀大户）
+  if (head === 'admin' && a === 'words' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const kw = (q.get('keyword') ?? '').trim().toLowerCase();
+    const action = q.get('action') ?? '';
+    if (action && !['block', 'mask', 'allow'].includes(action)) {
+      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask/allow 之一');
+    }
+    const enabledRaw = q.get('enabled');
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 200) || 200, 1), 500);
+    const offset = Math.max(Number(q.get('offset') ?? 0) || 0, 0);
+    let rows = [...words];
+    if (kw) rows = rows.filter((w) => w.word.toLowerCase().includes(kw));
+    if (action) rows = rows.filter((w) => w.action === action);
+    if (enabledRaw !== null) rows = rows.filter((w) => w.enabled === (enabledRaw === 'true'));
+    rows.sort((x, y) => y.hitCount - x.hitCount || y.id - x.id);
+    return ok(res, { list: rows.slice(offset, offset + limit).map(wordOut), total: rows.length });
+  }
+
+  // POST /admin/words（新增：太短 42202 / 重复 40905；保存即生效）
+  if (head === 'admin' && a === 'words' && !b && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const body = await readBody(req);
+    const word = String(body.word ?? '').trim();
+    const action = String(body.action ?? 'mask');
+    if (!WORD_ACTIONS.includes(action)) {
+      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask/allow 之一');
+    }
+    // 与后端同口径：按**归一化后**的有效字符数判断（「傻 逼」算 2，「傻!」算 1）
+    if (modLength(word) < MODERATION_MIN_WORD_LEN) {
+      return fail(
+        res,
+        422,
+        42202,
+        `敏感词至少需 ${MODERATION_MIN_WORD_LEN} 个有效字符（空格与标点不计）`,
+      );
+    }
+    if (words.some((w) => w.word === word)) {
+      return fail(res, 409, 40905, '该敏感词已存在');
+    }
+    const ts = new Date().toISOString();
+    wordSeq += 1;
+    const row = {
+      id: wordSeq,
+      word,
+      action,
+      category: String(body.category ?? '')
+        .trim()
+        .slice(0, 50),
+      enabled: body.enabled !== false,
+      hitCount: 0,
+      createdBy: operator,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    words.push(row);
+    audit(operator, 'word.create', word, {
+      action,
+      category: row.category,
+      enabled: row.enabled,
+    });
+    return ok(res, wordOut(row), '已添加');
+  }
+
+  // PATCH /admin/words/:id（**不许改词本身**：改词等于删一条加一条）
+  if (head === 'admin' && a === 'words' && b && !c && method === 'PATCH') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const row = words.find((w) => String(w.id) === String(b));
+    if (!row) return fail(res, 404, 40406, '敏感词不存在');
+    const body = await readBody(req);
+    const changes = {};
+    if (body.action !== undefined && body.action !== row.action) {
+      if (!WORD_ACTIONS.includes(String(body.action))) {
+        return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask/allow 之一');
+      }
+      changes.action = [row.action, body.action];
+      row.action = body.action;
+    }
+    if (body.category !== undefined && body.category !== row.category) {
+      changes.category = [
+        row.category,
+        String(body.category ?? '')
+          .trim()
+          .slice(0, 50),
+      ];
+      row.category = changes.category[1];
+    }
+    const nextEnabled = body.enabled === undefined ? undefined : body.enabled !== false;
+    if (nextEnabled !== undefined && nextEnabled !== row.enabled) {
+      changes.enabled = [row.enabled, nextEnabled];
+      row.enabled = nextEnabled;
+    }
+    // 字段级 diff：无变化不记审计（与资讯置顶同款，"点了一下"不等于"改了"）
+    if (!Object.keys(changes).length) return ok(res, wordOut(row));
+    row.updatedAt = new Date().toISOString();
+    audit(operator, 'word.update', row.word, { changes });
+    return ok(res, wordOut(row), '已更新');
+  }
+
+  // DELETE /admin/words/:id（审计留快照：删错了要能知道原来是什么）
+  if (head === 'admin' && a === 'words' && b && !c && method === 'DELETE') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const i = words.findIndex((w) => String(w.id) === String(b));
+    if (i < 0) return fail(res, 404, 40406, '敏感词不存在');
+    const snapshot = wordOut(words[i]);
+    audit(operator, 'word.delete', snapshot.word, { snapshot });
+    words.splice(i, 1);
+    return ok(res, snapshot, '已删除');
+  }
+
+  // POST /admin/words/reload（重建索引：改词本进程已即时生效，这是给其他实例用的）
+  if (head === 'admin' && a === 'words' && b === 'reload' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const count = words.filter((w) => w.enabled === true).length;
+    audit(operator, 'word.reload', '', { count });
+    return ok(res, { count }, '词库已重载');
+  }
+
+  // GET /admin/moderation/hits（只读；价值在回答误杀，不在"看出事了"）
+  if (head === 'admin' && a === 'moderation' && b === 'hits' && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const word = (q.get('word') ?? '').trim();
+    const action = q.get('action') ?? '';
+    const field = q.get('field') ?? '';
+    if (action && !['block', 'mask'].includes(action)) {
+      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask 之一');
+    }
+    if (field && !['content', 'name'].includes(field)) {
+      return fail(res, 422, 42200, '参数校验失败：field 必须是 content/name 之一');
+    }
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    const cursor = q.get('cursor');
+    let rows = [...hits];
+    if (word) rows = rows.filter((h) => h.word === word);
+    if (action) rows = rows.filter((h) => h.action === action);
+    if (field) rows = rows.filter((h) => h.field === field);
+    const total = rows.length;
+    rows.sort((x, y) => y.id - x.id); // 新的在前
+    if (cursor) {
+      if (!/^\d+$/.test(cursor)) return fail(res, 400, 40003, '分页游标无效');
+      rows = rows.filter((h) => h.id < Number(cursor));
+    }
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    return ok(res, {
+      list: page.map((h) => ({ ...h })),
+      total,
+      hasMore,
+      nextCursor: hasMore ? page[page.length - 1].id : null,
+    });
   }
 
   /* --------------------- 管理端：管理员白名单（P1-14） --------------------- */

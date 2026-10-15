@@ -73,6 +73,12 @@ const router = createRouter({
       name: 'admin-comments',
       component: () => import('@/views/AdminComments.vue'),
     },
+    // 敏感词库与命中日志（P1-23）：词库维护 + 误杀复盘的唯一证据
+    {
+      path: '/admin/words',
+      name: 'admin-words',
+      component: () => import('@/views/AdminWords.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });
