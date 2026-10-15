@@ -9,6 +9,12 @@
     - 主评论被软删除后其回复不可见（回复接口返回空列表）——主评论消失后，
       失去语境的回复不应继续裸露在讨论区。
 
+隐藏过滤（P1-22）：
+    运营软隐藏与软删除对公开侧完全同构：`hidden` 的评论同样从全部公开
+    查询消失（主列表/回复/预览/计数），主评论被隐藏后其回复也不再可见；
+    区别只在治理语义——删除不可逆（作者自主），隐藏可恢复（运营处置，
+    理由留痕）。过滤条件实时生效，恢复无需等任何定时任务。
+
 排序契约（H2）：
     主评论按绝对时间 `created_at` 倒序（新的在前），`id` 兜底保证稳定。
     历史实现按展示文案 `time`（"1小时前" / ISO 混排）排序，字典序与真实
@@ -106,11 +112,15 @@ def _decorate_roots(db: Session, roots: list[Comment], current: Optional[User]) 
         return []
     root_ids = [c.id for c in roots]
 
-    # 回复数（按 root 聚合；已删除的回复不计入）
+    # 回复数（按 root 聚合；已删除、已隐藏的回复不计入）
     counts = dict(
         db.execute(
             select(Comment.root_id, func.count())
-            .where(Comment.root_id.in_(root_ids), Comment.is_deleted.is_(False))
+            .where(
+                Comment.root_id.in_(root_ids),
+                Comment.is_deleted.is_(False),
+                Comment.hidden.is_(False),
+            )
             .group_by(Comment.root_id)
         ).all()
     )
@@ -124,7 +134,11 @@ def _decorate_roots(db: Session, roots: list[Comment], current: Optional[User]) 
                 partition_by=Comment.root_id,
                 order_by=(Comment.created_at.asc(), Comment.id.asc()),
             ).label("rn"),
-        ).where(Comment.root_id.in_(root_ids), Comment.is_deleted.is_(False))
+        ).where(
+            Comment.root_id.in_(root_ids),
+            Comment.is_deleted.is_(False),
+            Comment.hidden.is_(False),
+        )
     ).all()
     previews: dict[str, list[Comment]] = {}
     for entity, rn in preview_rows:
@@ -184,12 +198,14 @@ def list_comments(
     """主评论列表：按时间倒序（新的在前），游标为上一页末条 id。
 
     只返回**主评论**（root_id IS NULL）；每条附回复数与最早 2 条回复预览，
-    完整回复走 replies 接口。已删除的评论不返回（软删除，见 `is_deleted`）。
+    完整回复走 replies 接口。已删除（is_deleted）、已隐藏（hidden，P1-22）
+    的评论不返回——两者对公开侧同构：实时过滤，无需等任何定时任务。
     """
     _get_news_or_404(db, news_id)
     q = db.query(Comment).filter(
         Comment.news_id == news_id,
         Comment.is_deleted.is_(False),
+        Comment.hidden.is_(False),
         Comment.root_id.is_(None),
     )
 
@@ -228,18 +244,19 @@ def list_replies(
 ):
     """某条主评论下的回复列表：按时间**正序**（讨论先后），游标分页。
 
-    root 已软删除 → 回复不可见（返回空列表）：主评论消失后，
-    失去语境的回复不应继续裸露在讨论区。
+    root 已软删除或已隐藏（P1-22）→ 回复不可见（返回空列表）：主评论从
+    公开视图消失后，失去语境的回复不应继续裸露在讨论区。
     """
     _get_news_or_404(db, news_id)
     root = db.get(Comment, comment_id)
-    if root is None or root.news_id != news_id or root.is_deleted:
+    if root is None or root.news_id != news_id or root.is_deleted or root.hidden:
         return ok({"list": [], "hasMore": False, "nextCursor": None})
 
     q = db.query(Comment).filter(
         Comment.news_id == news_id,
         Comment.root_id == comment_id,
         Comment.is_deleted.is_(False),
+        Comment.hidden.is_(False),
     )
     if cursor:
         anchor = db.query(Comment).filter(Comment.id == cursor).first()
@@ -284,9 +301,9 @@ def create_comment(
 ):
     """发表评论；带 `parentId` 时为回复（二级评论）。
 
-    回复约束：被回复评论必须属于同一篇文章且未删除；回复的回复拍平到
-    同一 root。回复只通知被回复者（一级通知），不再走「资讯有新评论」
-    广播——避免同一个人收到两条语义重复的消息。
+    回复约束：被回复评论必须属于同一篇文章、未删除且**未隐藏**（P1-22）；
+    回复的回复拍平到同一 root。回复只通知被回复者（一级通知），不再走
+    「资讯有新评论」广播——避免同一个人收到两条语义重复的消息。
     """
     _get_news_or_404(db, news_id)
     content = body.content.strip()
@@ -296,7 +313,9 @@ def create_comment(
     parent: Optional[Comment] = None
     if body.parentId:
         parent = db.get(Comment, body.parentId)
-        if parent is None or parent.news_id != news_id or parent.is_deleted:
+        # 隐藏与被删除对回复者同构：都该像"不存在"一样拒绝
+        # （对一条运营已处置的内容继续盖楼没有意义）
+        if parent is None or parent.news_id != news_id or parent.is_deleted or parent.hidden:
             raise HTTPException(
                 status_code=400, detail={"code": 40003, "message": "回复的评论不存在"}
             )
@@ -366,8 +385,9 @@ def set_like(
     只点一次；`likes` 冗余计数随行的插入/删除同步维护。
     """
     c = db.query(Comment).filter(Comment.id == comment_id, Comment.news_id == news_id).first()
-    # 已删除的评论不可再点赞（避免为一条已消失的内容累加计数）
-    if c is None or c.is_deleted:
+    # 已删除、已隐藏（P1-22）的评论不可再点赞（避免为一条已不可见的内容
+    # 累加计数，也避免点赞列表里出现"幽灵"条目）
+    if c is None or c.is_deleted or c.hidden:
         raise HTTPException(status_code=404, detail={"code": 40401, "message": "评论不存在"})
 
     existing = db.get(CommentLike, {"comment_id": c.id, "user_id": user.id})
@@ -411,6 +431,9 @@ def delete_comment(
     - 主评论被删后其回复不可见（replies 接口对已删除 root 返回空）——
       回复行本身保留，不随主评论一并软删除，避免误伤且保留可追溯性。
     - 幂等：重复删除同一条返回成功。
+    - 已**被运营隐藏**的评论（P1-22）仍可被作者删除：隐藏不剥夺作者对
+      自己内容的所有权。但隐藏时已扣过计数/热度，删除不再重复扣——
+      否则「隐藏一次 + 删除一次」会把计数扣穿下限。
     """
     c = db.query(Comment).filter(Comment.id == comment_id, Comment.news_id == news_id).first()
     if c is None or c.is_deleted:
@@ -424,12 +447,15 @@ def delete_comment(
     if not c.is_deleted:
         c.is_deleted = True
         c.deleted_at = now_str()
-        # 软删除后列表不再返回该条，计数同步回退（下限 0，避免历史脏数据算成负数）
-        news = db.query(News).filter(News.id == news_id).first()
-        if news is not None:
-            news.comment_count = max((news.comment_count or 0) - 1, 0)
+        # 隐藏时已扣过计数/热度的评论，删除时不再重复扣（下限 0，防历史脏数据）
+        was_visible = not c.hidden
+        if was_visible:
+            news = db.query(News).filter(News.id == news_id).first()
+            if news is not None:
+                news.comment_count = max((news.comment_count or 0) - 1, 0)
         db.commit()
         db.refresh(c)
-        bump_hot_score(db, news_id)
+        if was_visible:
+            bump_hot_score(db, news_id)
     liked = db.get(CommentLike, {"comment_id": c.id, "user_id": user.id}) is not None
     return ok(to_out(c, user, liked=liked), message="评论已删除")

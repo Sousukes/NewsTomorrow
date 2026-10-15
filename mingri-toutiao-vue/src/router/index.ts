@@ -67,6 +67,12 @@ const router = createRouter({
       name: 'admin-news',
       component: () => import('@/views/AdminNews.vue'),
     },
+    // 评论治理（P1-22）：软隐藏/恢复，理由必填 + 审计留痕（与资讯审核同处方）
+    {
+      path: '/admin/comments',
+      name: 'admin-comments',
+      component: () => import('@/views/AdminComments.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });

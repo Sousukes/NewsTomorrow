@@ -171,3 +171,22 @@ class NewsTopIn(BaseModel):
     """
 
     isTop: bool | None = None
+
+
+class CommentHideIn(BaseModel):
+    """评论隐藏入参（P1-22）：理由**必填**——与 NewsHideIn 同一处方。
+
+    「留痕是准入条件」：隐藏是运营对他人内容的处置动作，事后排查
+    （申诉/复盘）时「谁、为什么、什么时候」必须能从审计里读出来。
+    空理由（含纯空白）一律 42200；strip 后的值才落库。
+    """
+
+    reason: str = Field(min_length=1, max_length=300)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("隐藏理由不能为空")
+        return v

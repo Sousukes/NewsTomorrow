@@ -603,6 +603,8 @@ function healthTitle(s: RssSourceItem): string {
         />
         <!-- P1-20：内容处置在资讯审核页——源管理管"从哪来"，那边管"留不留" -->
         <Button variant="secondary" label="资讯审核" @click="router.push('/admin/news')" />
+        <!-- P1-22：评论处置在评论治理页——管讨论区里的"留不留" -->
+        <Button variant="secondary" label="评论治理" @click="router.push('/admin/comments')" />
         <Button variant="secondary" label="管理员" @click="router.push('/admin/users')" />
         <Button variant="secondary" label="审计" @click="router.push('/admin/audit')" />
       </div>

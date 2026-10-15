@@ -3,6 +3,20 @@ import { mount } from '@vue/test-utils';
 import SourceHealthTrend from './SourceHealthTrend.vue';
 import type { SourceHealth } from '@/types';
 
+/**
+ * 相对今天的**本地**日期键（offset 为负 = 过去）。
+ *
+ * 组件按本地日铺趋势格子（`new Date()` + `getMonth/getDate`），所以用例里的日期必须
+ * 跟着今天走：写死成某一天，跨过午夜后窗口整体前移一格，昨天还在窗口内的点今天就
+ * 掉出去了——表现为「凌晨固定挂两条」的时间炸弹，白天跑又全绿。
+ */
+const dayKey = (offset: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
 const health = (over: Partial<SourceHealth> = {}): SourceHealth => ({
   key: 'k',
   days: 30,
@@ -14,7 +28,7 @@ const health = (over: Partial<SourceHealth> = {}): SourceHealth => ({
     rate: 1,
     items: 170,
     avgItems: 17,
-    lastOkAt: '2026-10-15T09:00:00',
+    lastOkAt: `${dayKey(0)}T09:00:00`,
     lastFailAt: null,
   },
   points: [],
@@ -93,9 +107,9 @@ describe('components/SourceHealthTrend', () => {
           health: health({
             days: 3,
             points: [
-              point('2026-10-13', 2, 0, 40),
-              point('2026-10-14', 1, 1, 20),
-              point('2026-10-15', 0, 2, 0),
+              point(dayKey(-2), 2, 0, 40),
+              point(dayKey(-1), 1, 1, 20),
+              point(dayKey(0), 0, 2, 0),
             ],
           }),
         },
@@ -109,7 +123,7 @@ describe('components/SourceHealthTrend', () => {
 
     it('全失败的日子柱子有可见高度，而不是塌成零像素', () => {
       const w = mount(SourceHealthTrend, {
-        props: { health: health({ days: 1, points: [point('2026-10-15', 0, 2, 0)] }) },
+        props: { health: health({ days: 1, points: [point(dayKey(0), 0, 2, 0)] }) },
       });
       const bar = w.find('.mt-health__slot.is-failed .mt-health__bar');
       expect(bar.attributes('style')).toContain('height: 6%');
@@ -119,11 +133,11 @@ describe('components/SourceHealthTrend', () => {
   describe('只有历史才看得见的两类结论', () => {
     const declining = health({
       points: [
-        point('2026-10-11', 1, 0, 30),
-        point('2026-10-12', 1, 0, 24),
-        point('2026-10-13', 1, 0, 18),
-        point('2026-10-14', 1, 0, 9),
-        point('2026-10-15', 1, 0, 4),
+        point(dayKey(-4), 1, 0, 30),
+        point(dayKey(-3), 1, 0, 24),
+        point(dayKey(-2), 1, 0, 18),
+        point(dayKey(-1), 1, 0, 9),
+        point(dayKey(0), 1, 0, 4),
       ],
       summary: {
         attempts: 5,
@@ -132,7 +146,7 @@ describe('components/SourceHealthTrend', () => {
         rate: 1,
         items: 85,
         avgItems: 17,
-        lastOkAt: '2026-10-15T09:00:00',
+        lastOkAt: `${dayKey(0)}T09:00:00`,
         lastFailAt: null,
       },
     });
@@ -150,7 +164,7 @@ describe('components/SourceHealthTrend', () => {
       const w = mount(SourceHealthTrend, {
         props: {
           health: health({
-            points: [point('2026-10-14', 1, 0, 40), point('2026-10-15', 1, 0, 3)],
+            points: [point(dayKey(-1), 1, 0, 40), point(dayKey(0), 1, 0, 3)],
           }),
         },
       });
@@ -162,11 +176,11 @@ describe('components/SourceHealthTrend', () => {
         props: {
           health: health({
             points: [
-              point('2026-10-11', 1, 0, 30),
-              point('2026-10-12', 1, 0, 29),
-              point('2026-10-13', 1, 0, 28),
-              point('2026-10-14', 1, 0, 27),
-              point('2026-10-15', 1, 0, 20),
+              point(dayKey(-4), 1, 0, 30),
+              point(dayKey(-3), 1, 0, 29),
+              point(dayKey(-2), 1, 0, 28),
+              point(dayKey(-1), 1, 0, 27),
+              point(dayKey(0), 1, 0, 20),
             ],
           }),
         },
@@ -178,11 +192,11 @@ describe('components/SourceHealthTrend', () => {
       const w = mount(SourceHealthTrend, {
         props: {
           health: health({
-            points: [point('2026-10-14', 1, 1, 10), point('2026-10-15', 1, 1, 10)],
+            points: [point(dayKey(-1), 1, 1, 10), point(dayKey(0), 1, 1, 10)],
             failures: [
-              { at: '2026-10-15T03:12:00', error: '连接被重置', kind: 'transient', items: 0 },
-              { at: '2026-10-14T03:44:00', error: '连接被重置', kind: 'transient', items: 0 },
-              { at: '2026-10-13T03:05:00', error: '连接被重置', kind: 'transient', items: 0 },
+              { at: `${dayKey(0)}T03:12:00`, error: '连接被重置', kind: 'transient', items: 0 },
+              { at: `${dayKey(-1)}T03:44:00`, error: '连接被重置', kind: 'transient', items: 0 },
+              { at: `${dayKey(-2)}T03:05:00`, error: '连接被重置', kind: 'transient', items: 0 },
             ],
           }),
         },
@@ -195,11 +209,11 @@ describe('components/SourceHealthTrend', () => {
       const w = mount(SourceHealthTrend, {
         props: {
           health: health({
-            points: [point('2026-10-15', 1, 3, 10)],
+            points: [point(dayKey(0), 1, 3, 10)],
             failures: [
-              { at: '2026-10-15T03:12:00', error: 'x', kind: 'transient', items: 0 },
-              { at: '2026-10-14T09:44:00', error: 'x', kind: 'transient', items: 0 },
-              { at: '2026-10-13T21:05:00', error: 'x', kind: 'transient', items: 0 },
+              { at: `${dayKey(0)}T03:12:00`, error: 'x', kind: 'transient', items: 0 },
+              { at: `${dayKey(-1)}T09:44:00`, error: 'x', kind: 'transient', items: 0 },
+              { at: `${dayKey(-2)}T21:05:00`, error: 'x', kind: 'transient', items: 0 },
             ],
           }),
         },
@@ -213,9 +227,9 @@ describe('components/SourceHealthTrend', () => {
       const w = mount(SourceHealthTrend, {
         props: {
           health: health({
-            points: [point('2026-10-15', 0, 1, 0)],
+            points: [point(dayKey(0), 0, 1, 0)],
             failures: [
-              { at: '2026-10-15T03:12:00', error: 'HTTP 404', kind: 'permanent', items: 0 },
+              { at: `${dayKey(0)}T03:12:00`, error: 'HTTP 404', kind: 'permanent', items: 0 },
             ],
           }),
         },
@@ -229,9 +243,9 @@ describe('components/SourceHealthTrend', () => {
       const w = mount(SourceHealthTrend, {
         props: {
           health: health({
-            points: [point('2026-10-15', 0, 1, 0)],
+            points: [point(dayKey(0), 0, 1, 0)],
             failures: [
-              { at: '2026-10-15T03:12:00', error: 'HTTP 503', kind: 'transient', items: 0 },
+              { at: `${dayKey(0)}T03:12:00`, error: 'HTTP 503', kind: 'transient', items: 0 },
             ],
           }),
         },
@@ -244,8 +258,8 @@ describe('components/SourceHealthTrend', () => {
       const w = mount(SourceHealthTrend, {
         props: {
           health: health({
-            points: [point('2026-10-15', 0, 1, 0)],
-            failures: [{ at: '2026-10-15T03:12:00', error: null, kind: null, items: 0 }],
+            points: [point(dayKey(0), 0, 1, 0)],
+            failures: [{ at: `${dayKey(0)}T03:12:00`, error: null, kind: null, items: 0 }],
           }),
         },
       });

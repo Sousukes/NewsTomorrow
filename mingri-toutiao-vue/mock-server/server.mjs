@@ -67,6 +67,10 @@ const news = [
     cover: '',
     channel: 'video',
     variant: 'video',
+    // 与后端 to_out 一致：详情/列表都带 commentCount（冗余计数列）。
+    // 种子 6 条评论里 c3 已被演示隐藏 → 当前可见 5；隐藏/恢复演示条时
+    // 此值随 -1/+1 联动（契约检查第 15 段据此断言计数回退）
+    commentCount: 5,
     publishedAt: '2026-10-15T06:30:00',
     hotScore: 58.125,
   },
@@ -130,6 +134,7 @@ const comments = {
       seed: 'c1',
       content: '这篇报道角度很扎实，把关键节点都讲清楚了，期待后续跟进。',
       time: '1小时前',
+      createdAt: '2026-10-15T09:00:00',
       likes: 86,
       liked: false,
       userId: null,
@@ -144,6 +149,7 @@ const comments = {
       seed: 'c1r1',
       content: '同感，数据那一节特别清晰。',
       time: '52分钟前',
+      createdAt: '2026-10-15T09:20:00',
       likes: 6,
       liked: false,
       userId: null,
@@ -158,6 +164,7 @@ const comments = {
       seed: 'c1r2',
       content: '希望后续能跟进落地情况。',
       time: '40分钟前',
+      createdAt: '2026-10-15T09:35:00',
       likes: 2,
       liked: false,
       userId: null,
@@ -172,6 +179,7 @@ const comments = {
       seed: 'c1r3',
       content: '补充一点：第二章的图表引用需要再核对。',
       time: '30分钟前',
+      createdAt: '2026-10-15T09:50:00',
       likes: 0,
       liked: false,
       userId: null,
@@ -186,6 +194,7 @@ const comments = {
       seed: 'c2',
       content: '我们这边昨天就开始排涝了，预警还是挺及时的，点赞气象台。',
       time: '42分钟前',
+      createdAt: '2026-10-15T10:10:00',
       likes: 53,
       liked: true,
       userId: null,
@@ -200,6 +209,7 @@ const comments = {
       seed: 'c3',
       content: '希望落地时能多听听基层声音，别只停留在文件层面。',
       time: '20分钟前',
+      createdAt: '2026-10-15T10:30:00',
       likes: 12,
       liked: false,
       userId: null,
@@ -207,6 +217,11 @@ const comments = {
       parentId: null,
       rootId: null,
       _seq: 6,
+      // P1-22 演示种子：已被运营软隐藏——公开评论列表实时过滤掉它，
+      // 管理端「评论治理」页可见（含理由），可恢复
+      hidden: true,
+      hiddenAt: '2026-10-15T10:35:00',
+      hiddenReason: '演示种子：含广告信息',
     },
   ],
 };
@@ -214,7 +229,9 @@ const comments = {
 /** 回复 → 输出形态：附「回复 @谁」（父行查找），无嵌套计数 */
 function replyOut(r, parents) {
   const p = r.parentId ? parents.get(r.parentId) : null;
-  // _seq 仅用于服务端排序，输出前剥掉（浅拷贝 + delete；解构丢弃会被 lint 拦）
+  // _seq 仅用于服务端排序；hidden 三件套仅管理端可见（与后端 to_out 一致，
+  // 公开输出一概不暴露"它被隐藏了"）——输出前剥掉（浅拷贝 + delete；
+  // 解构丢弃会被 lint 拦）
   const out = {
     ...r,
     replyCount: 0,
@@ -223,6 +240,9 @@ function replyOut(r, parents) {
     replyToUserId: p?.userId ?? null,
   };
   delete out._seq;
+  delete out.hidden;
+  delete out.hiddenAt;
+  delete out.hiddenReason;
   return out;
 }
 
@@ -230,7 +250,7 @@ function replyOut(r, parents) {
 function commentOut(root, all) {
   const parents = new Map(all.map((x) => [x.id, x]));
   const replies = all
-    .filter((x) => x.rootId === root.id && !x.isDeleted)
+    .filter((x) => x.rootId === root.id && !x.isDeleted && !x.hidden)
     .sort((x, y) => x._seq - y._seq);
   const out = {
     ...root,
@@ -238,6 +258,9 @@ function commentOut(root, all) {
     replies: replies.slice(0, 2).map((r) => replyOut(r, parents)),
   };
   delete out._seq;
+  delete out.hidden;
+  delete out.hiddenAt;
+  delete out.hiddenReason;
   return out;
 }
 
@@ -786,7 +809,10 @@ const server = createServer(async (req, res) => {
     const target = news.find((n) => n.id === a);
     if (!target || target.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
     const all = comments[a] ?? [];
-    const roots = all.filter((x) => !x.rootId && !x.isDeleted).sort((x, y) => y._seq - x._seq);
+    // P1-22：已隐藏的评论对公开侧与已删除同构——实时过滤，无需等定时任务
+    const roots = all
+      .filter((x) => !x.rootId && !x.isDeleted && !x.hidden)
+      .sort((x, y) => y._seq - x._seq);
     // mock 不做真游标：一次返回全部主评论（与既有行为一致）
     return ok(res, {
       list: roots.map((r) => commentOut(r, all)),
@@ -799,12 +825,13 @@ const server = createServer(async (req, res) => {
   if (head === 'news' && a && b === 'comments' && c && d === 'replies' && method === 'GET') {
     const all = comments[a] ?? [];
     const root = all.find((x) => x.id === c);
-    if (!root || root.isDeleted) {
+    // P1-22：root 已软删除或已隐藏 → 回复不可见（失去语境的回复不该继续裸露）
+    if (!root || root.isDeleted || root.hidden) {
       return ok(res, { list: [], hasMore: false, nextCursor: null });
     }
     const parents = new Map(all.map((x) => [x.id, x]));
     const replies = all
-      .filter((x) => x.rootId === c && !x.isDeleted)
+      .filter((x) => x.rootId === c && !x.isDeleted && !x.hidden)
       .sort((x, y) => x._seq - y._seq);
     const offset = Number(url.searchParams.get('cursor') || 0);
     const limit = Math.min(Number(url.searchParams.get('limit') || 20), 100);
@@ -831,8 +858,11 @@ const server = createServer(async (req, res) => {
     let parent = null;
     if (parentId) {
       parent = all.find((x) => x.id === parentId);
-      // 与后端一致：被回复评论必须存在、未删除（同文章由路径保证）
-      if (!parent || parent.isDeleted) return fail(res, 400, 40003, '回复的评论不存在');
+      // 与后端一致：被回复评论必须存在、未删除、未隐藏（同文章由路径保证）。
+      // 隐藏与被删除对回复者同构：都该像"不存在"一样拒绝
+      if (!parent || parent.isDeleted || parent.hidden) {
+        return fail(res, 400, 40003, '回复的评论不存在');
+      }
     }
     const created = {
       id: `c_${Date.now()}`,
@@ -840,6 +870,9 @@ const server = createServer(async (req, res) => {
       seed: 'me',
       content: text,
       time: '刚刚',
+      // 与后端 create_comment 一致：created_at 是绝对 ISO 时间（排序唯一依据），
+      // time 只是展示文案。管理端评论治理列表按它倒序。
+      createdAt: new Date().toISOString(),
       likes: 0,
       liked: false,
       // 归属字段：与后端 to_out 一致（自己的评论 mine=true）
@@ -866,7 +899,8 @@ const server = createServer(async (req, res) => {
     const { liked } = await readBody(req);
     const list = comments[a] ?? [];
     const target = list.find((x) => x.id === c);
-    if (!target || target.isDeleted) return fail(res, 404, 40401, '评论不存在');
+    // P1-22：已隐藏的评论不可再点赞（避免为不可见内容累加计数、点赞列表出幽灵）
+    if (!target || target.isDeleted || target.hidden) return fail(res, 404, 40401, '评论不存在');
     const next = Boolean(liked);
     if (target.liked !== next) {
       target.liked = next;
@@ -1232,6 +1266,174 @@ const server = createServer(async (req, res) => {
     const item = news.find((n) => n.id === b);
     if (!item) return fail(res, 404, 40404, '资讯不存在');
     return ok(res, adminNewsOut(item));
+  }
+
+  /* --------------------- 管理端：评论治理（P1-22） --------------------- */
+
+  /** status 三态，与后端 Query(pattern=...) 一致 */
+  const COMMENT_STATUSES = ['all', 'visible', 'hidden'];
+
+  /** 跨文章找一条评论：评论按文章分桶存，治理端要按 id 定位 → { row, newsId } */
+  function findComment(id) {
+    for (const [newsId, list] of Object.entries(comments)) {
+      const row = list.find((x) => x.id === id);
+      if (row) return { row, newsId };
+    }
+    return null;
+  }
+
+  /** 全部评论（含已隐藏，不含已软删除）的 { row, newsId } 平表 */
+  function allCommentPairs() {
+    const pairs = [];
+    for (const [newsId, list] of Object.entries(comments)) {
+      for (const row of list) pairs.push({ row, newsId });
+    }
+    return pairs;
+  }
+
+  /**
+   * 管理端评论行输出，与后端 admin._comment_out 同构（公开字段的超集 +
+   * 隐藏三件套 + 所属资讯标题 + 作者名）。replyCount 只数**当前可见**回复。
+   */
+  function adminCommentOut(row, newsId) {
+    const siblings = comments[newsId] ?? [];
+    return {
+      id: row.id,
+      newsId,
+      newsTitle: news.find((n) => n.id === newsId)?.title ?? '',
+      userId: row.userId ?? null,
+      userName: row.name ?? '匿名',
+      content: row.content ?? '',
+      createdAt: row.createdAt ?? '',
+      likes: row.likes ?? 0,
+      parentId: row.parentId ?? null,
+      rootId: row.rootId ?? null,
+      replyCount: row.rootId
+        ? 0
+        : siblings.filter((x) => x.rootId === row.id && !x.isDeleted && !x.hidden).length,
+      isDeleted: row.isDeleted === true,
+      hidden: row.hidden === true,
+      hiddenAt: row.hiddenAt ?? null,
+      hiddenReason: row.hiddenReason ?? null,
+    };
+  }
+
+  // GET /admin/comments（筛选 + 搜索 + 游标分页；游标为上一页末条 id）
+  if (head === 'admin' && a === 'comments' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const status = q.get('status') || 'all';
+    if (!COMMENT_STATUSES.includes(status)) {
+      return fail(
+        res,
+        422,
+        42200,
+        `参数校验失败：status 必须是 ${COMMENT_STATUSES.join('/')} 之一`,
+      );
+    }
+    const keyword = q.get('keyword') ?? '';
+    if (keyword.length > 50) return fail(res, 422, 42200, '参数校验失败：keyword 不能超过 50 字');
+    const newsId = q.get('newsId');
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    // 与后端同口径：已软删除一概不返回（作者侧不可逆行为，治理视图同样不存在）
+    let pairs = allCommentPairs().filter((p) => p.row.isDeleted !== true);
+    if (status === 'visible') pairs = pairs.filter((p) => p.row.hidden !== true);
+    else if (status === 'hidden') pairs = pairs.filter((p) => p.row.hidden === true);
+    if (newsId) pairs = pairs.filter((p) => p.newsId === newsId);
+    const kw = keyword.trim().toLowerCase();
+    if (kw) {
+      // 与后端 _escape_like 同口径：% / _ 按字面量匹配（不转义时搜一个百分号
+      // 等于"匹配全部"）——正则整体转义即可
+      const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(esc);
+      pairs = pairs.filter((p) => re.test(String(p.row.content ?? '').toLowerCase()));
+    }
+    const total = pairs.length;
+    // 排序与后端一致：created_at DESC, id DESC（mock 的 _seq 即创建序，同序）
+    pairs = [...pairs].sort(
+      (x, y) =>
+        String(y.row.createdAt ?? '').localeCompare(String(x.row.createdAt ?? '')) ||
+        y.row._seq - x.row._seq,
+    );
+    const cursor = q.get('cursor');
+    if (cursor) {
+      const anchor = findComment(cursor);
+      // 与后端一致：游标锚点找不到时**不报错**，仅忽略分页条件
+      if (anchor) pairs = pairs.filter((p) => p.row._seq < anchor.row._seq);
+    }
+    const page = pairs.slice(0, limit);
+    const hasMore = pairs.length > limit;
+    const last = page.at(-1);
+    return ok(res, {
+      list: page.map((p) => adminCommentOut(p.row, p.newsId)),
+      total,
+      hasMore,
+      nextCursor: hasMore && last ? last.row.id : null,
+    });
+  }
+
+  // POST /admin/comments/:id/hide（软隐藏，幂等；理由必填）
+  // 路径分段：/admin/comments/:id/hide → b 是评论 id，c 才是动作
+  if (head === 'admin' && a === 'comments' && b && c === 'hide' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const found = findComment(b);
+    // 40405：已软删除对治理视图同样不存在（与后端 _comment_not_found 一致）
+    if (!found || found.row.isDeleted) return fail(res, 404, 40405, '评论不存在或已删除');
+    const body = await readBody(req);
+    const reason = String(body.reason ?? '').trim();
+    // 与后端 CommentHideIn 同口径：空/纯空白 422（留痕是准入条件）
+    if (!reason) return fail(res, 422, 42200, '参数校验失败：隐藏理由不能为空');
+    if (reason.length > 300) return fail(res, 422, 42200, '参数校验失败：隐藏理由不能超过 300 字');
+    // 幂等：已隐藏不覆盖原理由、不重复记审计
+    if (found.row.hidden !== true) {
+      found.row.hidden = true;
+      found.row.hiddenAt = new Date().toISOString();
+      found.row.hiddenReason = reason;
+      const item = news.find((n) => n.id === found.newsId);
+      if (item) {
+        // 隐藏即从公开视图消失：计数回退（下限 0，防历史脏数据算成负数）
+        item.commentCount = Math.max((item.commentCount ?? 0) - 1, 0);
+      }
+      const title = item?.title ?? '';
+      // 评论没有标题，审计时间线认内容片段 + 资讯标题 + 作者名（运营认内容不认 id）
+      audit(operator, 'comment.hide', found.row.id, {
+        reason,
+        content: String(found.row.content ?? '').slice(0, 50),
+        newsTitle: title,
+        userName: found.row.name ?? '匿名',
+      });
+    }
+    return ok(res, adminCommentOut(found.row, found.newsId), '已隐藏');
+  }
+
+  // POST /admin/comments/:id/restore（恢复，幂等；理由只对隐藏状态有意义，恢复即清空）
+  if (head === 'admin' && a === 'comments' && b && c === 'restore' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const found = findComment(b);
+    if (!found || found.row.isDeleted) return fail(res, 404, 40405, '评论不存在或已删除');
+    if (found.row.hidden === true) {
+      found.row.hidden = false;
+      found.row.hiddenAt = null;
+      found.row.hiddenReason = null;
+      const item = news.find((n) => n.id === found.newsId);
+      if (item) item.commentCount = (item.commentCount ?? 0) + 1;
+      audit(operator, 'comment.restore', found.row.id, {
+        content: String(found.row.content ?? '').slice(0, 50),
+        newsTitle: item?.title ?? '',
+        userName: found.row.name ?? '匿名',
+      });
+    }
+    return ok(res, adminCommentOut(found.row, found.newsId), '已恢复');
+  }
+
+  // GET /admin/comments/:id（40405 与公开端 40401 刻意分开）
+  if (head === 'admin' && a === 'comments' && b && !c && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const found = findComment(b);
+    if (!found || found.row.isDeleted) return fail(res, 404, 40405, '评论不存在或已删除');
+    return ok(res, adminCommentOut(found.row, found.newsId));
   }
 
   /* --------------------- 管理端：管理员白名单（P1-14） --------------------- */

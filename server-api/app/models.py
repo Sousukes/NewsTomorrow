@@ -137,6 +137,18 @@ class Comment(Base):
     # 且后续审核/申诉需要留存原文。列表接口过滤掉已删除项。
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=sa_false())
     deleted_at = Column(String(30))
+    # 运营软隐藏（P1-22，对齐 news 软下架处方）：作者删除（is_deleted）管不了
+    # 别人的违规评论，治理需要运营侧手段——软隐藏而非物理删除：理由留痕、
+    # 可恢复，点赞/回复结构全部保留。公开查询（主列表/回复/预览/计数）实时
+    # 过滤，恢复即时可见，无需等任何定时任务。
+    # **不给 hidden 建索引**：隐藏集预期很小，与 is_deleted 同理。
+    # 隐藏/恢复同步维护 news.comment_count 与热度分：界面看到的评论数必须
+    # 与真实可见条数一致（P1-12 修过的旧 bug 不能以另一种形式回来）。
+    hidden = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    hidden_at = Column(String(30))
+    # 隐藏理由：**必填**（trim 后 ≤300，空则 42200）——「留痕是准入条件」。
+    # 恢复时清空（理由只对隐藏状态有意义，留着会让下一次隐藏的审计张冠李戴）。
+    hidden_reason = Column(String(300))
 
     news = relationship("News", back_populates="comments")
 

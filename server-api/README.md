@@ -188,6 +188,10 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | POST | `/api/admin/news/{id}/hide` | ✅ 管理员 | **软下架**（可恢复）：理由必填（空/纯空白 422——「留痕是准入条件」），≤300 字；**幂等**（重复下架不覆盖原理由、不重复记审计） |
 | POST | `/api/admin/news/{id}/restore` | ✅ 管理员 | 恢复已下架资讯（**幂等**）；清空 `hidden_at`/`hidden_reason`；公开四路查询实时恢复可见，无需等下一轮抓取 |
 | PATCH | `/api/admin/news/{id}` | ✅ 管理员 | 局部更新（当前仅 `isTop` 置顶开关）；字段级 diff 审计，**无变化不记** |
+| GET | `/api/admin/comments?status=&keyword=&newsId=&limit=&cursor=` | ✅ 管理员 | **管理端评论列表**（P1-22）：`status` 取 `all`（默认，**含已隐藏**）/ `visible` / `hidden`，非法值 422；`keyword` 评论内容 ILIKE；`newsId` 按所属资讯过滤；已软删除一概不返回；排序 `created_at DESC, id DESC`；`total` 始终返回 |
+| GET | `/api/admin/comments/{id}` | ✅ 管理员 | 管理端单条评论（含隐藏三件套与所属资讯标题）；不存在 40405（与公开端 40401 刻意分开） |
+| POST | `/api/admin/comments/{id}/hide` | ✅ 管理员 | **软隐藏**（可恢复）：理由必填（空/纯空白 422——「留痕是准入条件」），≤300 字；**幂等**（重复隐藏不覆盖原理由、不重复记审计）；隐藏后公开五路（主列表/回复/预览/计数/不可交互）实时不可见 |
+| POST | `/api/admin/comments/{id}/restore` | ✅ 管理员 | 恢复已隐藏评论（**幂等**）；清空 `hidden_at`/`hidden_reason`；计数与热度分同步加回，公开查询实时恢复可见 |
 
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
@@ -539,6 +543,48 @@ HOT_STALE_MINUTES=60            # staleness 窗口（见下）
 `lastError`，进程内状态、重启清零）。**抓取被关停时，这是热度任务仍活着的
 唯一信号**；`lastError` 非空即上轮失败（热度是派生数据，失败只记录不终止循环）。
 
+### 评论治理（迁移 0022）
+
+讨论区的最后一环：**进来了不等于能留着**。此前只有作者删自己的评论（`is_deleted`，
+不可逆、无留痕），运营面对违规评论（广告 / 人身攻击 / 与文章无关）只能整篇删资讯
+或改数据库。P1-22 复刻 P1-20 的处方，把「隐藏」做成**可恢复、留痕、实时生效**的
+运营动作。
+
+**① 软隐藏，不硬删，与 `is_deleted` 分工**：作者删 = 不可逆（没有可恢复的状态，
+治理视图同样不返回）；运营隐藏 = 可恢复。`hidden` / `hidden_at` / `hidden_reason`
+三列，`hidden` 非空且 `server_default=false`——**存量行必须"可见"而不是 NULL**，
+否则 `hidden IS FALSE` 会漏掉它们，老评论会从公开列表里凭空消失（与 0020/0018
+同款教训，功能测试走新建行看不出来，由迁移守卫测试钉住）。
+
+**② 理由必填是准入条件**（与下架同一处方）：schema 层 strip 后判空、≤300 字，
+空则 422。隐藏不留理由，审计时间线上就只剩一个光秃秃的 id——评论没有标题，
+时间线认**内容片段 + 资讯标题 + 作者名**（运营认内容不认 id）。
+
+**③ 公开五路实时过滤**（后审核模式，不动内容管线）：主列表 / 回复列表 / 主评论
+预览 / `comment_count` 计数 / 不可交互（对已隐藏评论点赞 40401、回复 40003——
+与"不存在"同码同文案，不暴露"它被隐藏了"）。**主评论隐藏后其回复亦不可见**：
+失去语境的回复不该继续裸露在讨论区。恢复即实时回来，无需等任何定时任务。
+
+**④ 40405 与公开端 40401 刻意分开**：管理端查的是"库里有没有这条"，
+已软删除对治理视图同样不存在；公开端统统一码"不存在"。
+
+**⑤ 计数与热度联动**：隐藏 -1、恢复 +1（下限 0，防历史脏数据算成负数），
+并 `bump_hot_score`。作者删**已隐藏**评论不重复扣（`was_visible` 守卫）——
+「显示 N 条却只看到 N-1 条」是 P1-12 修过的旧 bug，不能换个入口复犯。
+
+**⑥ 不给 `hidden` 建索引**：隐藏集预期很小（运营动作，不是批量状态），
+与 `is_deleted` 同理；全表过滤在现有量级上更便宜。
+
+**⑦ 幂等语义**：重复隐藏不覆盖第一次的理由、不重复记审计；恢复清空理由/时间
+（留着会让下一次隐藏的审计记录读起来张冠李戴）。审计两个新动作：
+`comment.hide`（detail 带 `{reason, content[:50], newsTitle, userName}`）/
+`comment.restore`（`{content[:50], newsTitle, userName}`）。
+
+**⑧ 多词查询参数一律驼峰**（`newsId`）：FastAPI 对未知查询参数**静默忽略**
+（不报错、不过滤），写成蛇形 `news_id` 会表现为"按文章筛选永不生效"
+而前后端各自单测都不红——与 body 的 pydantic `extra='ignore'` 同款缝，
+已用「蛇形不过滤也不报错」的用例焊死（功能测试 + 契约第 15 段双重）。
+
 ## 数据库迁移（Alembic）
 
 ```bash
@@ -573,7 +619,9 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0020_news_soft_hide`（资讯软下架 `news.hidden` / `hidden_at` / `hidden_reason`，
   `hidden` 非空 `server_default=false`，**刻意不建索引**——下架集小，避免热 feed 索引膨胀）、
   `0021_hot_score_at`（热度重算锚点 `news.hot_score_at`，可空无默认——NULL 即
-  「从未算过」天然覆盖存量；**刻意不建索引**，表有 prune 上限，全表找过期行足够便宜）。
+  「从未算过」天然覆盖存量；**刻意不建索引**，表有 prune 上限，全表找过期行足够便宜）、
+  `0022_comment_soft_hide`（评论软隐藏 `comments.hidden` / `hidden_at` / `hidden_reason`，
+  `hidden` 非空 `server_default=false`，**刻意不建索引**——隐藏集小，与 `is_deleted` 同理）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -770,7 +818,7 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 ## 单元测试
 
 ```bash
-pytest -q          # 432 项
+pytest -q          # 467 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -817,14 +865,26 @@ pytest -q          # 432 项
   审计（hide 记 reason/title/actor 且 target 可查、restore 两条、update 记
   `{"isTop": [false, true]}`、无变化不记、404）、置顶（往返+公开列表置顶可见、
   空 body 保持、**蛇形 `is_top` 被静默丢弃**焊死）。
-- `tests/test_migrations.py`（20 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+- `tests/test_comment_admin.py`（34 项）：**评论治理**（P1-22）——管理端列表
+  （鉴权 401/40301、默认 all 含已隐藏、status 三态筛选与非法 422、关键词命中、
+  `%` 转义后不误匹配、`newsId` 过滤、**蛇形 `news_id` 被静默丢弃**焊死、
+  游标翻页不重不漏、`replyCount` 只数可见回复、详情含资讯标题、未知 40405）、
+  隐藏/恢复（往返、理由三种非法 422 与 300 边界放行、trim、**幂等保原理由且
+  审计仅 1 条**、恢复幂等不记审计、已软删 40405、新评论默认可见）、
+  计数联动（隐藏 -1 / 恢复 +1 / 下限 0 / **作者删已隐藏不重复扣**）、
+  公开五路过滤（主列表 offset+cursor 排除、root 隐藏→replies 空且恢复后回来、
+  隐藏回复不进 `replyCount` 与预览、回复已隐藏 40003、点赞已隐藏 40401、
+  公开输出无 hidden 字段）、审计（hide 带 reason/content 截断/newsTitle/userName
+  且 target 可查、restore 留痕）。
+- `tests/test_migrations.py`（21 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
   与 `ix_news_hot`、`rss_sources` 的列与主键（含 0017 的 `respect_robots` **非空**与
   `last_alerted_at`、0018 的 `consecutive_failures` **非空**与 `failure_kind` / `next_retry_at`）、
   `rss_source_health_events` 的列与 `item_count` 非空、复合索引 `ix_rss_health_key_at`
   与外键（0019）、`news` 软下架三列且 `hidden` **非空**、**不含 hidden 的索引**（0020，
-  刻意不建）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
+  刻意不建）、`comments` 软隐藏三列且 `hidden` **非空且存量默认 false**、
+  **不含 hidden 的索引**（0022，与 `is_deleted` 同理）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
   秒级时间戳下**同一条评论同一用户重复点赞只留一行**、悬空/非整数 user_id 被跳过、
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的
@@ -889,8 +949,16 @@ pytest -q          # 432 项
 > `addedBy` 与 404，`/api/admin/audit` 的留痕与游标分页，
 > `/api/admin/sources/{key}/health` 的趋势形状、`days` 收敛与越界 422、未知源 404，
 > 以及 `/api/admin/news` 的列表形状与筛选、下架→恢复闭环（公开四路实时消失/回来、
-> 重复下架不抹理由、审计条数）、置顶驼峰与蛇形忽略、游标分页
-> （共 **114 项**；mock 后端同样支持，见前端 README）。
+> 重复下架不抹理由、审计条数）、置顶驼峰与蛇形忽略、游标分页，
+> `/api/admin/comments` 的列表形状与筛选、隐藏→恢复闭环（公开五路实时消失/回来、
+> 计数 -1/+1、点赞 40401 与回复 40003、重复隐藏不抹理由、审计条数、40405、
+> 蛇形 `news_id` 被静默忽略）
+> （共 **152 项**；mock 后端同样支持，见前端 README）。
+>
+> ⚠️ 真实后端跑全量契约（152 项 ≈ 150+ 请求）会撞上默认限流
+> （`RATE_LIMIT_PER_MINUTE=120`，表现为后段检查报「请求过于频繁」而非真实结论）。
+> 本地验证时以 `RATE_LIMIT_ENABLED=false` 启动后端即可——限流器本身由
+> `tests/test_units.py` 覆盖，契约脚本不重复校验它。
 
 ## 错误码
 
@@ -903,7 +971,7 @@ pytest -q          # 432 项
 | 401 | 40101 | 手机号或密码错误 |
 | 403 | 40301 | 无权限（非管理员调用 `/api/news/refresh`、`/api/admin/*`；白名单为空时该能力整体关闭） |
 | 403 | 40302 | 只能删除自己发表的评论 |
-| 404 | 40400 / 40401 / 40402 / 40403 / 40404 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 |
+| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除） |
 | 409 | 40901 | 手机号已注册 |
 | 409 | 40902 | RSS 源标识（`key`）已存在 |
 | 409 | 40903 | 该手机号已是管理员（含 env 与库两个来源） |

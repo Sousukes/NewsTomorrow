@@ -7,11 +7,14 @@ import {
   ADMIN_SOURCES_SUPPORTED,
   createSource,
   deleteSource,
+  fetchAdminComments,
   fetchAdminNews,
   fetchSourceHealth,
   fetchSources,
+  hideComment,
   hideNews,
   resetSources,
+  restoreComment,
   restoreNews,
   updateNewsTop,
   updateSource,
@@ -613,6 +616,188 @@ describe('api/admin（资讯审核与下架，P1-20）', () => {
   });
 });
 
+// P1-22：评论治理。这一层的关键是**驼峰查询参数**——`newsId` 写成蛇形
+// `news_id` 会被 FastAPI 静默忽略（不报错、不过滤），表现为「按文章筛选
+// 永不生效」而前后端各自单测都不失败（与 P1-18 respectRobots 同款缝，
+// 见仓库记忆 #8）。hidden 缺省按可见兜底；userId 缺失回落 null（匿名评论）。
+describe('api/admin（评论治理，P1-22）', () => {
+  const RAW_COMMENT = {
+    id: 'c_1',
+    newsId: 'n_1',
+    newsTitle: '某 AI 新品发布',
+    userId: 7,
+    userName: '网友甲',
+    content: '这是一条评论内容',
+    createdAt: '2026-10-15T09:00:00',
+    likes: 3,
+    parentId: null,
+    rootId: null,
+    replyCount: 2,
+    isDeleted: false,
+    hidden: false,
+    hiddenAt: null,
+    hiddenReason: null,
+  };
+
+  const stubComments = (data: unknown) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond(data)),
+    );
+  };
+
+  /** 列表信封：多数用例只关心 list 本身，兜底值单独覆盖 */
+  const envelope = (over: Record<string, unknown> = {}) => ({
+    list: [RAW_COMMENT],
+    total: 1,
+    hasMore: false,
+    nextCursor: null,
+    ...over,
+  });
+
+  it('fetchAdminComments 不带参数时请求裸路径，并解析信封', async () => {
+    stubComments(envelope());
+    const page = await fetchAdminComments();
+    expect(lastCall()?.[0] as string).toBe('/api/admin/comments');
+    expect(page.list).toHaveLength(1);
+    expect(page.total).toBe(1);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('查询串带上筛选与分页参数，newsId 焊死驼峰，keyword 做 trim', async () => {
+    stubComments(envelope());
+    await fetchAdminComments({
+      status: 'hidden',
+      keyword: '  广告  ',
+      newsId: 'n_1',
+      limit: 20,
+      cursor: 'c1',
+    });
+    // 顺序即插入顺序：status → keyword → newsId → limit → cursor
+    expect(lastCall()?.[0] as string).toBe(
+      '/api/admin/comments?status=hidden&keyword=%E5%B9%BF%E5%91%8A&newsId=n_1&limit=20&cursor=c1',
+    );
+  });
+
+  it('纯空白 keyword 不拼进查询串（否则等于搜全部，还多一次无效请求）', async () => {
+    stubComments(envelope());
+    await fetchAdminComments({ keyword: '   ' });
+    expect(lastCall()?.[0] as string).toBe('/api/admin/comments');
+  });
+
+  it('信封整段缺失时回落为空列表与零值，不抛', async () => {
+    stubComments({});
+    const page = await fetchAdminComments();
+    expect(page.list).toEqual([]);
+    expect(page.total).toBe(0);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('整行归一化：hidden 三件套与回复结构（rootId/parentId/replyCount）一起透出', async () => {
+    stubComments(
+      envelope({
+        list: [
+          {
+            ...RAW_COMMENT,
+            hidden: true,
+            hiddenAt: '2026-10-15T10:00:00',
+            hiddenReason: '含广告信息',
+          },
+        ],
+      }),
+    );
+    const [c] = (await fetchAdminComments()).list;
+    expect(c).toMatchObject({
+      id: 'c_1',
+      newsId: 'n_1',
+      newsTitle: '某 AI 新品发布',
+      userName: '网友甲',
+      userId: 7,
+      likes: 3,
+      rootId: null,
+      parentId: null,
+      replyCount: 2,
+      hidden: true,
+      hiddenAt: '2026-10-15T10:00:00',
+      hiddenReason: '含广告信息',
+    });
+  });
+
+  it('缺 id 的行被丢弃（隐藏/恢复都按 id 定位）', async () => {
+    stubComments(envelope({ list: [{ content: '没有 id' }, RAW_COMMENT] }));
+    const page = await fetchAdminComments();
+    expect(page.list.map((c) => c.id)).toEqual(['c_1']);
+  });
+
+  it('hidden 三件套缺失（老后端）时按可见兜底，而不是 undefined', async () => {
+    // 显式删键：用 RAW_COMMENT 里已有的 false/null 测不出"缺失"这条分支
+    const legacy: Record<string, unknown> = { ...RAW_COMMENT };
+    delete legacy.hidden;
+    delete legacy.hiddenAt;
+    delete legacy.hiddenReason;
+    stubComments(envelope({ list: [legacy] }));
+    const [c] = (await fetchAdminComments()).list;
+    expect(c.hidden).toBe(false);
+    expect(c.hiddenAt).toBeNull();
+    expect(c.hiddenReason).toBeNull();
+  });
+
+  it('userName 缺失回落「匿名」，userId 缺失回落 null', async () => {
+    stubComments(envelope({ list: [{ ...RAW_COMMENT, userName: '', userId: undefined }] }));
+    const [c] = (await fetchAdminComments()).list;
+    expect(c.userName).toBe('匿名');
+    expect(c.userId).toBeNull();
+  });
+
+  it('likes / replyCount 是垃圾值时回落为 0，不产生 NaN', async () => {
+    stubComments(envelope({ list: [{ ...RAW_COMMENT, likes: '很多', replyCount: null }] }));
+    const [c] = (await fetchAdminComments()).list;
+    expect(c.likes).toBe(0);
+    expect(c.replyCount).toBe(0);
+  });
+
+  it('hideComment 走 POST 并带上理由，id 被编码', async () => {
+    stubComments({
+      ...RAW_COMMENT,
+      hidden: true,
+      hiddenAt: '2026-10-15T10:00:00',
+      hiddenReason: '含广告信息',
+    });
+    const c = await hideComment('a/b', { reason: '含广告信息' });
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/comments/a%2Fb/hide');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ reason: '含广告信息' });
+    expect(c.hidden).toBe(true);
+    expect(c.hiddenReason).toBe('含广告信息');
+  });
+
+  it('hideComment 响应无法解析时抛错（而不是把空壳当成功）', async () => {
+    stubComments({ content: '没有 id' });
+    await expect(hideComment('c_1', { reason: 'x' })).rejects.toThrow('隐藏成功但响应无法解析');
+  });
+
+  it('restoreComment 走 POST 且不带 body', async () => {
+    stubComments({ ...RAW_COMMENT, hidden: false });
+    const c = await restoreComment('c_1');
+    const [url, init] = lastCall() as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/comments/c_1/restore');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeUndefined();
+    expect(c.hidden).toBe(false);
+  });
+
+  it('后端 422（空理由）向上抛错，供页面原地展示', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fail(422, '隐藏理由不能为空')),
+    );
+    await expect(hideComment('c_1', { reason: '' })).rejects.toThrow('隐藏理由不能为空');
+  });
+});
+
 describe('api/admin（mock 模式）', () => {
   it('USE_MOCK=true 时明确拒绝，而不是伪造一份可增删的假列表', async () => {
     vi.resetModules();
@@ -632,6 +817,17 @@ describe('api/admin（mock 模式）', () => {
     await expect(mod.hideNews('n_1', { reason: 'x' })).rejects.toThrow('mock 模式');
     await expect(mod.restoreNews('n_1')).rejects.toThrow('mock 模式');
     await expect(mod.updateNewsTop('n_1', { isTop: true })).rejects.toThrow('mock 模式');
+    vi.doUnmock('@/api/config');
+    vi.resetModules();
+  });
+
+  it('USE_MOCK=true 时评论治理三个接口同样明确拒绝', async () => {
+    vi.resetModules();
+    vi.doMock('@/api/config', () => ({ USE_MOCK: true, API_BASE: '' }));
+    const mod = await import('@/api/admin');
+    await expect(mod.fetchAdminComments()).rejects.toThrow('mock 模式');
+    await expect(mod.hideComment('c_1', { reason: 'x' })).rejects.toThrow('mock 模式');
+    await expect(mod.restoreComment('c_1')).rejects.toThrow('mock 模式');
     vi.doUnmock('@/api/config');
     vi.resetModules();
   });

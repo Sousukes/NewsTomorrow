@@ -40,6 +40,12 @@ const menu = computed(() => {
       to: '/admin/news',
     });
     items.push({
+      key: 'admin-comments',
+      label: '评论治理',
+      desc: '隐藏违规评论、恢复与留痕',
+      to: '/admin/comments',
+    });
+    items.push({
       key: 'admin-users',
       label: '管理员管理',
       desc: '指定可访问后台的账号',

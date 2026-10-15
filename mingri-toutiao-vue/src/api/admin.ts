@@ -1,6 +1,6 @@
 /**
  * 管理端接口：RSS 源配置（后端 P1-9，界面 P1-10）+ 管理员白名单（P1-14）
- * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）。
+ * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）+ 评论治理（P1-22）。
  *
  * 与 `api/me.ts` 的关键差别：**没有 mock 短路**。源配置与白名单只存在于
  * 后端数据库中，mock 模式下并无真实对象可操作——伪造一份"能增能删"的假列表
@@ -14,12 +14,16 @@ import { toChannel } from '@/constants/channels';
 import type {
   AdminAuditItem,
   AdminAuditPage,
+  AdminCommentItem,
+  AdminCommentListResult,
+  AdminCommentQuery,
   AdminNewsItem,
   AdminNewsListResult,
   AdminNewsQuery,
   AdminUserInput,
   AdminUserItem,
   AdminUserList,
+  CommentHideInput,
   NewsHideInput,
   NewsTopInput,
   RssSourceItem,
@@ -416,5 +420,93 @@ export async function updateNewsTop(id: string, input: NewsTopInput): Promise<Ad
   });
   const item = toAdminNews(data);
   if (!item) throw new Error('更新成功但响应无法解析');
+  return item;
+}
+
+// ---------------------------------------------------------------- 评论治理（P1-22）
+
+/**
+ * 管理端评论行归一化。
+ *
+ * 与 `toAdminNews` 同款思路：缺字段给保守缺省而不是丢弃整行——一条字段
+ * 不全的评论照样要能展示与处置（运营认内容不认 id）。`hidden` 缺省视为
+ * false（后端默认可见）。
+ */
+function toAdminComment(raw: unknown): AdminCommentItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = typeof r.id === 'string' ? r.id : '';
+  if (!id) return null; // 没有 id 的行无法定位（隐藏/恢复都按 id 操作）
+  return {
+    id,
+    newsId: typeof r.newsId === 'string' ? r.newsId : '',
+    newsTitle: typeof r.newsTitle === 'string' && r.newsTitle ? r.newsTitle : '',
+    userId: typeof r.userId === 'number' ? r.userId : null,
+    userName: typeof r.userName === 'string' && r.userName ? r.userName : '匿名',
+    content: typeof r.content === 'string' ? r.content : '',
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
+    likes: Number.isFinite(Number(r.likes)) ? Number(r.likes) : 0,
+    parentId: typeof r.parentId === 'string' ? r.parentId : null,
+    rootId: typeof r.rootId === 'string' ? r.rootId : null,
+    replyCount: Number.isFinite(Number(r.replyCount)) ? Number(r.replyCount) : 0,
+    isDeleted: r.isDeleted === true,
+    hidden: r.hidden === true,
+    hiddenAt: typeof r.hiddenAt === 'string' && r.hiddenAt ? r.hiddenAt : null,
+    hiddenReason: typeof r.hiddenReason === 'string' && r.hiddenReason ? r.hiddenReason : null,
+  };
+}
+
+/**
+ * GET /admin/comments —— 管理端评论列表：筛选 + 搜索 + 游标分页（P1-22）。
+ *
+ * 默认 `status=all`（含已隐藏）：运营要能核验自己的处置。已软删除的评论
+ * 一概不返回（后端口径）。游标为上一页末条 id，客户端原样回传。
+ */
+export async function fetchAdminComments(
+  options: AdminCommentQuery = {},
+): Promise<AdminCommentListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.status) params.set('status', options.status);
+  if (options.keyword?.trim()) params.set('keyword', options.keyword.trim());
+  if (options.newsId) params.set('newsId', options.newsId);
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', options.cursor);
+  const qs = params.toString();
+  const data = await request<{
+    list?: unknown;
+    total?: number;
+    hasMore?: boolean;
+    nextCursor?: string | null;
+  }>(`/admin/comments${qs ? `?${qs}` : ''}`);
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toAdminComment).filter((c): c is AdminCommentItem => c !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+    hasMore: data?.hasMore === true,
+    nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : null,
+  };
+}
+
+/** POST /admin/comments/:id/hide —— 软隐藏（理由必填，空/纯空白 422；幂等） */
+export async function hideComment(id: string, input: CommentHideInput): Promise<AdminCommentItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/comments/${encodeURIComponent(id)}/hide`, {
+    method: 'POST',
+    body: input,
+  });
+  const item = toAdminComment(data);
+  if (!item) throw new Error('隐藏成功但响应无法解析');
+  return item;
+}
+
+/** POST /admin/comments/:id/restore —— 恢复已隐藏评论（幂等；公开查询实时生效） */
+export async function restoreComment(id: string): Promise<AdminCommentItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/comments/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+  });
+  const item = toAdminComment(data);
+  if (!item) throw new Error('恢复成功但响应无法解析');
   return item;
 }

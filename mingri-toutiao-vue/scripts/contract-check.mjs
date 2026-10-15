@@ -6,7 +6,7 @@
  *
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
- * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）。
+ * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -871,6 +871,329 @@ const run = async () => {
       badCursor = true;
     }
     check('坏游标被拒（400）', badCursor);
+  }
+
+  // 15) 管理端：评论治理（P1-22）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //     核心口径：软隐藏可恢复、公开五路实时过滤（主列表/回复/计数/不可点赞/
+  //     不可回复）、理由必填 422、幂等（重复隐藏不抹掉第一次理由）、40405 与
+  //     公开端 40401 刻意分开、审计留痕（comment.hide/restore）。
+  //     演示评论自建自销（隐藏→恢复→删除），不污染种子数据；审计计数用
+  //     id 窗口法（P1-21 修法）：持久库（PG）上审计日志跨运行累积，
+  //     绝对计数必挂——「id 大于快照最新 id」划窗口，既不怕历史累积，
+  //     也不怕 limit 截断（截掉的都是更旧条目）。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const DEMO_NEWS = 'n4'; // 与 6/8.1 同一篇演示资讯
+
+    // 15.1 列表形状与筛选
+    const allComments = await request('/admin/comments?limit=100', { token });
+    check(
+      'GET /admin/comments 返回 {list,total,hasMore,nextCursor}',
+      Array.isArray(allComments.list) &&
+        typeof allComments.total === 'number' &&
+        typeof allComments.hasMore === 'boolean' &&
+        'nextCursor' in allComments,
+      `${allComments.total} 条`,
+    );
+    check(
+      '管理端行含 hidden 三件套与 newsTitle/userName/replyCount，已软删除不返回',
+      (allComments.list ?? []).every(
+        (c) =>
+          typeof c.hidden === 'boolean' &&
+          'hiddenAt' in c &&
+          'hiddenReason' in c &&
+          typeof c.newsId === 'string' &&
+          typeof c.userName === 'string' &&
+          typeof c.replyCount === 'number' &&
+          c.isDeleted === false,
+      ),
+    );
+
+    let badStatus = false;
+    try {
+      await request('/admin/comments?status=bogus', { token });
+    } catch {
+      badStatus = true;
+    }
+    check('非法 status 被拒（422）', badStatus);
+
+    const visibleComments = await request('/admin/comments?status=visible&limit=100', { token });
+    check(
+      'status=visible 只返回可见行',
+      (visibleComments.list ?? []).every((c) => c.hidden === false),
+    );
+    const hiddenComments = await request('/admin/comments?status=hidden&limit=100', { token });
+    check(
+      'status=hidden 只返回已隐藏行',
+      (hiddenComments.list ?? []).every((c) => c.hidden === true),
+    );
+
+    let noToken = false;
+    try {
+      await request('/admin/comments');
+    } catch (e) {
+      noToken = e.message === '未登录或登录已过期';
+    }
+    check('无 token 访问 /admin/comments → 401', noToken);
+
+    // 15.2 自建演示评论（主 + 回复），走完整「隐藏 → 恢复」闭环
+    const demoRoot = await request(`/news/${DEMO_NEWS}/comments`, {
+      method: 'POST',
+      body: { content: '契约检查治理演示主评论' },
+      token,
+    });
+    const demoReply = await request(`/news/${DEMO_NEWS}/comments`, {
+      method: 'POST',
+      body: { content: '契约检查治理演示回复', parentId: demoRoot.id },
+      token,
+    });
+    check(
+      '演示主评论与回复创建成功（rootId 拍平到主评论）',
+      !!demoRoot.id && !!demoReply.id && demoReply.rootId === demoRoot.id,
+    );
+
+    const auditSnap = await request(`/admin/audit?target=${demoRoot.id}&limit=100`, { token });
+    const baseAuditId = auditSnap.list?.[0]?.id ?? 0;
+
+    // 隐藏前：公开可见、计数含演示主评论、公开输出不暴露隐藏字段
+    const pubBefore = await request(`/news/${DEMO_NEWS}/comments`, { token });
+    const rootBefore = (pubBefore.list ?? []).find((c) => c.id === demoRoot.id);
+    check(
+      '隐藏前主评论公开可见且带回复数',
+      !!rootBefore && (rootBefore.replyCount ?? 0) >= 1,
+      String(rootBefore?.replyCount),
+    );
+    check(
+      '隐藏前回复列表可见',
+      ((await request(`/news/${DEMO_NEWS}/comments/${demoRoot.id}/replies`, { token })).list ?? [])
+        .length === 1,
+    );
+    check(
+      '公开输出不暴露 hidden 字段（不该被读到"它被隐藏了"）',
+      !!rootBefore && !('hidden' in rootBefore) && !('hiddenReason' in rootBefore),
+    );
+
+    // 计数联动基线：隐藏 -1 / 恢复 +1（mock 的 POST 不动 commentCount，
+    // 真实后端 POST +1——两种口径下"相对基线"的断言都成立）
+    const newsBefore = await request(`/news/${DEMO_NEWS}`);
+    check('详情 commentCount 为数字', typeof newsBefore.commentCount === 'number');
+
+    // 15.3 理由必填（422 三态：纯空白 / 缺字段 / 超长）
+    let emptyReason = false;
+    try {
+      await request(`/admin/comments/${demoRoot.id}/hide`, {
+        method: 'POST',
+        token,
+        body: { reason: '   ' },
+      });
+    } catch {
+      emptyReason = true;
+    }
+    check('纯空白理由被拒（422）', emptyReason);
+
+    let noReason = false;
+    try {
+      await request(`/admin/comments/${demoRoot.id}/hide`, { method: 'POST', token, body: {} });
+    } catch {
+      noReason = true;
+    }
+    check('缺 reason 字段被拒（422）', noReason);
+
+    let tooLong = false;
+    try {
+      await request(`/admin/comments/${demoRoot.id}/hide`, {
+        method: 'POST',
+        token,
+        body: { reason: '长'.repeat(301) },
+      });
+    } catch {
+      tooLong = true;
+    }
+    check('超长理由被拒（422）', tooLong);
+
+    const hiddenRoot = await request(`/admin/comments/${demoRoot.id}/hide`, {
+      method: 'POST',
+      token,
+      body: { reason: '契约检查隐藏理由' },
+    });
+    check(
+      '隐藏成功：hidden=true 且带回填理由',
+      hiddenRoot.hidden === true && hiddenRoot.hiddenReason === '契约检查隐藏理由',
+    );
+
+    // 15.4 公开五路实时消失（过滤条件即时生效，无需等任何定时任务）
+    const pubAfter = await request(`/news/${DEMO_NEWS}/comments`, { token });
+    check('隐藏后主列表不出现', !(pubAfter.list ?? []).some((c) => c.id === demoRoot.id));
+    const repAfter = await request(`/news/${DEMO_NEWS}/comments/${demoRoot.id}/replies`, { token });
+    check('隐藏后回复列表为空（失去语境的回复不裸露）', (repAfter.list ?? []).length === 0);
+    const newsHidden = await request(`/news/${DEMO_NEWS}`);
+    check(
+      '隐藏后详情计数 -1',
+      newsHidden.commentCount === (newsBefore.commentCount ?? 0) - 1,
+      `${newsBefore.commentCount} → ${newsHidden.commentCount}`,
+    );
+    let likeGone = false;
+    try {
+      await request(`/news/${DEMO_NEWS}/comments/${demoRoot.id}`, {
+        method: 'PATCH',
+        body: { liked: true },
+        token,
+      });
+    } catch (e) {
+      likeGone = e.message === '评论不存在';
+    }
+    check('隐藏后点赞 40401（与不存在同文案）', likeGone);
+    let replyGone = false;
+    try {
+      await request(`/news/${DEMO_NEWS}/comments`, {
+        method: 'POST',
+        body: { content: '对已隐藏评论盖楼', parentId: demoRoot.id },
+        token,
+      });
+    } catch (e) {
+      replyGone = e.message === '回复的评论不存在';
+    }
+    check('隐藏后回复 40003', replyGone);
+
+    // 15.5 幂等 + 审计（id 窗口法）
+    const again = await request(`/admin/comments/${demoRoot.id}/hide`, {
+      method: 'POST',
+      token,
+      body: { reason: '第二个理由' },
+    });
+    check('重复隐藏不覆盖原理由', again.hiddenReason === '契约检查隐藏理由');
+
+    const auditHide = await request(`/admin/audit?target=${demoRoot.id}&limit=100`, { token });
+    const hides = (auditHide.list ?? []).filter(
+      (a) => a.action === 'comment.hide' && a.id > baseAuditId,
+    );
+    check('重复隐藏只记一条审计', hides.length === 1, `${hides.length} 条`);
+    check(
+      'hide 审计含理由/内容片段/资讯标题/作者名（运营认内容不认 id）',
+      hides[0]?.detail?.reason === '契约检查隐藏理由' &&
+        typeof hides[0]?.detail?.content === 'string' &&
+        typeof hides[0]?.detail?.newsTitle === 'string' &&
+        typeof hides[0]?.detail?.userName === 'string',
+      JSON.stringify(hides[0]?.detail ?? null),
+    );
+
+    // 15.6 恢复：清空理由/时间，公开五路实时回来
+    const restored = await request(`/admin/comments/${demoRoot.id}/restore`, {
+      method: 'POST',
+      token,
+    });
+    check(
+      '恢复后 hidden=false 且理由清空',
+      restored.hidden === false && restored.hiddenReason === null,
+    );
+    const pubBack = await request(`/news/${DEMO_NEWS}/comments`, { token });
+    check(
+      '恢复后主评论公开可见',
+      (pubBack.list ?? []).some((c) => c.id === demoRoot.id),
+    );
+    const repBack = await request(`/news/${DEMO_NEWS}/comments/${demoRoot.id}/replies`, { token });
+    check('恢复后回复列表回来', (repBack.list ?? []).length === 1);
+    const newsBack = await request(`/news/${DEMO_NEWS}`);
+    check(
+      '恢复后详情计数回基线',
+      newsBack.commentCount === newsBefore.commentCount,
+      `${newsHidden.commentCount} → ${newsBack.commentCount}`,
+    );
+
+    const restoredAgain = await request(`/admin/comments/${demoRoot.id}/restore`, {
+      method: 'POST',
+      token,
+    });
+    check('重复恢复不报错', restoredAgain.hidden === false);
+    const auditRestore = await request(`/admin/audit?target=${demoRoot.id}&limit=100`, { token });
+    check(
+      '恢复只记一条审计',
+      (auditRestore.list ?? []).filter((a) => a.action === 'comment.restore' && a.id > baseAuditId)
+        .length === 1,
+    );
+
+    // 15.7 管理端筛选：关键词 / 按资讯（驼峰）/ 蛇形被静默忽略
+    const kwPage = await request(
+      `/admin/comments?keyword=${encodeURIComponent('契约检查治理演示主评论')}`,
+      { token },
+    );
+    check(
+      '管理端关键词搜索命中演示评论',
+      (kwPage.list ?? []).some((c) => c.id === demoRoot.id),
+    );
+
+    const byNews = await request(`/admin/comments?newsId=${DEMO_NEWS}&limit=100`, { token });
+    check(
+      'newsId（驼峰）按资讯过滤命中',
+      (byNews.list ?? []).some((c) => c.id === demoRoot.id) &&
+        (byNews.list ?? []).every((c) => c.newsId === DEMO_NEWS),
+    );
+    // 多词查询参数驼峰约定（与 P1-18 respectRobots 同款缝）：蛇形不被 FastAPI
+    // 报错，只是**静默不过滤**——前后端各自单测都发现不了，只在契约层焊死
+    const noFilter = await request('/admin/comments?limit=1', { token });
+    const snake = await request(`/admin/comments?news_id=${DEMO_NEWS}&limit=100`, { token });
+    check(
+      '蛇形 news_id 被静默忽略（不过滤也不报错）',
+      snake.total === noFilter.total,
+      `蛇形 ${snake.total} vs 不过滤 ${noFilter.total}`,
+    );
+
+    // 15.8 40405：管理端视角的「不存在」与公开端 40401 刻意分开
+    let missingHide = false;
+    try {
+      await request('/admin/comments/__no_such_comment__/hide', {
+        method: 'POST',
+        token,
+        body: { reason: 'x' },
+      });
+    } catch (e) {
+      missingHide = e.message === '评论不存在或已删除';
+    }
+    check('隐藏未知评论 40405', missingHide);
+
+    let missingRestore = false;
+    try {
+      await request('/admin/comments/__no_such_comment__/restore', { method: 'POST', token });
+    } catch (e) {
+      missingRestore = e.message === '评论不存在或已删除';
+    }
+    check('恢复未知评论 40405', missingRestore);
+
+    const one = await request(`/admin/comments/${demoRoot.id}`, { token });
+    check(
+      '管理端详情与列表行同构（含资讯标题）',
+      one.id === demoRoot.id && typeof one.newsTitle === 'string' && 'hiddenReason' in one,
+      one.newsTitle,
+    );
+
+    // 15.9 游标分页：不重不漏（明文 id 游标；锚点找不到时静默忽略不报错，
+    //      与后端 db.get 未命中即跳过的口径一致——这里只验正常翻页）
+    const p1 = await request('/admin/comments?limit=2', { token });
+    check('第一页满页且有 nextCursor', (p1.list ?? []).length === 2 && !!p1.nextCursor);
+    if (p1.nextCursor) {
+      const p2 = await request(
+        `/admin/comments?limit=2&cursor=${encodeURIComponent(p1.nextCursor)}`,
+        { token },
+      );
+      const ids1 = (p1.list ?? []).map((c) => c.id);
+      const ids2 = (p2.list ?? []).map((c) => c.id);
+      check(
+        '游标翻页不重不漏',
+        ids2.length > 0 && ids2.every((id) => !ids1.includes(id)),
+        `第一页 ${ids1.length} / 第二页 ${ids2.length}`,
+      );
+    }
+
+    // 15.10 收尾：删除演示评论（作者侧），治理视图随之不再返回
+    await request(`/news/${DEMO_NEWS}/comments/${demoRoot.id}`, { method: 'DELETE', token });
+    await request(`/news/${DEMO_NEWS}/comments/${demoReply.id}`, { method: 'DELETE', token });
+    let goneAfterDelete = false;
+    try {
+      await request(`/admin/comments/${demoRoot.id}`, { token });
+    } catch {
+      goneAfterDelete = true;
+    }
+    check('删除后治理视图不再返回（40405）', goneAfterDelete);
   }
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);

@@ -246,6 +246,23 @@ class TestMigrationChain:
         names = {i["name"] for i in insp.get_indexes("news")}
         assert not any("hot_score_at" in n for n in names)
 
+    def test_comment_soft_hide_columns(self, chain_db):
+        """0022：评论软隐藏三列（P1-22）。
+
+        钉住两件容易在后续改动里悄悄丢掉的事：
+        - `hidden` 必须**非空且存量默认 false**——NULL 会在公开查询的过滤条件里
+          掉出结果集，表现为「老评论突然消失」，而功能测试走的是新建行，
+          根本看不出这类问题（与 0020 / 0018 同款教训）；
+        - **刻意不给 hidden 建索引**：隐藏集预期很小，与 is_deleted 同理。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("comments")}
+        assert {"hidden", "hidden_at", "hidden_reason"} <= cols
+        col = next(c for c in insp.get_columns("comments") if c["name"] == "hidden")
+        assert col["nullable"] is False
+        names = {i["name"] for i in insp.get_indexes("comments")}
+        assert not any("hidden" in n for n in names)
+
     def test_admin_audit_logs_table(self, chain_db):
         """0016：运营审计——权限回答「谁能进」，审计回答「谁干了什么」。"""
         insp = inspector_of(chain_db)

@@ -321,3 +321,58 @@ export interface NewsHideInput {
 export interface NewsTopInput {
   isTop: boolean;
 }
+
+/**
+ * 管理端评论行（P1-22，对应 GET /api/admin/comments 的条目）。
+ * 公开评论输出的超集：附隐藏三件套、所属资讯标题与作者名（治理认内容不认 id）。
+ * 与 AdminNewsItem 的关键差别：已软删除的评论**不会出现**在管理端列表里
+ * （删除是作者的不可逆行为，没有可恢复的状态）。
+ */
+export interface AdminCommentItem {
+  id: string;
+  newsId: string;
+  newsTitle: string;
+  userId: number | null;
+  userName: string;
+  content: string;
+  /** ISO 时间串；管理端排序依据（created_at DESC, id DESC） */
+  createdAt: string;
+  likes: number;
+  parentId: string | null;
+  rootId: string | null;
+  /** 主评论的**当前可见**回复数（已删除/已隐藏不计；回复行恒为 0） */
+  replyCount: number;
+  isDeleted: boolean;
+  /** 是否已被运营隐藏（软隐藏：公开四路实时过滤，可恢复） */
+  hidden: boolean;
+  hiddenAt: string | null;
+  /** 隐藏理由（必填，≤300 字）；恢复后为 null */
+  hiddenReason: string | null;
+}
+
+/** GET /api/admin/comments 的信封（筛选后的总数 + 游标分页） */
+export interface AdminCommentListResult {
+  list: AdminCommentItem[];
+  /** 当前筛选条件下的总条数（界面显示"共 N 条"） */
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+/** 管理端评论列表查询（不传的项后端用默认值） */
+export interface AdminCommentQuery {
+  /** all（默认，含已隐藏）| visible | hidden */
+  status?: 'all' | 'visible' | 'hidden';
+  /** 评论内容关键词（服务端 ILIKE） */
+  keyword?: string;
+  /** 按所属资讯过滤 */
+  newsId?: string;
+  limit?: number;
+  /** 上一页末条的 id（服务端下发，客户端不解析） */
+  cursor?: string | null;
+}
+
+/** 隐藏入参：理由必填（trim 后 ≤300，空则 422）——与 NewsHideInput 同一处方 */
+export interface CommentHideInput {
+  reason: string;
+}
