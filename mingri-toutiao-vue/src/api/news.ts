@@ -13,6 +13,8 @@ export function normalizeNewsItem(raw: Record<string, unknown>): NewsItem {
     id: String(r.id ?? r.newsId ?? ''),
     title: String(r.title ?? ''),
     summary: (r.summary ?? r.digest ?? undefined) as string | undefined,
+    // E1：正文只由详情接口下发；列表响应没有该字段即 undefined
+    content: (r.content ?? undefined) as string | undefined,
     source: String(r.source ?? r.mediaName ?? ''),
     commentCount: Number(r.commentCount ?? r.comment_count ?? 0),
     time: String(r.time ?? r.publishTime ?? ''),

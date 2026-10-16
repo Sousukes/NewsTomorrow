@@ -225,6 +225,34 @@ class TestNews:
         assert r.status_code == 404
         assert r.json()["code"] == 40400
 
+    def test_list_omits_content(self, client):
+        """E1：列表接口不带正文（一页 20 条几 KB 是纯浪费），只有详情返回。"""
+        d = client.get("/api/news").json()["data"]
+        assert d["list"], "列表不应为空"
+        assert all("content" not in n for n in d["list"])
+
+    def test_detail_returns_content(self, client):
+        """E1：详情返回真实正文；按段落以 \n 分隔。"""
+        from app.database import SessionLocal
+        from app.models import News
+
+        with SessionLocal() as db:
+            if db.get(News, "t_body") is None:
+                db.add(News(
+                    id="t_body", title="有正文的资讯", summary="摘要", source="测试源",
+                    comment_count=0, time="1小时前", channel="hot", variant="text",
+                    content="第一段内容。\n第二段内容。",
+                ))
+                db.commit()
+        d = client.get("/api/news/t_body").json()["data"]
+        assert d["content"] == "第一段内容。\n第二段内容。"
+
+    def test_detail_content_null_when_absent(self, client):
+        """E1：老数据/源没给正文时如实返回 null——前端显示「暂无正文」，
+        而不是回退到写死的占位文案（那是本批次要堵死的行为）。"""
+        d = client.get("/api/news/t1").json()["data"]
+        assert d["content"] is None
+
     def test_search_by_title(self, client):
         d = client.get("/api/news/search?q=蓝色预警").json()["data"]
         assert d["total"] >= 1

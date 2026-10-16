@@ -396,6 +396,7 @@ def upsert_news(db: Session, items: list[RawItem]) -> FetchReport:
                     id=it.id,
                     title=it.title,
                     summary=it.summary,
+                    content=it.content or None,
                     source=it.source,
                     comment_count=0,
                     time=it.time_text or "刚刚",
@@ -414,6 +415,10 @@ def upsert_news(db: Session, items: list[RawItem]) -> FetchReport:
             # 增量：只刷新易变字段，保留已积累的互动数据
             row.title = it.title
             row.summary = it.summary
+            # E1：正文同样可能被源修订（纠错/更新），非空即刷新；
+            # 为空则保留旧正文——某轮抓到无正文的条目不该把已有正文抹掉。
+            if it.content:
+                row.content = it.content
             row.source = it.source
             if it.time_text:
                 row.time = it.time_text

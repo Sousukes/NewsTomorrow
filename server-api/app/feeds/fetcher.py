@@ -35,6 +35,8 @@ class RawItem:
     id: str
     title: str
     summary: str = ""
+    # 正文：去标签后按段落以 \n 分隔（E1）。空串 = 该源没给正文
+    content: str = ""
     source: str = ""
     time_text: str = ""
     published_at: datetime | None = None
@@ -46,6 +48,14 @@ class RawItem:
     is_top: bool = False
 
 
+# 正文长度上限：详情页一屏读得完的量级，也防异常源把库撑爆（E1）
+CONTENT_MAX_CHARS = 8000
+
+# 块级结束标签 / <br> → 换行：正文保留段落结构的依据（E1）
+_BLOCK_END_RE = re.compile(r"</\s*(?:p|div|h[1-6]|li|tr|blockquote|section|article|ul|ol|table)\s*>", re.I)
+_BR_RE = re.compile(r"<br\s*/?>", re.I)
+
+
 def _clean(text: str | None) -> str:
     """去标签、解实体、压缩空白。"""
     if not text:
@@ -53,6 +63,45 @@ def _clean(text: str | None) -> str:
     t = _TAG_RE.sub(" ", text)
     t = html.unescape(t)
     return _WS_RE.sub(" ", t).strip()
+
+
+def _clean_paragraphs(text: str | None) -> str:
+    """正文清洗：**保留段落**（块级标签与 <br> → 换行），段内压空白。
+
+    与 `_clean()` 的分工：后者把整段压成一行，只适合摘要；正文几千字
+    糊成一段没法读，所以段间换行必须活过清洗。段落是前端分段的依据
+    （`NewsDetail.vue` 按 \\n 切 `<p>`），不需要前端再猜 `<p>` 标签。
+    """
+    if not text:
+        return ""
+    t = _BLOCK_END_RE.sub("\n", text)
+    t = _BR_RE.sub("\n", t)
+    t = _TAG_RE.sub(" ", t)
+    t = html.unescape(t)
+    # 先按行切开再压空白：_WS_RE 含 \n，直接整串替换会把段落也熔掉
+    lines = [_WS_RE.sub(" ", seg).strip() for seg in t.split("\n")]
+    return "\n".join(seg for seg in lines if seg)
+
+
+def _truncate_paragraphs(text: str, limit: int = CONTENT_MAX_CHARS) -> str:
+    """按**段落边界**截断：宁可少一段，不在句子中间砍断。
+
+    单段本身就超限时退化为硬截断（几千字无换行的源确实存在），
+    保证「一定有内容」且「一定不超限」。
+    """
+    if len(text) <= limit:
+        return text
+    kept: list[str] = []
+    used = 0
+    for para in text.split("\n"):
+        cost = len(para) + (1 if kept else 0)
+        if used + cost > limit:
+            break
+        kept.append(para)
+        used += cost
+    if not kept:
+        return text[:limit]
+    return "\n".join(kept)
 
 
 def _first_text(node: ET.Element, *paths: str) -> str:
@@ -169,14 +218,22 @@ def parse_feed(xml_text: str, source: dict) -> list[RawItem]:
             it, "pubDate", "{http://purl.org/dc/elements/1.1/}date", "{http://www.w3.org/2005/Atom}published"
         )
         published = _parse_time(time_raw)
-        images = _extract_images(desc_raw, _first_text(it, "{http://purl.org/rss/1.0/modules/content/}encoded"))
-        has_video = bool(re.search(r"\.mp4|\.m3u8", desc_raw or "", re.I))
+        # 正文：RSS 取 content:encoded、Atom 取 content（E1）。
+        # 都没有时回退 description——很多源只给摘要字段，但那也是真实文本，
+        # 比让详情页显示「暂无正文」更有信息量；占位文案那条路已经堵死。
+        content_raw = _first_text(
+            it, "{http://purl.org/rss/1.0/modules/content/}encoded", "{http://www.w3.org/2005/Atom}content"
+        )
+        content = _truncate_paragraphs(_clean_paragraphs(content_raw) or _clean_paragraphs(desc_raw))
+        images = _extract_images(desc_raw, content_raw)
+        has_video = bool(re.search(r"\.mp4|\.m3u8", (desc_raw or "") + (content_raw or ""), re.I))
 
         out.append(
             RawItem(
                 id=_stable_id(link, title),
                 title=title[:255],
                 summary=summary,
+                content=content,
                 source=source["name"],
                 time_text=_to_relative_time(published),
                 published_at=published,

@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **480** 项，覆盖：
+- **单元测试**：Vitest 共 **484** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -157,6 +157,10 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     而非整段替换**（点一次只能看到最后一页的旧行为已回归锁定）；追加按 id 去重；
     **`hasMore=false` 不出按钮**（终止条件改用服务端 `hasMore`，不再用
     `results.length >= total`——两者不是同一个量）；**换关键词回到第一页且不叠加旧结果**
+  - `views/NewsDetail`（4，E1）：**按段落渲染真实正文**（后端以 `\n` 分隔下发）；
+    无正文显示「暂无正文」且**不渲染任何占位文案**（修复前三段「据相关方面介绍……」
+    是前端写死的假正文——界面假装有内容）；空串正文同样走空态（trim 后无段落）；
+    标题/来源/评论数等既有信息不受正文改动影响
   - `components/AppNav`（3，P1-27）：**图标不出现任何硬编码色值**（`#222` / `#9a9fa8`
     在深色模式下与 `--color-card-bg` 几乎同色 = 图标消失）、描边与填充一律
     `currentColor`（颜色由容器 CSS 变量给）、品牌变体不渲染图标
@@ -485,7 +489,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **开关**（`.env`）：`VITE_API_BASE=https://api.example.com` 指向真实后端；`VITE_USE_MOCK=true` 可强制 mock。
 - **`http.ts`**：统一 `fetch` 客户端——自动注入 `Authorization: Bearer <token>`、约定后端返回 `{ code, message?, data }`（`code` 0/200 为成功）、token 持久化（`getToken`/`setToken`）、`ApiError`。
-- **`news.ts`**：`fetchNewsPage` / `fetchNews` / `fetchNewsById` / `searchNews` / `fetchRelated`（`GET /news/search`、`GET /news/:id/related`）→ `NewsItem`，含后端字段归一化（`normalizeNewsItem` 对外导出，供 `api/me` 复用）。
+- **`news.ts`**：`fetchNewsPage` / `fetchNews` / `fetchNewsById` / `searchNews` / `fetchRelated`（`GET /news/search`、`GET /news/:id/related`）→ `NewsItem`，含后端字段归一化（`normalizeNewsItem` 对外导出，供 `api/me` 复用）。**`content`（正文）只由 `GET /news/:id` 下发**（E1）：列表一页 20 条，每条几 KB 是纯浪费；归一化对该字段是可选字符串，详情页按 `\n` 切段渲染，缺省显示「暂无正文」。
 - **`comments.ts`**：`listCommentsPage` / `listComments` / `listRepliesPage` / `createComment`（`parentId` 非空时为回复）/ `setCommentLike` / `deleteComment` → `GET/POST/PATCH/DELETE /news/:id/comments` 与 `GET /news/:id/comments/:cid/replies`（回复列表，时间正序游标分页；root 已删返回空）。
 - **`messages.ts`**：`fetchMessagesPage` / `fetchMessages` / `fetchUnreadCount` / `markMessageRead` / `markAllMessagesRead` → `GET /messages`、`GET /messages/unread-count`、`PATCH /messages/{id}`（**需登录**，不可见/不存在同码 40400）、`POST /messages/read-all`。
 - **`me.ts`**：`fetchFavorites` / `addFavorite` / `removeFavorite` / `mergeFavorites` / `fetchHistory` / `recordHistory` / `clearHistoryRemote` / `mergeHistory` → `/me/favorites`、`/me/history`。所有写操作返回**完整集合** `{ ids, list }`（服务端即事实源）；导出 `MARKS_SYNC_SUPPORTED`，mock 模式下为 `false`，store 据此跳过同步请求。
@@ -652,7 +656,7 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **工程基建**：ESLint + Prettier + `npm run verify` + GitHub Actions CI
 - [x] 全局错误边界（`ErrorBoundary` + `app.config.errorHandler`），消除白屏
 - [x] **无限滚动**：`useInfiniteList` + store `loadMore`（去重/并发幂等/末页判定）+ 骨架屏与底部状态
-- [x] **单元测试**：Vitest 480 项（前端）+ pytest 594 项（后端），已接入 CI
+- [x] **单元测试**：Vitest 484 项（前端）+ pytest 611 项（后端），已接入 CI
 - [x] API 层：`api/`（news / comments / auth + http 客户端，token 注入、`{code,data}` 解包），未配后端自动走 mock
 - [x] store 全面接 API（news/comments 离线优先 + 后台同步；user 增 token 与 login/logout）
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放

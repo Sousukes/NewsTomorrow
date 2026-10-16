@@ -156,7 +156,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | POST | `/api/auth/login` | — | 登录，成功返回 `{ token, user }`；`user` 含 `isAdmin`（布尔值，按 `ADMIN_PHONES` ∪ `admin_users` 表白名单判定后下发，前端据此决定是否展示管理入口，**不下发白名单本身**） |
 | POST | `/api/auth/logout` | ✅ | 退出（无状态 JWT，前端清本地 token） |
 | GET | `/api/news?channel=&sort=&page=&pageSize=&cursor=` | — | 资讯列表。**推荐游标分页**：传 `cursor` 走 keyset，返回 `{ list, nextCursor, hasMore }`；不传则 offset 分页并附 `total`。`sort` 取 `latest`（默认）/ `hot` / `for-you`（见「排序与个性化」），非法值 422 |
-| GET | `/api/news/{id}` | — | 资讯详情 |
+| GET | `/api/news/{id}` | — | 资讯详情。比列表多返回 `content`（正文，按段落以 `\n` 分隔；无正文为 `null`，前端显示「暂无正文」而非占位文案）——**列表接口刻意不带正文**，见「资讯正文（E1）」 |
 | GET | `/api/news/{id}/comments?limit=&cursor=` | —（可选带token） | **主评论**列表（`root_id IS NULL`，游标分页，**新的在前**）；每条附 `replyCount` 与最早 2 条回复预览；带 token 时 `liked` 按当前用户计算 |
 | GET | `/api/news/{id}/comments/{cid}/replies?limit=&cursor=` | —（可选带token） | 某条主评论的**回复**列表（时间**正序**，游标分页；root 已软删除时返回空列表——主评论消失后失去语境的回复不再裸露） |
 | POST | `/api/news/{id}/comments` | ✅ | 发表评论；带 `parentId` 时为**回复**（被回复评论须存在且未删除，否则 40003；回复的回复拍平到同一 root，`parentId` 仅用于展示「回复 @谁」） |
@@ -652,6 +652,8 @@ alembic check                       # 检测 models 与迁移是否漂移
   命中日志 `nickname_hits`（记 `matched` 实际命中模式）；`users` 增 `name_pending_review`
   （非空 `server_default=false`，**不建索引**——待复核集小，避免拖慢每次昵称写入）/
   `name_reviewed_at`）。
+  `0025_news_content`（资讯正文 `news.content`，Text **可空**——NULL 即「暂无正文」，
+  详情接口据此如实返回 null；**不建索引**：只按 id 点查，无按正文检索需求）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -1092,10 +1094,37 @@ emoji/符号（So）拒绝。**顺序刻意是「字符集先于长度」**—�
 审计动作：`nicknameWord.create` / `nicknameWord.update` / `nicknameWord.delete` /
 `nicknameWord.reload` / `nickname.review`。
 
+## 资讯正文（E1）
+
+> 迁移 `0025_news_content`（`news.content`，Text 可空）；抓取侧 `app/feeds/fetcher.py`；
+> 详情接口 `GET /api/news/{id}` 多返回 `content`。
+
+**要解决的问题**：详情页此前展示的是前端写死的占位文案（三段「据相关方面介绍……」），
+而 RSS 的 `content:encoded` 早在 fetcher 里就被读取——只用来提图，**正文本身被丢弃**。
+用户点进任何一条资讯看到的都是同一段假文本，这是产品可信度问题：界面在假装有内容。
+
+### 数据流
+
+1. **抓取**：`parse_feed` 优先取 RSS `content:encoded` / Atom `content`，缺失回退
+   `description`（很多源只给摘要字段，但那也是真实文本，比「暂无正文」更有信息量）；
+2. **清洗**：`_clean_paragraphs` 去标签、解实体、**保留段落**（块级标签与 `<br>` → 换行），
+   段内压空白——与 `_clean`（压成一行，只适合摘要）刻意分工；
+3. **截断**：`_truncate_paragraphs` 按**段落边界**截到 8000 字符（宁可少一段，
+   不在句子中间砍断；单段即超限时退化为硬截断，防几千字无换行的源把库撑爆）；
+4. **入库**：`upsert_news` 新增时写 `content`，增量刷新时**非空才覆盖**
+   （某轮抓到无正文的条目不该把已有正文抹掉）；空正文落 `NULL` 而非空串；
+5. **下发**：`to_out`（列表/搜索/相关推荐）**刻意不含** `content`——一页 20 条
+   几 KB 一条是纯浪费；只有详情接口单独返回，无正文为 `null`。
+
+### 前端
+
+`NewsDetail.vue` 按 `\n` 切段渲染 `<p>`；无正文时显示「暂无正文」——
+**占位文案那条路已经堵死**（spec 里有不断言回归）。
+
 ## 单元测试
 
 ```bash
-pytest -q          # 594 项
+pytest -q          # 611 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -1103,7 +1132,7 @@ pytest -q          # 594 项
 > 谁的 import 先发生谁说话——全套跑与单文件跑结果不一致（曾出现整类用例时绿时红）。
 > 用**赋值**而非 `setdefault`，确保开发者本机 `.env`（如指向 PostgreSQL）不会渗进测试。
 
-- `tests/test_units.py`（25 项）：限流器（阈值/隔离/窗口过期）、PBKDF2 密码哈希与加盐、JWT 往返、RSS 解析与字段映射（RSS 2.0 / Atom / 图片提取 / 变体判定 / 稳定 id / 相对时间）。
+- `tests/test_units.py`（34 项）：限流器（阈值/隔离/窗口过期）、PBKDF2 密码哈希与加盐、JWT 往返、RSS 解析与字段映射（RSS 2.0 / Atom / 图片提取 / 变体判定 / 稳定 id / 相对时间）、**正文提取与清洗**（E1：`content:encoded` 优先/回退 description/去标签保段落/按段落边界截断/单段硬截断/空源回空串）。
 - `tests/test_hardening.py`（14 项）：受信代理 IP 解析（XFF 采信/忽略/回退）、分页游标编解码与非法输入、**schema 单轨守卫**（缺表时抛错且**不就地建表**、`init_db` 源码不含 `create_all`）。
 - `tests/test_fetch_governance.py`（53 项）：**抓取链路治理**（P1-16 + P1-17 + P1-18）——分组（保持权重序 /
   异站分组 / 最小间隔判定）、并发与合并顺序（**高权重源在重复稿件上胜出**、
@@ -1153,15 +1182,16 @@ pytest -q          # 594 项
   隐藏回复不进 `replyCount` 与预览、回复已隐藏 40003、点赞已隐藏 40401、
   公开输出无 hidden 字段）、审计（hide 带 reason/content 截断/newsTitle/userName
   且 target 可查、restore 留痕）。
-- `tests/test_migrations.py`（21 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+- `tests/test_migrations.py`（22 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
   与 `ix_news_hot`、`rss_sources` 的列与主键（含 0017 的 `respect_robots` **非空**与
   `last_alerted_at`、0018 的 `consecutive_failures` **非空**与 `failure_kind` / `next_retry_at`）、
   `rss_source_health_events` 的列与 `item_count` 非空、复合索引 `ix_rss_health_key_at`
   与外键（0019）、`news` 软下架三列且 `hidden` **非空**、**不含 hidden 的索引**（0020，
-  刻意不建）、`comments` 软隐藏三列且 `hidden` **非空且存量默认 false**、
-  **不含 hidden 的索引**（0022，与 `is_deleted` 同理）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
+  刻意不建）、  `comments` 软隐藏三列且 `hidden` **非空且存量默认 false**、
+  **不含 hidden 的索引**（0022，与 `is_deleted` 同理）、`news.content`（0025，E1：
+  **可空**即「暂无正文」，且**无索引**——只按 id 点查）。`TestCommentLikesBackfill`（2 项）专测 0014 回填：
   秒级时间戳下**同一条评论同一用户重复点赞只留一行**、悬空/非整数 user_id 被跳过、
   删除列后计数对齐、`downgrade` 可还原 `liked_by`。⚠️ 必须在**子进程**中执行（见文件头说明）：
   `migrations/env.py` 读的是 `app.config.DATABASE_URL`，**不会**读 alembic Config 的
@@ -1170,10 +1200,12 @@ pytest -q          # 594 项
   源增删/重置留痕、更新只记变化字段（无变化不留痕）、删除快照在删前取、
   管理员增删留痕且顺序为「移除在前」、时间线倒序、游标分页无重复无遗漏、
   `target` 过滤、非法游标 40003、审计与业务同事务。
-- `tests/test_sources.py`（52 项）：**RSS 源可配置化**——播种只在空表时发生（不覆盖运营配置）、
+- `tests/test_sources.py`（56 项）：**RSS 源可配置化**——播种只在空表时发生（不覆盖运营配置）、
   内置源含 `aihot_picks`、按权重降序、频道无专属源时回退全部、无库会话回退内置源；
   健康状态回写（成功 / 失败 / 错误截断 / 未知 key 静默）；
   **抓取健壮性**（坏源不拖垮好源、真实不可达地址记为 `ok=False` 且带原因、显式传入的源去重并按权重降序）；
+  **正文入库**（`TestUpsertContent`，4 项，E1）：落库保留段落换行、增量刷新跟上源修订、
+  **空正文不抹掉已有正文**、无正文落 `NULL`（详情接口据此返回 null）；
   **robots 开关端到端**（`respectRobots` 经 POST/PATCH 真的落库、不传即默认遵守、
   抓取侧 `_to_dict` 的蛇形键同步——**这条是字段名对齐的回归防线**）；
   管理接口（未登录 401 / 非管理员 403 / 白名单为空整体关闭 / 列表 / 新增 / **重复 key 40902** /
@@ -1187,7 +1219,7 @@ pytest -q          # 594 项
   **库白名单（非 env）号码同样下发 true**；
   **入参校验**（4 项）——未知频道 422（`errors[0].loc[-1] == 'channel'`）、`key` 格式非法 422、
   更新时同样校验频道。
-- `tests/test_api.py`（96 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
+- `tests/test_api.py`（99 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
   `userId`、`mine` 仅作者为 true、历史评论 `userId` 为 null 且任何人都不是作者；
   **评论删除**（`TestCommentDelete`）——作者可删、他人 403、未登录 401、
   无归属评论不可删、幂等、删后不可点赞、跨文章 404；
@@ -1197,7 +1229,9 @@ pytest -q          # 594 项
   **P1-26 回复预览下推**（3 项）——`row_number` 的 `rn <= N` 过滤**必须出现在执行的 SQL 里**
   （回退成 Python 侧截断即失败）、30 条回复时预览仍是**最早 2 条**且 `replyCount` 计全部、
   预览与计数同口径**跳过已删除与已隐藏**；
-  **点赞关系表**（`TestCommentLikesTable`，3 项）——关系行增删、复合主键防重、`liked` 按用户区分。
+  **点赞关系表**（`TestCommentLikesTable`，3 项）——关系行增删、复合主键防重、`liked` 按用户区分；
+  **正文下发**（E1，3 项）——列表响应**不含** `content`、详情返回按段落 `\n` 分隔的真实正文、
+  无正文时 `content` 为 `null`（详情页据此显示「暂无正文」而非占位文案）。
 - `tests/test_feeds.py`（7 项）：RSS 解析 / 条件请求（304 / 条件头 / 不重试）/ 增量入库 / 时效清理（未知时间优先、keep_min 下限、子表清理）。
 - `tests/test_search_stats.py`（21 项）：**搜索词统计**——记录与空白词忽略、**同用户同词 60s 内去重（防刷）**、窗口过后重新计数、不同用户不去重、未登录无去重窗口、超长词截断、按次数倒序、同次数按词升序（顺序稳定）、**窗口外的旧搜索不计入**、limit 生效、清理保留期内数据、接口契约与越界 422、搜索即记录、已登录去重。
 - `tests/test_ranking.py`（34 项）：**排序与个性化**——热度纯函数（互动越多分越高、

@@ -291,6 +291,22 @@ class TestMigrationChain:
             i["name"] for i in insp.get_indexes("admin_users")
         }
 
+    def test_news_content_column(self, chain_db):
+        """0025（E1）：正文列——详情页不再展示前端写死的占位文案。
+
+        钉住两个设计选择：
+        - **可空**：存量行与无正文源没有正文，NULL 即「暂无正文」，
+          详情接口据此如实返回 null，而不是回退假文案；
+        - **无索引**：正文只按 id 点查，没有按正文检索的需求。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("news")}
+        assert "content" in cols
+        col = next(c for c in insp.get_columns("news") if c["name"] == "content")
+        assert col["nullable"] is True
+        names = {i["name"] for i in insp.get_indexes("news")}
+        assert not any("content" in n for n in names)
+
     def test_downgrade_to_base_drops_tables(self, chain_db):
         """回滚到 base 后表应被清除（确保 downgrade 可用、非空操作）。"""
         run_alembic(chain_db, "downgrade", "base")

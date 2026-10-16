@@ -48,6 +48,8 @@ function normalize(raw) {
     id: String(raw.id ?? raw.newsId ?? ''),
     title: String(raw.title ?? ''),
     summary: raw.summary ?? raw.digest ?? undefined,
+    // E1：正文只由 GET /news/:id 详情下发，按段落 \n 分隔
+    content: raw.content ?? undefined,
     source: String(raw.source ?? raw.mediaName ?? ''),
     commentCount: Number(raw.commentCount ?? raw.comment_count ?? 0),
     time: String(raw.time ?? raw.publishTime ?? ''),
@@ -86,10 +88,22 @@ const run = async () => {
     items[0]?.variant,
   );
   check('commentCount 为数字', typeof items[0]?.commentCount === 'number');
+  // E1：正文只在详情下发——列表带正文会让一页 20 条多出几十 KB 无效带宽
+  check(
+    '列表响应不带正文（content 仅详情返回）',
+    (listData.list ?? []).every((n) => n.content === undefined),
+  );
 
   // 2) 资讯详情
   const detail = normalize(await request(`/news/${items[0].id}`));
   check('GET /news/:id 详情', detail.id === items[0].id);
+  // E1：正文字段必须是 string 或 null/undefined（无正文的老数据与没给的源），
+  // 其他类型（数字/对象）说明前后端契约漂移
+  check(
+    '详情 content 为字符串或为空',
+    detail.content == null || typeof detail.content === 'string',
+    detail.content == null ? '无正文' : `${String(detail.content).length} 字符`,
+  );
 
   // 2.1) 排序三模式：sort 取值必须与前端 constants/sort.ts 一致（漂移会 422）
   const hotList = await request('/news?sort=hot&pageSize=3');

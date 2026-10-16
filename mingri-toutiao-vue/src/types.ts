@@ -10,6 +10,11 @@ export interface NewsItem {
   title: string;
   /** 摘要，对应 GET /news 的 summary 字段；左文右图 / 纯文字 / 视频 变体展示 */
   summary?: string;
+  /**
+   * 正文（E1）：仅 GET /news/:id 详情返回，按段落以 \n 分隔。
+   * 列表接口刻意不带（几 KB 一条，避免带宽浪费）；null/undefined = 暂无正文。
+   */
+  content?: string;
   source: string;
   commentCount?: number;
   time: string;

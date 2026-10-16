@@ -24,11 +24,17 @@ const author = computed<Author | undefined>(() =>
   item.value ? { name: item.value.source, time: item.value.time } : undefined,
 );
 
-const body = [
-  '据相关方面介绍，本次进展是在前期扎实工作的基础上取得的，体现了系统性的统筹部署与稳步推进。各方围绕关键环节持续发力，形成了可复制、可推广的经验和做法。',
-  '业内专家认为，这一变化不仅有助于提升整体运行效率，也为后续深化改革创造了良好条件。下一步，相关单位将继续细化实施方案，确保各项举措落地见效。',
-  '与此同时，公众关注的配套服务也在同步完善，多渠道的信息公开与答疑机制正在建立，以便让更多人及时、准确地了解最新动态。',
-];
+/**
+ * 正文段落（E1）：后端按段落以 \n 分隔下发，这里切段渲染。
+ * 没有正文时返回空数组——显示「暂无正文」，**不再有写死的占位文案**：
+ * 界面假装有内容比承认没有内容更伤信任。
+ */
+const paragraphs = computed(() =>
+  (item.value?.content ?? '')
+    .split('\n')
+    .map((p) => p.trim())
+    .filter(Boolean),
+);
 
 /** 视频变体且有真实地址时可播放 */
 const hasVideo = computed(
@@ -116,7 +122,11 @@ function onFavorite() {
         </div>
       </div>
 
-      <p v-for="(p, i) in body" :key="i" class="detail__para">{{ p }}</p>
+      <!-- E1：真实正文按段渲染；源未提供正文时显式说明，不用占位文案冒充 -->
+      <template v-if="paragraphs.length">
+        <p v-for="(p, i) in paragraphs" :key="i" class="detail__para">{{ p }}</p>
+      </template>
+      <p v-else class="detail__para detail__para--empty">暂无正文</p>
 
       <!-- 相关推荐：给详情页一个出口，避免读完后即离开 -->
       <section v-if="related.length" class="detail__related">
@@ -260,6 +270,14 @@ function onFavorite() {
   font-size: 16px;
   line-height: 1.8;
   color: var(--color-text-primary);
+}
+
+/* E1：暂无正文——弱化的说明文案，不伪装成内容 */
+.detail__para--empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-text-secondary);
 }
 
 .detail__related {

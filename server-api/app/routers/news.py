@@ -486,4 +486,8 @@ def news_detail(news_id: str, db: Session = Depends(get_db)):
     item = db.get(News, news_id)
     if item is None or item.hidden:
         raise HTTPException(status_code=404, detail={"code": 40400, "message": "内容不存在或已下架"})
-    return ok(to_out(item))
+    # E1：正文只在详情返回（列表 to_out 刻意不带——一页 20 条几十 KB 无效带宽）。
+    # 无正文（老数据/源没给）返回 null，前端显示「暂无正文」而非占位文案。
+    out = to_out(item)
+    out["content"] = item.content or None
+    return ok(out)

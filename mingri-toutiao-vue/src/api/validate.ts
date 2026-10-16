@@ -60,6 +60,8 @@ export function validateNewsItem(raw: unknown): ValidationIssue[] {
   requireString(raw, 'id', out);
   requireString(raw, 'title', out);
   optionalString(raw, 'summary', out);
+  // E1：正文（详情接口下发，按段落 \n 分隔）
+  optionalString(raw, 'content', out);
   optionalString(raw, 'source', out);
   optionalString(raw, 'time', out);
   optionalString(raw, 'cover', out);

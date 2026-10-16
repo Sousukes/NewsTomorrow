@@ -9,11 +9,14 @@ import time
 import pytest
 
 from app.feeds.fetcher import (
+    CONTENT_MAX_CHARS,
     _clean,
+    _clean_paragraphs,
     _extract_images,
     _pick_variant,
     _stable_id,
     _to_relative_time,
+    _truncate_paragraphs,
     parse_feed,
 )
 from app.ratelimit import FixedWindowLimiter
@@ -124,6 +127,21 @@ ATOM_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 </feed>
 """
 
+# E1：带正文的 RSS（content:encoded 与 description 同时存在，正文应优先取全文）
+RSS_CONTENT_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+  <title>示例源</title>
+  <item>
+    <title>带正文的资讯</title>
+    <link>http://example.com/c.html</link>
+    <description>&lt;p&gt;摘要一段&lt;/p&gt;</description>
+    <content:encoded><![CDATA[<p>第一段：开局一段话。</p><p>第二段：承接展开。</p><div>第三段：收尾。</div>]]></content:encoded>
+    <pubDate>Mon, 07 Oct 2026 10:00:00 +0800</pubDate>
+  </item>
+</channel></rss>
+"""
+
 
 class TestFetcher:
     def test_parse_rss_items(self):
@@ -172,10 +190,71 @@ class TestFetcher:
         assert _stable_id("http://x", "标题") != _stable_id("http://y", "标题")
 
 
+class TestContentExtraction:
+    """E1：正文提取（此前 content:encoded 只被用来提图，正文本身被丢弃）。"""
+
+    def test_content_extracted_from_content_encoded(self):
+        items = parse_feed(RSS_CONTENT_SAMPLE, {"name": "s", "channel": "hot"})
+        assert items[0].content == "第一段：开局一段话。\n第二段：承接展开。\n第三段：收尾。"
+
+    def test_content_strips_tags_and_keeps_paragraphs(self):
+        items = parse_feed(RSS_CONTENT_SAMPLE, {"name": "s", "channel": "hot"})
+        assert "<p>" not in items[0].content
+        assert items[0].content.count("\n") == 2  # 三段 → 两个换行
+
+    def test_summary_and_content_are_independent(self):
+        """摘要仍取 description 截断 300；正文取全文——两者互不覆盖。"""
+        items = parse_feed(RSS_CONTENT_SAMPLE, {"name": "s", "channel": "hot"})
+        assert items[0].summary == "摘要一段"
+        assert items[0].content.startswith("第一段")
+
+    def test_content_falls_back_to_description(self):
+        """无 content:encoded 时回退 description：那也是真实文本，不是占位文案。"""
+        items = parse_feed(RSS_SAMPLE, {"name": "s", "channel": "hot"})
+        assert items[0].content == "正文"
+
+    def test_content_empty_when_source_gives_nothing(self):
+        bad = "<rss><channel><item><title>只有标题</title><link>x</link></item></channel></rss>"
+        items = parse_feed(bad, {"name": "s", "channel": "hot"})
+        assert items[0].content == ""
+
+    def test_content_truncated_at_paragraph_boundary(self):
+        """超长正文按段落边界截断：不超限、不把半段留在结尾。"""
+        paras = "".join(f"<p>第{i}段：{'内容' * 300}。</p>" for i in range(30))
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+            "<channel><item><title>长文</title><link>http://x/long</link>"
+            f"<content:encoded><![CDATA[{paras}]]></content:encoded>"
+            "</item></channel></rss>"
+        )
+        items = parse_feed(xml, {"name": "s", "channel": "hot"})
+        content = items[0].content
+        assert len(content) <= CONTENT_MAX_CHARS
+        # 每一段都完整（以「。」结尾），没有句子中间砍断的残段
+        assert all(p.endswith("。") for p in content.split("\n"))
+        assert content.count("\n") < 29
+
+    def test_single_oversized_paragraph_hard_truncated(self):
+        """无换行的几千字段落：退化为硬截断，保证不超限。"""
+        big = "字" * (CONTENT_MAX_CHARS + 5000)
+        out = _truncate_paragraphs(big)
+        assert len(out) == CONTENT_MAX_CHARS
+
+    def test_truncate_keeps_text_within_limit(self):
+        assert _truncate_paragraphs("短文本") == "短文本"
+
+
 class TestHelpers:
     def test_clean(self):
         assert _clean("<b>加粗</b>&nbsp;文本") == "加粗 文本"
         assert _clean(None) == ""
+
+    def test_clean_paragraphs_keeps_structure(self):
+        """正文清洗：块级标签/br → 换行，空段丢弃，段内压空白（E1）。"""
+        text = "<p>第一段</p><br/><p>第二&nbsp;段</p><p></p><p>  第三段  </p>"
+        assert _clean_paragraphs(text) == "第一段\n第二 段\n第三段"
+        assert _clean_paragraphs(None) == ""
 
     def test_extract_images_caps_at_three(self):
         blob = "".join(f'<img src="http://c.com/{i}.jpg"/>' for i in range(5))

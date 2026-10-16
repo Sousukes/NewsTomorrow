@@ -30,7 +30,7 @@ from app.feeds import ingest as ingest_mod  # noqa: E402
 from app.feeds import sources as src_mod  # noqa: E402
 from app.feeds.fetcher import FetchError, RawItem  # noqa: E402
 from app.feeds.ingest import collect  # noqa: E402
-from app.models import AdminUser, RssSource  # noqa: E402
+from app.models import AdminUser, News, RssSource  # noqa: E402
 
 ADMIN_PHONE = "13900000000"
 
@@ -651,3 +651,41 @@ class TestAdminFlagInAuthPayload:
         assert r.json()["data"]["user"]["isAdmin"] is True
         h2 = {"Authorization": f"Bearer {r.json()['data']['token']}"}
         assert client.post("/api/auth/refresh", headers=h2).json()["data"]["user"]["isAdmin"] is True
+
+
+# ---------------------------------------------------------------- 正文入库（E1）
+
+
+class TestUpsertContent:
+    """正文落库的三条断言（此前 content:encoded 只被提图，正文本身被丢弃）。"""
+
+    def _item(self, content: str = "") -> RawItem:
+        return RawItem(
+            id="body_1", title="有正文的条目", source="测试源", channel="tech",
+            summary="摘要", content=content,
+        )
+
+    def test_upsert_persists_content(self, client):
+        with SessionLocal() as db:
+            ingest_mod.upsert_news(db, [self._item("第一段。\n第二段。")])
+            assert db.get(News, "body_1").content == "第一段。\n第二段。"
+
+    def test_incremental_refresh_updates_content(self, client):
+        """源修订正文（纠错/更新）后，增量刷新应跟上。"""
+        with SessionLocal() as db:
+            ingest_mod.upsert_news(db, [self._item("旧版正文。")])
+            ingest_mod.upsert_news(db, [self._item("新版正文。")])
+            assert db.get(News, "body_1").content == "新版正文。"
+
+    def test_empty_content_does_not_wipe_existing(self, client):
+        """某轮抓到无正文的条目，不该把库里已有的正文抹掉。"""
+        with SessionLocal() as db:
+            ingest_mod.upsert_news(db, [self._item("已有正文。")])
+            ingest_mod.upsert_news(db, [self._item("")])
+            assert db.get(News, "body_1").content == "已有正文。"
+
+    def test_absent_content_stored_as_null(self, client):
+        """没有正文时落 NULL（而非空串）：详情接口据此返回 null。"""
+        with SessionLocal() as db:
+            ingest_mod.upsert_news(db, [self._item()])
+            assert db.get(News, "body_1").content is None

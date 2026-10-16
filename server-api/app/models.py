@@ -10,6 +10,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     false as sa_false,
     true as sa_true,
 )
@@ -52,6 +53,13 @@ class News(Base):
     id = Column(String(32), primary_key=True)
     title = Column(String(255), nullable=False)
     summary = Column(String(500), default="")
+    # ---- E1 正文 ----
+    # 正文（RSS content:encoded / Atom content，去标签后按段落以 \n 分隔）。
+    # Text + 可空：长度不可控；存量行与无正文源没有正文，NULL 即「暂无正文」，
+    # 与空串的区别是「抓过但源没给」也能被详情接口如实呈现。
+    # **不加索引**：只按 id 点查，没有按正文检索的需求（搜索走标题/摘要）。
+    # 列表接口（to_out）刻意不输出它，避免一页 20 条几十 KB 的无效带宽。
+    content = Column(Text, nullable=True)
     source = Column(String(50), default="")
     comment_count = Column(Integer, default=0)
     time = Column(String(30), default="")
