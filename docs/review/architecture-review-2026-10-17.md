@@ -16,8 +16,9 @@
 > **处置进度（2026-10-17 更新）**：本文件兼作债务 backlog，已处置项在下表中直接标注批次。
 > - **A1** 消息越权 → P1-25 已处置（提交 `98d77f2`）
 > - **A5** 搜索加载更多、**B1** 回复预览下推 → P1-26 已处置
+> - **A6** 图标配色去硬编码、**F1** CI 迁移校验 → P1-27 已处置
 > - 待排期：A2（消息排序，需迁移 0025）、A3（时间基准）、A4（前端列表分桶）、
->   E1（资讯正文）、F1（CI 加 `alembic check`）、F5（债务 backlog 机制）
+>   E1（资讯正文）、F5（债务 backlog 机制）
 
 ## 1. 资产快照（实测）
 
@@ -44,7 +45,7 @@
 | A5 | **搜索「加载更多」整段替换结果** | `SearchResults.vue:41`（`results.value = res.list`） | 用户永远只能看到最后一页；按钮文案与实际行为不符 | `page === 1` 时赋值、否则追加并按 id 去重；改用 `hasMore` 判断终止 | **S** · ✅ **P1-26 已处置** |
 | B1 | **回复预览把全部回复捞进内存** | `comments.py:144-160`：窗口函数算出 `rn` 但 `WHERE` 不能引用窗口列，Python 侧才 `if rn <= 2` 过滤 | 单页 20 条主评论若各带数百条回复 → 一次拉数千行，是评论页最陡的性能悬崖 | 改为 `LATERAL` / 子查询在 SQL 侧每组 `LIMIT 2`，或按 root 分批 `UNION ALL` | **S** · ✅ **P1-26 已处置**（子查询 + `aliased`） |
 | E1 | **资讯无正文，详情页使用硬编码假正文** | `models.py` News 表仅 `title/summary/images`；`NewsDetail.vue:29-33` 的 `body` 常量 | 演示文案冒充真实内容，一旦被用户/评审发现即信任崩塌；搜索也只能覆盖标题+摘要 | 抓取层存正文（`content` 列 + 文本清洗），详情页渲染真实正文，无正文时显式显示「暂无正文」而非占位文案 | **M** |
-| F1 | **CI 不含 `alembic check`** | `.github/workflows/ci.yml` | P1-24 已因「新迁移未 upgrade 导致 uvicorn 起不来」踩坑；CI 缺这一道就会继续漏 | CI 增加 `alembic upgrade head && alembic check` 步骤 | **S** |
+| F1 | **CI 不含 `alembic check`** | `.github/workflows/ci.yml` | P1-24 已因「新迁移未 upgrade 导致 uvicorn 起不来」踩坑；CI 缺这一道就会继续漏 | CI 增加 `alembic upgrade head && alembic check` 步骤 | **S** · ✅ **P1-27 已处置**（check 须跑在 PG 上，SQLite 会误报） |
 | F5 | **审查发现无跟踪机制** | 本轮复核：10-11 的 11 项 High 中 7 项仍存活 | 审查产出无法闭环，债务只增不减 | 建 `docs/review/backlog.md`，每个功能批次固定偿还 1~2 项债务 | **S** |
 
 ---
@@ -101,7 +102,7 @@
 | E7 | 运营数据看板 | 把 `/api/metrics`、源健康、审核量、命中趋势做成管理端大盘页 | M |
 | E8 | PWA / 离线阅读 | 收藏已服务端同步，具备离线基础 | M |
 | E9 | a11y 与 i18n | 当前无系统性支持 | L |
-| A6 | 导航/底栏硬编码色值（深色模式图标近乎不可见） | `AppNav.vue:47,90-135`、`TabBar.vue:58` | 改 `currentColor` + CSS 变量 | S |
+| A6 | 导航/底栏硬编码色值（深色模式图标近乎不可见） | `AppNav.vue:47,90-135`、`TabBar.vue:58` | 改 `currentColor` + CSS 变量 | S · ✅ **P1-27 已处置**（含 `Search.vue` / `Profile.vue` 同类项） |
 | C3 | 手机号未验证即可注册 | `auth.py:51` 仅校验 `1\d{10}` 形态 | 接入短信验证码（与 C4 同一条链路） | M |
 | F4 | 文档体积失控 | README 102KB、落地记录 139KB | 按专题拆分到 `docs/`（接口/运维/治理/前端），主文档只留索引 | S |
 

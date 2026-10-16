@@ -53,9 +53,12 @@ function badgeText(key: string): string {
     >
       <span class="mt-tabbar__icon">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <!-- 描边用 currentColor：激活态的颜色由 `.mt-tabbar__item` /
+               `.is-active` 的 CSS 变量给出。写死色值会让深色模式下图标
+               与文字不一致（亮蓝文字配暗蓝图标），且对比度不达标 -->
           <path
             :d="iconPath(item.icon)"
-            :stroke="item.key === active ? '#2d6cff' : '#9a9fa8'"
+            stroke="currentColor"
             stroke-width="1.8"
             stroke-linecap="round"
             stroke-linejoin="round"

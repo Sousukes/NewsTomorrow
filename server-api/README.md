@@ -615,6 +615,13 @@ alembic check                       # 检测 models 与迁移是否漂移
 > ⚠️ **schema 由 Alembic 单轨管理**：应用启动**不再**自动建表。
 > 新环境必须先执行 `alembic upgrade head`，否则启动即报错并给出本提示。
 
+> **CI 已内置两道迁移校验**（F1）：① `alembic upgrade head`（SQLite，兼作启动前置——
+> 没有它，CI 上的后端其实起不来）；② `alembic check`（**PostgreSQL 服务容器**）。
+> 第二道必须在 PG 上跑：SQLite 无法反射外键与 GIN 索引，`alembic check` 会把
+> `comments` 的 FK、`ix_news_title_trgm` 等误报成「新增迁移操作」（本地已实测复现）。
+> 另：CI 的「启动后端」步骤在探活失败时**显式失败并打印日志**——此前探活失败也会被
+> 当成成功，契约检查可能跑在一个根本没起来的后端上。
+
 - `migrations/env.py` 复用 `app.config.DATABASE_URL` 与 `Base.metadata`（**单一配置源**）。
 - 已含迁移：`0001_init`（基线全量建表）、`0002_news_published_at`、`0003_msg_fk_set_null`、
   `0004_feed_order_reads`（复合索引 `ix_news_feed` + `comments.created_at` + `message_reads`）、

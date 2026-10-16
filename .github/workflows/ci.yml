@@ -34,11 +34,32 @@ jobs:
         run: npm run build-storybook
 
   backend:
-    name: 后端校验（依赖 + 启动 + 契约检查）
+    name: 后端校验（依赖 + 迁移 + 启动 + 契约检查）
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server-api
+    env:
+      # 全 job 共用同一个库：迁移与启动后端必须是**同一份** schema，
+      # 否则「upgrade 过了」与「实际起得来」是两件事，环境债照样藏得住。
+      # schema 由 Alembic 单轨管理，启动前必须先 upgrade（见「迁移升级」步骤）。
+      DATABASE_URL: sqlite:///./ci.db
+    # 漂移检查必须在 PostgreSQL 上跑：SQLite 无法反射外键与 GIN 索引，
+    # `alembic check` 会把 FK / pg_trgm 索引误报成「新增迁移操作」（本地已实测）。
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: toutiao
+          POSTGRES_PASSWORD: toutiao
+          POSTGRES_DB: toutiao
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,15 +70,33 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 导入自检（配置可加载）
         run: python -c "import main; print('backend import OK')"
+      # F1：迁移链与漂移检查。P1-24 曾因「新迁移未 upgrade」导致 uvicorn
+      # 起不来，而 CI 没有这一道，环境债一直拖到本地才暴露。
+      - name: 迁移升级（SQLite，兼作启动前置）
+        run: python -m alembic upgrade head
+      - name: 迁移漂移检查（alembic check · PostgreSQL）
+        env:
+          DATABASE_URL: postgresql+psycopg://toutiao:toutiao@localhost:5432/toutiao
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
       - name: 单元测试
         run: pytest -q
       - name: 启动后端
         run: |
           nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/api.log 2>&1 &
+          ok=0
           for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8000/api/health && break
+            if curl -sf http://127.0.0.1:8000/api/health; then ok=1; break; fi
             sleep 1
           done
+          # 起不来必须**显式失败**：此前探活失败也会被当成成功，
+          # 于是契约检查跑在一个根本没起来的后端上（P1-24 那类环境债因此藏得住）
+          if [ "$ok" != "1" ]; then
+            echo "::error::后端未能在 30 秒内就绪，日志如下："
+            cat /tmp/api.log
+            exit 1
+          fi
       - name: 契约检查（前后端）
         working-directory: mingri-toutiao-vue
         env:

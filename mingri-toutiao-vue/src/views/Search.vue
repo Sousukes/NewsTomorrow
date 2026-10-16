@@ -39,7 +39,7 @@ function submit() {
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
           <path
             d="M15 5l-7 7 7 7"
-            stroke="#222"
+            stroke="currentColor"
             stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
@@ -115,6 +115,8 @@ function submit() {
   border: none;
   background: transparent;
   padding: 0;
+  /* 图标一律 currentColor：写死 #222 在深色模式下会与卡片底色几乎同色 */
+  color: var(--color-text-primary);
 }
 
 .search__input {

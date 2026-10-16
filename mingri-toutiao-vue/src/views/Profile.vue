@@ -223,10 +223,10 @@ async function logout() {
         <span v-else-if="item.key === 'history' && historyCount" class="profile__badge">{{
           historyCount
         }}</span>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+        <svg class="profile__item-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none">
           <path
             d="M9 6l6 6-6 6"
-            stroke="#c5c8cd"
+            stroke="currentColor"
             stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
@@ -421,6 +421,12 @@ async function logout() {
   text-align: left;
   border-bottom: 1px solid var(--color-divider);
   cursor: pointer;
+}
+
+/* 末尾箭头：描边用 currentColor，颜色只在这里给（写死灰值不跟主题走） */
+.profile__item-arrow {
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
 }
 
 .profile__item-main {

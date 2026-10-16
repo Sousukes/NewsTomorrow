@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **474** 项，覆盖：
+- **单元测试**：Vitest 共 **480** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -157,6 +157,12 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     而非整段替换**（点一次只能看到最后一页的旧行为已回归锁定）；追加按 id 去重；
     **`hasMore=false` 不出按钮**（终止条件改用服务端 `hasMore`，不再用
     `results.length >= total`——两者不是同一个量）；**换关键词回到第一页且不叠加旧结果**
+  - `components/AppNav`（3，P1-27）：**图标不出现任何硬编码色值**（`#222` / `#9a9fa8`
+    在深色模式下与 `--color-card-bg` 几乎同色 = 图标消失）、描边与填充一律
+    `currentColor`（颜色由容器 CSS 变量给）、品牌变体不渲染图标
+  - `components/TabBar`（3，P1-27）：**图标描边 `currentColor` 且不随激活态内联变色**
+    （原 `:stroke="active ? '#2d6cff' : '#9a9fa8'"` 在深色模式下与亮蓝文字不一致）、
+    激活态只加 `is-active` 类（配色交给 CSS 变量）、未读徽标按 key 显示且 0 不渲染
   - `components/SourceHealthTrend`（17）：四指标渲染（成功率/成功轮均条数/抓取轮次/失败次数）、
     **空窗口不给图**、`rate` 为 null 显示"—"而非 0%、**格子按 `days` 铺满再按日期落点**、
     无数据日留浅底空格（**不伪装失败**）、全失败日柱高强制 6% 不塌成零像素、
@@ -646,7 +652,7 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **工程基建**：ESLint + Prettier + `npm run verify` + GitHub Actions CI
 - [x] 全局错误边界（`ErrorBoundary` + `app.config.errorHandler`），消除白屏
 - [x] **无限滚动**：`useInfiniteList` + store `loadMore`（去重/并发幂等/末页判定）+ 骨架屏与底部状态
-- [x] **单元测试**：Vitest 474 项（前端）+ pytest 594 项（后端），已接入 CI
+- [x] **单元测试**：Vitest 480 项（前端）+ pytest 594 项（后端），已接入 CI
 - [x] API 层：`api/`（news / comments / auth + http 客户端，token 注入、`{code,data}` 解包），未配后端自动走 mock
 - [x] store 全面接 API（news/comments 离线优先 + 后台同步；user 增 token 与 login/logout）
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放

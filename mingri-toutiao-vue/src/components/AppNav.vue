@@ -44,7 +44,7 @@ function fallthroughAttr(ev: string) {
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
         <path
           d="M15 5l-7 7 7 7"
-          stroke="#222"
+          stroke="currentColor"
           stroke-width="2"
           stroke-linecap="round"
           stroke-linejoin="round"
@@ -87,8 +87,8 @@ function fallthroughAttr(ev: string) {
     <template v-else-if="variant === 'search'">
       <div class="mt-nav__search">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-          <circle cx="11" cy="11" r="7" stroke="#9a9fa8" stroke-width="2" />
-          <path d="M20 20l-3.2-3.2" stroke="#9a9fa8" stroke-width="2" stroke-linecap="round" />
+          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+          <path d="M20 20l-3.2-3.2" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
         </svg>
         <span>搜索你感兴趣的内容</span>
       </div>
@@ -104,8 +104,8 @@ function fallthroughAttr(ev: string) {
         @click="fallthroughAttr('search')"
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <circle cx="11" cy="11" r="7" stroke="#222" stroke-width="2" />
-          <path d="M20 20l-3.2-3.2" stroke="#222" stroke-width="2" stroke-linecap="round" />
+          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+          <path d="M20 20l-3.2-3.2" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
         </svg>
       </button>
       <button
@@ -117,7 +117,7 @@ function fallthroughAttr(ev: string) {
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
           <path
             d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"
-            stroke="#222"
+            stroke="currentColor"
             stroke-width="1.8"
             stroke-linejoin="round"
           />
@@ -130,9 +130,9 @@ function fallthroughAttr(ev: string) {
         @click="fallthroughAttr('more')"
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <circle cx="5" cy="12" r="1.6" fill="#222" />
-          <circle cx="12" cy="12" r="1.6" fill="#222" />
-          <circle cx="19" cy="12" r="1.6" fill="#222" />
+          <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+          <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+          <circle cx="19" cy="12" r="1.6" fill="currentColor" />
         </svg>
       </button>
     </div>
@@ -164,6 +164,9 @@ function fallthroughAttr(ev: string) {
   border: none;
   background: transparent;
   padding: 0;
+  /* 图标一律 `currentColor`，颜色只在这里给——深色模式下若写死 #222，
+     图标会与 #1c1e22 的导航底色几乎同色而不可见 */
+  color: var(--color-text-primary);
 }
 
 .mt-nav__actions {
