@@ -37,7 +37,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from ..config import MODERATION_ENABLED
 from ..database import get_db
@@ -139,25 +139,28 @@ def _decorate_roots(db: Session, roots: list[Comment], current: Optional[User]) 
         ).all()
     )
 
-    # 最早 REPLY_PREVIEW_COUNT 条回复：窗口函数按 root 分组取前 N，
-    # 避免把全部回复捞进内存（组内顺序再在 Python 侧兜底排序一次）。
-    preview_rows = db.execute(
-        select(
-            Comment,
-            func.row_number().over(
-                partition_by=Comment.root_id,
-                order_by=(Comment.created_at.asc(), Comment.id.asc()),
-            ).label("rn"),
-        ).where(
-            Comment.root_id.in_(root_ids),
-            Comment.is_deleted.is_(False),
-            Comment.hidden.is_(False),
-        )
-    ).all()
+    # 最早 REPLY_PREVIEW_COUNT 条回复：**窗口函数 + 子查询**把「每组取前 N」下推到 SQL。
+    #
+    # 不能直接在同一个 SELECT 里 `WHERE rn <= N`——SQL 不允许 WHERE 引用窗口列；
+    # 也不能像早期实现那样先捞全部回复再在 Python 侧截断：爆款评论有几百上千条
+    # 回复时，一页 20 条主评论就是 20 份全量回复进内存，这是评论页最陡的性能悬崖。
+    # 子查询内算 rn、外层过滤，DB 只返回每组前 N 行（组内顺序再在 Python 侧兜底排一次）。
+    rn = (
+        func.row_number()
+        .over(partition_by=Comment.root_id, order_by=(Comment.created_at.asc(), Comment.id.asc()))
+        .label("rn")
+    )
+    preview_subq = select(Comment, rn).where(
+        Comment.root_id.in_(root_ids),
+        Comment.is_deleted.is_(False),
+        Comment.hidden.is_(False),
+    ).subquery()
+    # aliased(Comment, subq)：子查询列与 Comment 一一对应，可映射回 ORM 实体
+    preview_entity = aliased(Comment, preview_subq)
+    preview_rows = db.query(preview_entity).filter(preview_subq.c.rn <= REPLY_PREVIEW_COUNT).all()
     previews: dict[str, list[Comment]] = {}
-    for entity, rn in preview_rows:
-        if rn <= REPLY_PREVIEW_COUNT:
-            previews.setdefault(entity.root_id, []).append(entity)
+    for entity in preview_rows:
+        previews.setdefault(entity.root_id, []).append(entity)
 
     # 点赞判定一次覆盖主评论 + 预览回复；「回复 @谁」按需批量取父行
     preview_entities = [e for lst in previews.values() for e in lst]

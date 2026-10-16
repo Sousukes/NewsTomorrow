@@ -20,14 +20,22 @@ const q = ref((route.query.q as string) || '');
 const results = ref<NewsItem[]>([]);
 const total = ref(0);
 const page = ref(1);
+const hasMore = ref(false);
 const loading = ref(false);
 const error = ref('');
+
+/** 追加时按 id 去重：翻页之间若有新增/排序变动，同一条可能出现在两页 */
+function mergeUnique(prev: NewsItem[], next: NewsItem[]): NewsItem[] {
+  const seen = new Set(prev.map((i) => i.id));
+  return [...prev, ...next.filter((i) => !seen.has(i.id))];
+}
 
 async function runSearch(nextPage = 1) {
   const keyword = q.value.trim();
   if (!keyword) {
     results.value = [];
     total.value = 0;
+    hasMore.value = false;
     return;
   }
   // 记录本地搜索历史。放在这里而非搜索页，可覆盖**所有入口**
@@ -38,10 +46,17 @@ async function runSearch(nextPage = 1) {
   error.value = '';
   try {
     const res = await news.search(keyword, nextPage, PAGE_SIZE);
-    results.value = res.list;
+    // 第 1 页是「新搜索」，直接替换；后续页是「加载更多」，必须**追加**——
+    // 此前整段赋值，用户点一次「加载更多」就只能看到最后一页，按钮文案
+    // 「加载更多（x/total）」与实际行为完全不符。
+    results.value = nextPage === 1 ? res.list : mergeUnique(results.value, res.list);
     total.value = res.total;
     page.value = res.page;
-    // 搜索接口异常时 store 已降级为本地过滤，这里给出提示
+    // 用服务端 hasMore 判定是否还有下一页，而不是 `results.length >= total`：
+    // total 是 offset 分页的 count 估算，与去重后的本地长度不是同一个量，
+    // 用它当终止条件会出现「按钮还在但点出来空」或「明明还有却提前消失」。
+    hasMore.value = res.hasMore;
+    // 搜索接口异常时 store 已降级为本地过滤（hasMore=false），这里给出提示
     error.value = news.searchError;
   } finally {
     loading.value = false;
@@ -53,7 +68,7 @@ function open(id: string) {
 }
 
 function loadMore() {
-  if (loading.value || results.value.length >= total.value) return;
+  if (loading.value || !hasMore.value) return;
   runSearch(page.value + 1);
 }
 
@@ -85,12 +100,7 @@ watch(
 
     <!-- 加载更多 -->
     <div v-if="results.length" class="results__more">
-      <button
-        v-if="results.length < total"
-        class="results__more-btn"
-        :disabled="loading"
-        @click="loadMore"
-      >
+      <button v-if="hasMore" class="results__more-btn" :disabled="loading" @click="loadMore">
         {{ loading ? '加载中…' : `加载更多（${results.length}/${total}）` }}
       </button>
       <span v-else class="results__end">没有更多了</span>

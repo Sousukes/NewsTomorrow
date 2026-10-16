@@ -797,6 +797,125 @@ class TestCommentReplies:
         # 列表里不出现回复本身
         assert all(c["rootId"] is None for c in rows)
 
+    def test_preview_pushes_limit_down_to_sql(self, client):
+        """B1：「每组取前 N」必须在 **SQL 侧**完成，不能在 Python 侧截断。
+
+        早期实现在同一个 SELECT 里算 `row_number()` 却无法在 WHERE 引用窗口列，
+        只能先捞全部回复再截断——爆款评论（数百上千条回复）会被整段读进内存，
+        一页 20 条主评论就是 20 份全量回复。这里捕获真实执行的 SQL，
+        断言 rn 的过滤确实出现在语句里（回退到 Python 侧截断时该断言即失败）。
+        """
+        from sqlalchemy import event
+
+        from app.database import engine
+
+        h = auth_header(client)
+        captured: list[str] = []
+
+        def _before(_conn, _cursor, statement, _params, _ctx, _many):
+            captured.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _before)
+        try:
+            client.get("/api/news/t1/comments", headers=h)
+        finally:
+            event.remove(engine, "before_cursor_execute", _before)
+
+        window_sql = [s for s in captured if "row_number" in s]
+        assert window_sql, "预览查询应仍使用窗口函数分组取前 N"
+        assert any("rn <=" in s for s in window_sql), (
+            "rn 的过滤必须下推到 SQL（子查询外层的 WHERE），"
+            "否则等于把每个 root 的全部回复捞进内存后再截断"
+        )
+
+    def test_preview_takes_earliest_two_of_many(self, client):
+        """30 条回复：预览仍是 2 条且为最早两条，replyCount 计全部。"""
+        from app.database import SessionLocal
+        from app.models import Comment
+
+        h = auth_header(client)
+        root = self._post(client, "t1", "爆款主评论", h).json()["data"]
+        with SessionLocal() as db:
+            for i in range(30):
+                db.add(
+                    Comment(
+                        id=f"c_many_{i:02d}",
+                        news_id="t1",
+                        user_id=1,
+                        user_name="测试用户",
+                        content=f"批量回复{i:02d}",
+                        created_at=f"2026-10-08T12:{i:02d}:00+00:00",
+                        parent_id=root["id"],
+                        root_id=root["id"],
+                        likes=0,
+                    )
+                )
+            db.commit()
+
+        rows = client.get("/api/news/t1/comments", headers=h).json()["data"]["list"]
+        item = next(c for c in rows if c["id"] == root["id"])
+        assert item["replyCount"] == 30
+        assert [r["content"] for r in item["replies"]] == ["批量回复00", "批量回复01"]
+
+    def test_preview_skips_deleted_and_hidden_replies(self, client):
+        """预览与计数同口径：已删除 / 已隐藏的回复既不出现也不计数。
+
+        过滤写在子查询内部——若下推后漏掉这些条件，预览会露出不该可见的内容。
+        """
+        from app.database import SessionLocal
+        from app.models import Comment
+
+        h = auth_header(client)
+        root = self._post(client, "t1", "过滤主评论", h).json()["data"]
+        with SessionLocal() as db:
+            db.add(
+                Comment(
+                    id="c_gone_deleted",
+                    news_id="t1",
+                    user_id=1,
+                    user_name="测试用户",
+                    content="已删除回复",
+                    created_at="2026-10-08T13:00:00+00:00",
+                    parent_id=root["id"],
+                    root_id=root["id"],
+                    is_deleted=True,
+                    likes=0,
+                )
+            )
+            db.add(
+                Comment(
+                    id="c_gone_hidden",
+                    news_id="t1",
+                    user_id=1,
+                    user_name="测试用户",
+                    content="已隐藏回复",
+                    created_at="2026-10-08T13:01:00+00:00",
+                    parent_id=root["id"],
+                    root_id=root["id"],
+                    hidden=True,
+                    likes=0,
+                )
+            )
+            db.add(
+                Comment(
+                    id="c_gone_visible",
+                    news_id="t1",
+                    user_id=1,
+                    user_name="测试用户",
+                    content="正常回复",
+                    created_at="2026-10-08T13:02:00+00:00",
+                    parent_id=root["id"],
+                    root_id=root["id"],
+                    likes=0,
+                )
+            )
+            db.commit()
+
+        rows = client.get("/api/news/t1/comments", headers=h).json()["data"]["list"]
+        item = next(c for c in rows if c["id"] == root["id"])
+        assert item["replyCount"] == 1
+        assert [r["content"] for r in item["replies"]] == ["正常回复"]
+
     def test_replies_endpoint_time_asc_with_pagination(self, client):
         """replies 接口按时间正序 + 游标分页。"""
         from app.database import SessionLocal

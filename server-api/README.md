@@ -840,8 +840,12 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 
 - **列表分工**：`GET /comments` 只返回主评论（附 `replyCount` 与最早 2 条预览）；
   完整回复走 `GET /comments/{cid}/replies`，按时间**正序**（讨论先后）游标分页。
-- **预览取「最早 2 条」**：窗口函数 `row_number() OVER (PARTITION BY root_id ORDER BY created_at, id)`
-  按组取前 N，避免把全部回复捞进内存；`liked` 判定一次 IN 查询覆盖主评论 + 预览回复（无 N+1）。
+- **预览取「最早 2 条」（P1-26 已把 LIMIT 下推到 SQL）**：窗口函数 `row_number() OVER
+  (PARTITION BY root_id ORDER BY created_at, id)` 在**子查询内**算 `rn`，外层
+  `WHERE rn <= 2` 过滤——SQL 不允许 `WHERE` 直接引用窗口列，所以必须套一层子查询。
+  早期实现在同一个 SELECT 里算 `rn` 却在 Python 侧截断，等于把每个主评论的
+  **全部回复**捞进内存（爆款评论数百上千条回复 × 一页 20 条主评论）。
+  `liked` 判定一次 IN 查询覆盖主评论 + 预览回复（无 N+1）。
 - **点赞关系表化**（迁移 `0014`）：`comments.liked_by` JSON 数组 → `comment_likes`
   关系表（`(comment_id, user_id)` 复合主键，`ON DELETE CASCADE`）。复合主键天然防重复点赞，
   `likes` 冗余计数随行的插入/删除同步维护；批量判定同理一次 IN 查询。
@@ -1084,7 +1088,7 @@ emoji/符号（So）拒绝。**顺序刻意是「字符集先于长度」**—�
 ## 单元测试
 
 ```bash
-pytest -q          # 591 项
+pytest -q          # 594 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -1176,13 +1180,16 @@ pytest -q          # 591 项
   **库白名单（非 env）号码同样下发 true**；
   **入参校验**（4 项）——未知频道 422（`errors[0].loc[-1] == 'channel'`）、`key` 格式非法 422、
   更新时同样校验频道。
-- `tests/test_api.py`（93 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
+- `tests/test_api.py`（96 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
   `userId`、`mine` 仅作者为 true、历史评论 `userId` 为 null 且任何人都不是作者；
   **评论删除**（`TestCommentDelete`）——作者可删、他人 403、未登录 401、
   无归属评论不可删、幂等、删后不可点赞、跨文章 404；
-  **两级评论**（`TestCommentReplies`，9 项）——回复的回复 `rootId` 拍平、
+  **两级评论**（`TestCommentReplies`，12 项）——回复的回复 `rootId` 拍平、
   主列表只出主评论 + 预览 ≤2 + `replyCount` 排除已删、replies 正序游标分页、
   删 root 后回复不可见、回复目标不存在/跨文章/已删均 40003、**回复只通知被回复者不广播**；
+  **P1-26 回复预览下推**（3 项）——`row_number` 的 `rn <= N` 过滤**必须出现在执行的 SQL 里**
+  （回退成 Python 侧截断即失败）、30 条回复时预览仍是**最早 2 条**且 `replyCount` 计全部、
+  预览与计数同口径**跳过已删除与已隐藏**；
   **点赞关系表**（`TestCommentLikesTable`，3 项）——关系行增删、复合主键防重、`liked` 按用户区分。
 - `tests/test_feeds.py`（7 项）：RSS 解析 / 条件请求（304 / 条件头 / 不重试）/ 增量入库 / 时效清理（未知时间优先、keep_min 下限、子表清理）。
 - `tests/test_search_stats.py`（21 项）：**搜索词统计**——记录与空白词忽略、**同用户同词 60s 内去重（防刷）**、窗口过后重新计数、不同用户不去重、未登录无去重窗口、超长词截断、按次数倒序、同次数按词升序（顺序稳定）、**窗口外的旧搜索不计入**、limit 生效、清理保留期内数据、接口契约与越界 422、搜索即记录、已登录去重。
