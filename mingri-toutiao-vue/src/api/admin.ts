@@ -1,7 +1,7 @@
 /**
  * 管理端接口：RSS 源配置（后端 P1-9，界面 P1-10）+ 管理员白名单（P1-14）
  * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）+ 评论治理（P1-22）
- * + 敏感词库与命中日志（P1-23）。
+ * + 敏感词库与命中日志（P1-23）+ 昵称敏感词与复核队列（P1-24）。
  *
  * 与 `api/me.ts` 的关键差别：**没有 mock 短路**。源配置与白名单只存在于
  * 后端数据库中，mock 模式下并无真实对象可操作——伪造一份"能增能删"的假列表
@@ -29,6 +29,19 @@ import type {
   HitQuery,
   NewsHideInput,
   NewsTopInput,
+  NicknameHitItem,
+  NicknameHitListResult,
+  NicknameHitQuery,
+  NicknameReviewItem,
+  NicknameReviewListResult,
+  NicknameReviewQuery,
+  NicknameReviewResult,
+  NicknameWordAction,
+  NicknameWordInput,
+  NicknameWordItem,
+  NicknameWordListResult,
+  NicknameWordQuery,
+  NicknameWordUpdateInput,
   RssSourceItem,
   SensitiveHitItem,
   SensitiveWordItem,
@@ -668,5 +681,249 @@ export async function fetchModerationHits(options: HitQuery = {}): Promise<HitLi
     total: typeof data?.total === 'number' ? data.total : 0,
     hasMore: data?.hasMore === true,
     nextCursor: typeof data?.nextCursor === 'number' ? data.nextCursor : null,
+  };
+}
+
+// ---------------------------------------------------------------- 昵称敏感词（P1-24）
+
+const NICKNAME_ACTIONS: NicknameWordAction[] = ['block', 'review', 'allow'];
+/** 每条词最多几条别名、单条最长多少字符（与后端 MAX_ALIASES_PER_WORD / MAX_ALIAS_LENGTH 一致） */
+const MAX_ALIASES = 20;
+const MAX_ALIAS_LENGTH = 50;
+
+/**
+ * 昵称动作归一化：未知动作一律按 `review` 兜底——与后端 FALLBACK_ACTION
+ * 同口径。数据异常时降级为"放行 + 让人看一眼"，而不是把用户的名字直接吞掉。
+ */
+function toNicknameAction(raw: unknown): NicknameWordAction {
+  return NICKNAME_ACTIONS.includes(raw as NicknameWordAction)
+    ? (raw as NicknameWordAction)
+    : 'review';
+}
+
+/** 命中动作：库里只会记 block / review（allow 不记日志），未知值按 review 兜底 */
+function toNicknameHitAction(raw: unknown): 'block' | 'review' {
+  return raw === 'block' ? 'block' : 'review';
+}
+
+function toNicknameSource(raw: unknown): 'register' | 'update' {
+  return raw === 'register' ? 'register' : 'update';
+}
+
+/**
+ * 别名列表归一化：脏数据（非数组 / 非字符串项 / 超长 / 重复）逐个剔除——
+ * 与后端 `alias_list` 同规则。前端永远拿到干净数组，模板不做二次防御。
+ */
+function toAliases(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const a of raw) {
+    if (typeof a !== 'string') continue;
+    const t = a.trim();
+    if (!t || t.length > MAX_ALIAS_LENGTH || out.includes(t)) continue;
+    out.push(t);
+    if (out.length >= MAX_ALIASES) break;
+  }
+  return out;
+}
+
+function toNicknameWord(raw: unknown): NicknameWordItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = Number(r.id);
+  const word = typeof r.word === 'string' ? r.word : '';
+  // 没有 id（更新/删除的锚点）或词本身的行无法操作，丢弃而不是渲染成空壳
+  if (!Number.isFinite(id) || !word) return null;
+  return {
+    id,
+    word,
+    action: toNicknameAction(r.action),
+    category: typeof r.category === 'string' ? r.category : '',
+    aliases: toAliases(r.aliases),
+    enabled: r.enabled !== false,
+    hitCount: Number.isFinite(Number(r.hitCount)) ? Number(r.hitCount) : 0,
+    createdBy: typeof r.createdBy === 'string' ? r.createdBy : '',
+    createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : null,
+    updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : null,
+  };
+}
+
+function toNicknameHit(raw: unknown): NicknameHitItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = Number(r.id);
+  const word = typeof r.word === 'string' ? r.word : '';
+  if (!Number.isFinite(id) || !word) return null;
+  return {
+    id,
+    word,
+    // matched 缺失时回落主词：老数据/异常行也要能显示"拦它的是什么"
+    matched: typeof r.matched === 'string' && r.matched ? r.matched : word,
+    action: toNicknameHitAction(r.action),
+    source: toNicknameSource(r.source),
+    userId: typeof r.userId === 'number' ? r.userId : null,
+    userName: typeof r.userName === 'string' ? r.userName : '',
+    snippet: typeof r.snippet === 'string' ? r.snippet : '',
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
+  };
+}
+
+function toNicknameReview(raw: unknown): NicknameReviewItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const userId = Number(r.userId);
+  // 没有 userId 的行无法定位（复核按 user_id 操作），丢弃
+  if (!Number.isFinite(userId)) return null;
+  return {
+    userId,
+    name: typeof r.name === 'string' ? r.name : '',
+    phone: typeof r.phone === 'string' ? r.phone : '',
+    flaggedAt: typeof r.flaggedAt === 'string' && r.flaggedAt ? r.flaggedAt : null,
+    flaggedName: typeof r.flaggedName === 'string' && r.flaggedName ? r.flaggedName : null,
+    flaggedMatched:
+      typeof r.flaggedMatched === 'string' && r.flaggedMatched ? r.flaggedMatched : null,
+  };
+}
+
+/**
+ * GET /admin/nickname-words —— 昵称敏感词库列表（P1-24）。
+ *
+ * 与 P1-23 词库同构：按命中次数降序 + `limit/offset`（运营要一遍扫完 + 跳页核对）。
+ * `keyword` 只匹配主词——别名在每行的 `aliases` 字段里可见。
+ */
+export async function fetchNicknameWords(
+  options: NicknameWordQuery = {},
+): Promise<NicknameWordListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.keyword?.trim()) params.set('keyword', options.keyword.trim());
+  if (options.action) params.set('action', options.action);
+  if (options.enabled !== undefined) params.set('enabled', String(options.enabled));
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.offset) params.set('offset', String(options.offset));
+  const qs = params.toString();
+  const data = await request<{ list?: unknown; total?: number }>(
+    `/admin/nickname-words${qs ? `?${qs}` : ''}`,
+  );
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toNicknameWord).filter((w): w is NicknameWordItem => w !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+  };
+}
+
+/** POST /admin/nickname-words —— 新增（主词/别名太短 42204，重复 40906；保存即生效） */
+export async function createNicknameWord(input: NicknameWordInput): Promise<NicknameWordItem> {
+  ensureRealBackend();
+  const data = await request<unknown>('/admin/nickname-words', { method: 'POST', body: input });
+  const word = toNicknameWord(data);
+  if (!word) throw new Error('新增成功但响应无法解析');
+  return word;
+}
+
+/** PATCH /admin/nickname-words/:id —— 局部更新（动作/分组/别名/启用；不传即不改） */
+export async function updateNicknameWord(
+  id: number,
+  input: NicknameWordUpdateInput,
+): Promise<NicknameWordItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/nickname-words/${id}`, {
+    method: 'PATCH',
+    body: input,
+  });
+  const word = toNicknameWord(data);
+  if (!word) throw new Error('更新成功但响应无法解析');
+  return word;
+}
+
+/** DELETE /admin/nickname-words/:id —— 删除昵称敏感词（不存在 40407） */
+export async function deleteNicknameWord(id: number): Promise<void> {
+  ensureRealBackend();
+  await request<unknown>(`/admin/nickname-words/${id}`, { method: 'DELETE' });
+}
+
+/** POST /admin/nickname-words/reload —— 强制重建本进程昵称词库索引，返回生效条数 */
+export async function reloadNicknameWords(): Promise<number> {
+  ensureRealBackend();
+  const data = await request<{ count?: number }>('/admin/nickname-words/reload', {
+    method: 'POST',
+  });
+  return typeof data?.count === 'number' ? data.count : 0;
+}
+
+/**
+ * GET /admin/nickname-hits —— 昵称命中日志（P1-24，只读）。
+ *
+ * 价值不在「看出事了」，而在**回答误杀与受理申诉**：哪个人、哪个昵称、
+ * 命中哪个词（含哪条别名）、从注册还是改名入口来的。游标为自增 id。
+ */
+export async function fetchNicknameHits(
+  options: NicknameHitQuery = {},
+): Promise<NicknameHitListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.word?.trim()) params.set('word', options.word.trim());
+  if (options.action) params.set('action', options.action);
+  if (options.source) params.set('source', options.source);
+  if (options.userId !== undefined) params.set('userId', String(options.userId));
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.cursor !== undefined && options.cursor !== null) {
+    params.set('cursor', String(options.cursor));
+  }
+  const qs = params.toString();
+  const data = await request<{
+    list?: unknown;
+    total?: number;
+    hasMore?: boolean;
+    nextCursor?: number | null;
+  }>(`/admin/nickname-hits${qs ? `?${qs}` : ''}`);
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toNicknameHit).filter((h): h is NicknameHitItem => h !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+    hasMore: data?.hasMore === true,
+    nextCursor: typeof data?.nextCursor === 'number' ? data.nextCursor : null,
+  };
+}
+
+/**
+ * GET /admin/nickname-reviews —— 昵称待人工复核队列（P1-24）。
+ *
+ * 与评论复核同构，但对象是账号属性：通过只清标志，**不改昵称本身**
+ * （名字是用户自己起的，复核是「人看过了」这个事实）。
+ */
+export async function fetchNicknameReviews(
+  options: NicknameReviewQuery = {},
+): Promise<NicknameReviewListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (options.keyword?.trim()) params.set('keyword', options.keyword.trim());
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.offset) params.set('offset', String(options.offset));
+  const qs = params.toString();
+  const data = await request<{ list?: unknown; total?: number }>(
+    `/admin/nickname-reviews${qs ? `?${qs}` : ''}`,
+  );
+  const rawList = Array.isArray(data?.list) ? data.list : [];
+  return {
+    list: rawList.map(toNicknameReview).filter((r): r is NicknameReviewItem => r !== null),
+    total: typeof data?.total === 'number' ? data.total : 0,
+  };
+}
+
+/** POST /admin/nickname-reviews/:user_id —— 通过复核（幂等；用户不存在 40408） */
+export async function reviewNickname(userId: number): Promise<NicknameReviewResult> {
+  ensureRealBackend();
+  const data = await request<Record<string, unknown>>(
+    `/admin/nickname-reviews/${encodeURIComponent(String(userId))}`,
+    { method: 'POST' },
+  );
+  const id = Number(data?.userId);
+  return {
+    userId: Number.isFinite(id) ? id : userId,
+    name: typeof data?.name === 'string' ? data.name : '',
+    phone: typeof data?.phone === 'string' ? data.phone : '',
+    pendingReview: data?.pendingReview === true,
+    reviewedAt: typeof data?.reviewedAt === 'string' && data.reviewedAt ? data.reviewedAt : null,
   };
 }

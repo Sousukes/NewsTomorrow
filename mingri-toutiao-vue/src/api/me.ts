@@ -1,5 +1,5 @@
 /**
- * 个人标记接口：收藏 / 浏览历史（云端同步）。
+ * 个人标记接口：收藏 / 浏览历史（云端同步）+ 修改昵称（P1-24）。
  *
  * 服务端为唯一事实源：所有写操作都返回**完整的最新集合** `{ ids, list }`，
  * 客户端拿到即为真相，无需自行推导增量。
@@ -7,7 +7,7 @@
 import { USE_MOCK } from './config';
 import { mockDelay, request } from './http';
 import { normalizeNewsItem } from './news';
-import type { NewsItem } from '@/types';
+import type { NewsItem, NicknameUpdateResult } from '@/types';
 
 /** 标记集合载荷 */
 export interface MarksPayload {
@@ -81,4 +81,70 @@ export function clearHistoryRemote(): Promise<MarksPayload> {
 /** PUT /me/history —— 并集合并（把本地历史并入云端，只增不删） */
 export function mergeHistory(ids: string[]): Promise<MarksPayload> {
   return call('/me/history', { method: 'PUT', body: { ids } });
+}
+
+// ------------------------------ 修改昵称（P1-24） ------------------------------
+
+/** 昵称长度边界（与后端 NICKNAME_MIN_LENGTH / NICKNAME_MAX_LENGTH 一致） */
+const NICKNAME_MIN_LENGTH = 2;
+const NICKNAME_MAX_LENGTH = 24;
+/** 字符白名单外的符号（后端 NICKNAME_ALLOWED_SYMBOLS = `_-·.・`，另加内部空格） */
+const NICKNAME_SYMBOL_RE = /^[\w\u00b7\u2022\u30fb\-. ]*$/u;
+/** 离线 mock 的迷你词库：与 mock-server 种子同口径（接真实后端前演示三级分流） */
+const MOCK_BLOCK_WORDS = ['博彩', '加微信'];
+const MOCK_REVIEW_WORDS = ['广告'];
+
+/**
+ * 离线 mock 的形状校验：与后端 `validate_nickname_shape` 同规则
+ * （先字符集后长度——字符根本不能用比太长更根本）。只服务 `VITE_USE_MOCK`
+ * 演示路径；接 mock-server / 真实后端时全部走服务端这道闸。
+ */
+function mockShapeError(clean: string): string {
+  if (!NICKNAME_SYMBOL_RE.test(clean)) {
+    return '昵称仅支持中英文、数字及 _ - · . ・ 等符号';
+  }
+  if (clean.length < NICKNAME_MIN_LENGTH) return `昵称至少需要 ${NICKNAME_MIN_LENGTH} 个字符`;
+  if (clean.length > NICKNAME_MAX_LENGTH) return `昵称不能超过 ${NICKNAME_MAX_LENGTH} 个字符`;
+  if (!/[\p{L}\p{N}]/u.test(clean)) return '昵称需至少包含一个字母、数字或汉字';
+  return '';
+}
+
+/**
+ * PUT /me/nickname —— 修改昵称：形状校验 → 敏感词校验 → 保存。
+ *
+ * 三级结果（服务端为唯一事实源，前端输入框的 maxlength 只是第一道闸）：
+ * - 形状不合法 → **42203**，消息即面向用户的提示；
+ * - 命中 block 级词 → **40006**，提示**不回显命中词**（回显等于给绕过者一份
+ *   「哪些词不能起」的对照表）；
+ * - 命中 review 级词 → 放行 + 置待人工复核（`result: 'review'`）。
+ */
+export async function updateNickname(name: string): Promise<NicknameUpdateResult> {
+  const clean = name.trim();
+  if (USE_MOCK) {
+    await mockDelay(null, 200);
+    const shapeError = mockShapeError(clean);
+    if (shapeError) throw new Error(shapeError);
+    const folded = clean.normalize('NFKC').toLowerCase();
+    const blocked = MOCK_BLOCK_WORDS.find((w) => folded.includes(w));
+    if (blocked) throw new Error('昵称包含违规内容，请更换后重试');
+    const review = MOCK_REVIEW_WORDS.find((w) => folded.includes(w));
+    return {
+      name: clean,
+      result: review ? 'review' : 'pass',
+      reason: review ? '包含广告内容，需人工复核' : '',
+      pendingReview: !!review,
+    };
+  }
+  const data = await request<{
+    name?: unknown;
+    result?: unknown;
+    reason?: unknown;
+    pendingReview?: unknown;
+  }>('/me/nickname', { method: 'PUT', body: { name: clean } });
+  return {
+    name: typeof data?.name === 'string' ? data.name : clean,
+    result: data?.result === 'review' ? 'review' : 'pass',
+    reason: typeof data?.reason === 'string' ? data.reason : '',
+    pendingReview: data?.pendingReview === true,
+  };
 }

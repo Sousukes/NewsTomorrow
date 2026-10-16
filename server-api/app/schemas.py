@@ -1,6 +1,7 @@
 """Pydantic 请求/响应模型。"""
 from pydantic import BaseModel, Field, field_validator
 
+from .nickname_moderation import MAX_ALIAS_LENGTH, MAX_ALIASES_PER_WORD
 from .feeds.sources import CHANNEL_KEYS
 
 
@@ -227,3 +228,86 @@ class CommentHideIn(BaseModel):
         if not v:
             raise ValueError("隐藏理由不能为空")
         return v
+
+
+def _clean_aliases(value: list[str] | None) -> list[str] | None:
+    """别名清洗：去空白、去重、限长。
+
+    限长常量直接取自引擎（`MAX_ALIAS_LENGTH` / `MAX_ALIASES_PER_WORD`）——
+    引擎加载时也会砍掉越界项，但入库前就拦住才能给运营**可解释的错误**，
+    而不是「配了却静默没生效」那一类问题。
+    `None` 原样返回（PATCH 的「不传 = 不动」）。
+    """
+    if value is None:
+        return None
+    out: list[str] = []
+    for a in value:
+        a = a.strip()
+        if not a or a in out:
+            continue
+        if len(a) > MAX_ALIAS_LENGTH:
+            raise ValueError(f"单条别名不能超过 {MAX_ALIAS_LENGTH} 个字符")
+        out.append(a)
+    return out
+
+
+class NicknameUpdateIn(BaseModel):
+    """修改昵称入参（P1-24）。
+
+    不设 `min_length`：空值/纯空白/超长/字符越界全部走
+    `validate_nickname_shape` 一道闸，统一以 **42203** 返回面向用户的提示
+    （「昵称不能为空」比 pydantic 的 「at least 1 character」可执行得多）。
+    `max_length=100` 只是解析层的硬闸——真实规则（24）由形状校验给出，
+    正常输入（输入框有 maxlength）永远碰不到这个值。
+    """
+
+    name: str = Field(max_length=100)
+
+
+class NicknameWordIn(BaseModel):
+    """昵称敏感词新增入参（P1-24）。
+
+    与 `WordIn`（P1-23 评论词库）的两处差异：
+    1. 动作集是 `block`/`review`/`allow`——**没有 `mask`**，昵称没有
+       「脱敏后照常发布」这个语义（那等于改掉用户自己起的名字）；
+    2. 多一个 `aliases`（拼音全拼/首字母/谐音/变形）。字母写法的绕过
+       （「shabi」「sb」）只有配了别名才拦得住——同音汉字替换没有字符级
+       算法可解，靠运营补别名。
+
+    主词与别名的最短长度在**路由层**校验（要归一化后按字符数计、要读配置），
+    这里只把关非空与上限。
+    """
+
+    word: str = Field(min_length=1, max_length=100)
+    action: str = Field(default="review", pattern="^(block|review|allow)$")
+    category: str = Field(default="", max_length=30)
+    aliases: list[str] = Field(default_factory=list, max_length=MAX_ALIASES_PER_WORD)
+    enabled: bool = True
+
+    @field_validator("word")
+    @classmethod
+    def _word_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("昵称敏感词不能为空")
+        return v
+
+    _aliases_clean = field_validator("aliases")(_clean_aliases)
+
+
+class NicknameWordUpdateIn(BaseModel):
+    """昵称敏感词局部更新（P1-24）：**不允许改词本身**——同 WordUpdateIn 处方。
+
+    改词等于换一个词（唯一约束、归一化结果、命中日志里的词全部随之漂移），
+    语义上是「删一条 + 加一条」——走增删两条审计比一条 `update` 更容易追溯。
+
+    `aliases` 用 `None` 而非 `default_factory=list`：**「不传」与「明确清空」**
+    必须可区分——传空数组是清空全部别名，不传是不动。
+    """
+
+    action: str | None = Field(default=None, pattern="^(block|review|allow)$")
+    category: str | None = Field(default=None, max_length=30)
+    aliases: list[str] | None = None
+    enabled: bool | None = None
+
+    _aliases_clean = field_validator("aliases")(_clean_aliases)

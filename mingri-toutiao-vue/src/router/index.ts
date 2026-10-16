@@ -79,6 +79,18 @@ const router = createRouter({
       name: 'admin-words',
       component: () => import('@/views/AdminWords.vue'),
     },
+    // 昵称敏感词库与命中日志（P1-24）：注册与改名共用同一条校验链
+    {
+      path: '/admin/nickname-words',
+      name: 'admin-nickname-words',
+      component: () => import('@/views/AdminNicknameWords.vue'),
+    },
+    // 昵称待人工复核队列（P1-24）：机器放行、人再看一眼
+    {
+      path: '/admin/nickname-reviews',
+      name: 'admin-nickname-reviews',
+      component: () => import('@/views/AdminNicknameReviews.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });

@@ -477,3 +477,163 @@ export interface HitQuery {
   /** 上一页末条的 id（服务端下发，客户端不解析） */
   cursor?: number | null;
 }
+
+// ---------------------------------------------------------------- 昵称敏感词（P1-24）
+
+/**
+ * 昵称词动作（P1-24）。与评论词库 `WordAction` 的关键差别：**没有 `mask`**——
+ * 昵称是账号级属性，"脱敏后发布"等于改掉用户自己起的名字，而用户此刻改不了。
+ *   - `block`：拒绝设置（40006，提示不回显命中词）；
+ *   - `review`：放行 + 置待人工复核（机器的判断是概率性的，先放行再让人看）；
+ *   - `allow`：白名单豁免（命中区间被 allow 区间完全包裹才豁免，降误杀）。
+ */
+export type NicknameWordAction = 'block' | 'review' | 'allow';
+
+/**
+ * 昵称敏感词行（对应 GET /api/admin/nickname-words 的条目）。
+ *
+ * `aliases` 是昵称词库独有的字段：拼音全拼 / 首字母 / 谐音 / 变形
+ * （「shabi」「sb」）只有配了别名才拦得住——同音汉字替换没有字符级算法
+ * 可解，靠运营发现后补别名。别名与主词走同一条归一化管道。
+ */
+export interface NicknameWordItem {
+  id: number;
+  word: string;
+  action: NicknameWordAction;
+  /** 分组（广告 / 辱骂 / 违禁…），可为空串 */
+  category: string;
+  aliases: string[];
+  enabled: boolean;
+  /** 累计命中次数 */
+  hitCount: number;
+  createdBy: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** GET /api/admin/nickname-words 的信封（limit+offset，运营要一遍扫完） */
+export interface NicknameWordListResult {
+  list: NicknameWordItem[];
+  total: number;
+}
+
+/** 昵称词库列表查询（不传的项后端用默认值） */
+export interface NicknameWordQuery {
+  /** 只匹配主词（别名在每行 aliases 字段里可见，不搜） */
+  keyword?: string;
+  action?: NicknameWordAction | '';
+  enabled?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/** 新增昵称敏感词入参（主词或任一别名归一化后不足 2 个有效字符 → 42204） */
+export interface NicknameWordInput {
+  word: string;
+  action?: NicknameWordAction;
+  category?: string;
+  aliases?: string[];
+  enabled?: boolean;
+}
+
+/** 局部更新入参（**不允许改词本身**；`aliases` 传空数组 = 清空，不传 = 不动） */
+export interface NicknameWordUpdateInput {
+  action?: NicknameWordAction;
+  category?: string;
+  aliases?: string[];
+  enabled?: boolean;
+}
+
+/** 昵称命中日志行（只读：误杀复盘与申诉的唯一证据） */
+export interface NicknameHitItem {
+  id: number;
+  /** 库中主词 */
+  word: string;
+  /** 实际命中的模式（主词本身或某条别名）：回答「是哪条别名拦住的」 */
+  matched: string;
+  action: 'block' | 'review';
+  /** 入口：注册 / 改名 */
+  source: 'register' | 'update';
+  /** 拦截注册时账号未落库，故可空 */
+  userId: number | null;
+  userName: string;
+  /** 提交的昵称原文：昵称整体就是上下文，判断误杀不需要更多信息 */
+  snippet: string;
+  createdAt: string;
+}
+
+/** GET /api/admin/nickname-hits 的信封（游标分页，新的在前） */
+export interface NicknameHitListResult {
+  list: NicknameHitItem[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: number | null;
+}
+
+/** 昵称命中日志查询（不传的项后端用默认值） */
+export interface NicknameHitQuery {
+  word?: string;
+  action?: 'block' | 'review' | '';
+  source?: 'register' | 'update' | '';
+  /** 只看某个用户的命中：与复核队列互相印证 */
+  userId?: number;
+  limit?: number;
+  /** 上一页末条的 id（服务端下发，客户端不解析） */
+  cursor?: number | null;
+}
+
+/**
+ * 昵称复核队列行（对应 GET /api/admin/nickname-reviews 的条目）。
+ *
+ * 与评论复核同构，但对象是**账号属性**。队列回答「哪个提交需要人看」而不是
+ * 「他现在叫什么」：用户可能已改名，故 `flaggedName`/`flaggedMatched` 取该
+ * 用户最近一条 review 级命中的原文与命中模式。
+ */
+export interface NicknameReviewItem {
+  userId: number;
+  /** 当前昵称 */
+  name: string;
+  phone: string;
+  /** 最近一次 review 级命中的时间 */
+  flaggedAt: string | null;
+  /** 当初提交的昵称 */
+  flaggedName: string | null;
+  /** 哪条别名拦的 */
+  flaggedMatched: string | null;
+}
+
+/** GET /api/admin/nickname-reviews 的信封（limit+offset） */
+export interface NicknameReviewListResult {
+  list: NicknameReviewItem[];
+  total: number;
+}
+
+/** 复核队列查询（keyword 匹配当前昵称或手机号） */
+export interface NicknameReviewQuery {
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** POST /api/admin/nickname-reviews/:user_id 的结果（不改昵称本身，只清标志） */
+export interface NicknameReviewResult {
+  userId: number;
+  name: string;
+  phone: string;
+  pendingReview: boolean;
+  reviewedAt: string | null;
+}
+
+/**
+ * PUT /api/me/nickname 的结果（P1-24）。
+ *
+ * 三级：`pass` 原样保存并清除待复核标志；`review` 放行 + 置待复核
+ * （消息即面向用户的合规提示）；`block` 走 40006，不到这里。
+ * `reason` 是机器侧的判定原因（命中原因），同样**不含命中词原文**。
+ */
+export interface NicknameUpdateResult {
+  name: string;
+  result: 'pass' | 'review';
+  reason: string;
+  pendingReview: boolean;
+}

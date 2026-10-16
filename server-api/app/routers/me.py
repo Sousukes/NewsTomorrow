@@ -1,4 +1,4 @@
-"""个人标记路由：收藏 / 浏览历史（云端同步）。
+"""个人标记路由：收藏 / 浏览历史 / 修改昵称（云端同步）。
 
 设计要点：
 - 全部需登录；数据按 `user_id` 严格隔离。
@@ -7,6 +7,8 @@
 - 合并（PUT）语义为**并集**：只增不删。避免客户端本地为空时误删云端数据；
   删除一律走显式 DELETE，意图明确、可审计。
 - 返回 `list` 为完整资讯对象，使**新设备**无需额外请求即可渲染收藏/历史列表。
+- 昵称（P1-24）是账号属性而非集合操作，故单独一个 PUT，返回校验结果
+  （通过 / 待人工复核）而非集合。
 """
 from datetime import datetime, timedelta, timezone
 
@@ -17,9 +19,18 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import News, User, UserFavorite, UserHistory
+from ..nickname_moderation import (
+    MESSAGE_REVIEW,
+    RESULT_BLOCK,
+    RESULT_PASS,
+    RESULT_REVIEW,
+    engine,
+    record_hits,
+    validate_nickname_shape,
+)
 from ..ranking import bump_hot_score, recompute_hot_scores
 from ..response import ok
-from ..schemas import MarkBulkIn, MarkIn
+from ..schemas import MarkBulkIn, MarkIn, NicknameUpdateIn
 from .news import to_out as news_to_out
 
 router = APIRouter(prefix="/api/me", tags=["me"])
@@ -248,3 +259,73 @@ def merge_history(
     added = _merge(db, user, UserHistory, UserHistory.viewed_at, body.ids)
     _trim_history(db, user)
     return ok(_history_payload(db, user), message=f"已合并 {added} 条历史")
+
+
+# ------------------------------ 昵称（P1-24） ------------------------------
+
+
+@router.put("/nickname", response_model=None)
+def update_nickname(
+    body: NicknameUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """修改昵称：形状校验 → 敏感词校验 → 保存。
+
+    三级结果（与注册入口同一条链，规则不搞两套）：
+    - 形状不合法（空/纯空白/超长/字符越界/纯符号）→ **42203**，消息即面向
+      用户的提示。前端输入框的 maxlength 只是第一道闸，**不以它为准**；
+    - 命中 `block` 级词 → **40006**，提示**不回显命中词**（回显等于给绕过者
+      一份「哪些词不能起」的对照表）。拦截同样留痕——「拦了多少次改名」
+      不能是黑箱，也识别不出反复尝试绕过；
+    - 命中 `review` 级词 → **放行** + 置 `name_pending_review` 进人工队列。
+      机器的判断是概率性的，「先放行再让人看」比吞掉用户的名字代价小；
+    - 通过 → 原样保存，并**清除**待复核标志（它只描述当前名字的审核状态；
+      当初提交过什么由命中日志留痕，不挂在队列上）。
+
+    同名重设**不做特殊分支**：保存是显式动作，服务端对提交值一视同仁。
+    词库事后变严时，老名字会在下一次保存时同样被校验——刻意不做追溯式回填
+    （复核队列针对「新提交」，不回头翻旧账）。
+    """
+    clean = body.name.strip()
+    valid, msg = validate_nickname_shape(clean)
+    if not valid:
+        raise HTTPException(status_code=422, detail={"code": 42203, "message": msg})
+
+    verdict = engine.check(db, clean)
+    if verdict.result != RESULT_PASS:
+        # 先落日志再谈拦不拦：block 的证据与 review 的入队是同一份事实
+        record_hits(
+            db,
+            verdict.hits,
+            user_id=user.id,
+            user_name=user.name,
+            source="update",
+            name=clean,
+        )
+        db.commit()
+    if verdict.result == RESULT_BLOCK:
+        raise HTTPException(status_code=400, detail={"code": 40006, "message": verdict.message})
+
+    user.name = clean
+    if verdict.result == RESULT_REVIEW:
+        user.name_pending_review = True
+    else:
+        # 改成干净名字 = 当初待复核的对象已经不在公开位上了，标志随之清除。
+        # 不变式：`name_pending_review` 只描述**当前名字**的审核状态——
+        # 「这个名字有没有人看过」。「提交过什么」的全部历史在命中日志里，
+        # 标志是状态不是事件，不该把已改名的旧提交一直挂在队列上。
+        # （词库事后变严导致的"老名字 newly flagged"同理：下次保存即重新置位。）
+        user.name_pending_review = False
+    db.commit()
+    db.refresh(user)
+    message = MESSAGE_REVIEW if verdict.result == RESULT_REVIEW else "昵称已保存"
+    return ok(
+        {
+            "name": user.name,
+            "result": verdict.result,
+            "reason": verdict.reason,
+            "pendingReview": bool(user.name_pending_review),
+        },
+        message=message,
+    )

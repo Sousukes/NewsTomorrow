@@ -28,6 +28,7 @@ vi.mock('@/api/news', () => ({
 }));
 
 import * as authApi from '@/api/auth';
+import type { LoginResult } from '@/api/auth';
 import * as meApi from '@/api/me';
 import { useNewsStore } from '@/stores/news';
 import {
@@ -562,5 +563,76 @@ describe('stores/user 管理能力标志（isAdmin）', () => {
     const s = await loginWith(false);
     expect(s.isLoggedIn).toBe(true);
     expect(s.isAdmin).toBe(false);
+  });
+});
+
+describe('stores/user 昵称（P1-24）', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    pinia = createPinia();
+    setActivePinia(pinia);
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    for (const s of liveStores) s.$dispose();
+    liveStores.length = 0;
+  });
+
+  /** 以指定昵称完成登录；flush 一次确保 prefs 已落盘 */
+  async function loginWithName(name: string) {
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 't',
+      user: { id: 1, name },
+    });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+    await flush();
+    return s;
+  }
+
+  it('登录响应下发昵称，store 持有', async () => {
+    const s = await loginWithName('坏蛋哥');
+    expect(s.name).toBe('坏蛋哥');
+  });
+
+  it('登录响应缺昵称时为空串（界面回落默认名）', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 't',
+      // 类型上 name 必填，运行时可能缺：按缺字段处理，回落空串
+      user: { id: 1 },
+    } as unknown as LoginResult);
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+    expect(s.name).toBe('');
+  });
+
+  it('改名成功后 setName 即更新并落盘，刷新页面不退回默认名', async () => {
+    const s = await loginWithName('旧名字');
+    s.setName('新名字');
+    await flush();
+    expect(s.name).toBe('新名字');
+    expect(JSON.parse(localStorage.getItem(PREFS_KEY)!).name).toBe('新名字');
+
+    // 重建 pinia = 模拟刷新页面后重新创建 store
+    pinia = createPinia();
+    setActivePinia(pinia);
+    localStorage.setItem('mingri-toutiao:token', 't');
+    const s2 = makeStore();
+    expect(s2.isLoggedIn).toBe(true);
+    expect(s2.name).toBe('新名字');
+  });
+
+  it('登出后清空昵称，不把上个账号的名字留给匿名态', async () => {
+    const s = await loginWithName('坏蛋哥');
+    vi.mocked(authApi.logout).mockResolvedValue(undefined);
+    await s.logout();
+    await flush();
+    expect(s.name).toBe('');
+    expect(JSON.parse(localStorage.getItem(PREFS_KEY)!).name).toBe('');
   });
 });

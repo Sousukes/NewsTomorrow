@@ -26,7 +26,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **404** 项，覆盖：
+- **单元测试**：Vitest 共 **467** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
@@ -40,6 +40,9 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   - `stores/user` 管理能力标志 `isAdmin`（6）：登录响应带 `isAdmin=true` 时置位、**缺省不授予特权**、
     **落盘后刷新页面运营入口不消失**、登出归位（不把上个账号的特权留给匿名态）、
     **未登录时忽略 prefs 里的 isAdmin**（token 失效不得留下管理入口）、普通账号仍为 false
+  - `stores/user` 昵称下发与清理（P1-24，4）：登录响应下发昵称且 store 持有、
+    缺昵称回落空串（界面显示默认名）、改名成功 `setName` 即更新并落盘（刷新不退回默认名）、
+    **登出清空昵称**（不把上个账号的名字留给匿名态）
   - `api/admin`（81）：`ADMIN_SOURCES_SUPPORTED` 仅在真实后端为真（mock 模式下恒隐藏入口）、
     `ensureRealBackend` 守卫、行数据归一化（缺 `key` 的脏行丢弃、`lastError` 空串转 null、
     **`respectRobots` 缺失时按更保守的一方兜底为 `true`、显式 `false` 原样透出**）、
@@ -130,7 +133,26 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
     **待复核**（P1-23：**黄 chip「待复核」+「通过复核」按钮**，且不套用已隐藏的降透明度
     （脱敏评论仍可见）、非待复核行没有复核入口、**「待复核」筛选带 status=pending 重请求
     且再点取消**、复核成功清标记 + toast、**待复核筛选下复核成功后行移除**（只复位状态
-    不清数据会停在旧结果）、复核失败错误进横幅且行保持待复核）
+    不清数据会停在旧结果）、复核失败错误进横幅且行保持待复核)
+  - `views/AdminNicknameWords`（32）：基础渲染（词/动作 chip/分组/**别名标签**/命中次数/
+    添加人、无权限态、403 态、错误横幅、空词库文案、**已停用词整行降透明度 + chip
+    且按钮反转为「启用」**）；**新增**（空词前端拦截、成功就地插入 + toast 说明"立即生效"、
+    后端 **42204/40906** 错误留在表单下方、**别名随主词一起提交**）；
+    **启停与删除**（删除二次确认、删除后行移除且 total 递减、重载索引提示生效条数）；
+    **筛选**（动作 chips 带参重请求且再点取消、「仅看已启用」、搜索回车、**清除筛选重新拉取**）；
+    **命中日志**（行含命中词/**实际命中模式**（主词或别名）/拦截或待复核/注册或改名来源/
+    昵称原文/用户/时间、字段筛选带参重请求、cursor 追加、无更多不出按钮）
+  - `views/AdminNicknameReviews`（15）：队列渲染（用户/手机/**当初提交的昵称**/
+    **哪条别名拦的**/标记时间、共 N 条、无权限态、403 态、错误横幅、**空态文案点明
+    "没有待复核昵称"**）；**搜索**（关键词按当前昵称/手机号带参重请求、清除重新拉取）；
+    **通过复核**（成功行移除且 total 递减 + toast、**重复复核幂等**不报错、
+    40408 错误进横幅、**只清标志不改昵称**——行里名字始终是用户当前的名字）；
+    **加载更多**（offset 追加、无更多不出按钮）
+  - `views/Profile`（12）：昵称展示（**待复核徽标**——名字是放行的但没人看过；
+    缺省回落默认名「头条用户」）；**改名弹窗**（形状前端预检——空/纯空白/超 24/非法字符
+    不给发请求、成功即刷新展示 + toast、**block 40006 提示不回显命中词**且弹层不关、
+    **review 结果提示"将通过人工复核后展示"并给昵称加待复核徽标**、
+    失败错误进弹层、未登录不进入口）
   - `components/SourceHealthTrend`（17）：四指标渲染（成功率/成功轮均条数/抓取轮次/失败次数）、
     **空窗口不给图**、`rate` 为 null 显示"—"而非 0%、**格子按 `days` 铺满再按日期落点**、
     无数据日留浅底空格（**不伪装失败**）、全失败日柱高强制 6% 不塌成零像素、
@@ -420,6 +442,8 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 | `/admin/news` | `AdminNews` | **资讯审核与下架**（P1-20）：全部/可见/已下架三态 chips + 关键词搜索（服务端筛选）、频道标签、置顶 chip、**已下架行红 chip + 理由 + 下架时间**；**下架弹窗理由必填**（空理由/超 300 字前端拦截，「留痕是准入条件」）、一键恢复、置顶开关（乐观更新 + 失败回滚）、游标「加载更多」、每行「历史」直达审计时间线 |
 | `/admin/comments` | `AdminComments` | **评论治理**（P1-22）：全部/可见/已隐藏/**待复核**四态 chips + 关键词搜索（服务端筛选）、**已隐藏行降透明度 + 红 chip + 理由 + 隐藏于**、隐藏理由必填（前端拦截）、一键恢复、游标「加载更多」、每行「历史」直达审计；P1-23 新增**待复核黄 chip + 「通过复核」**（只清标记，不改可见性） |
 | `/admin/words` | `AdminWords` | **敏感词库**（P1-23）：拦截/脱敏/白名单三类词的新增（动作 + 分组）与启停/删除（二次确认）、**「重载索引」**手动同步其他实例、按动作与启用筛选；下方**命中日志**（正文/昵称筛选、原文片段、未落库标注、游标「加载更多」）——脱敏不可逆，它判断误杀的唯一证据 |
+| `/admin/nickname-words` | `AdminNicknameWords` | **昵称敏感词库**（P1-24）：拦截/待复核/白名单三类词的新增（动作 + 分组 + **拼音/谐音别名**）与启停/删除（二次确认）、「重载索引」；下方**昵称命中日志**（注册/改名来源筛选、**实际命中模式**（主词或哪条别名）、提交的昵称原文、游标「加载更多」） |
+| `/admin/nickname-reviews` | `AdminNicknameReviews` | **昵称待复核队列**（P1-24）：命中 `review` 级词被放行但置待复核标志的用户列表——展示**当初提交的昵称**与**哪条别名拦的**（队列回答「哪个提交需要人看」，不是「他现在叫什么」）；「通过复核」只清标志、**不改昵称本身**；关键词按当前昵称/手机号搜索 |
 
 > 底部 `TabBar` 仅对带 `meta.tab` 的路由（首页/视频/消息/我的）显示；详情、评论、图集、登录、搜索类整页不显示。
 
@@ -486,6 +510,20 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   行数据经 `toWord()` / `toHit()` 归一化：**未知 `action` 一律降级 `mask`**（数据异常时
   宁可"先脱敏留给人看"，也不把用户发言直接吞掉——与后端 `MODERATION_DEFAULT_ACTION` 同口径）、
   命中行的 `commentId` 缺失落成 `null`（"被拦截、没落库"的唯一信号，不编造 id）。
+  另含昵称校验与昵称词库八接口（P1-24）：`updateNickname(name)` → `PUT /me/nickname`
+  （`api/me.ts`；三级结果——形状 42203 / block 40006 提示**不回显命中词** / review
+  **放行** + `pendingReview`；mock 模式有同规则形状校验副本，只服务离线演示）、
+  `fetchNicknameWords({ keyword, action, enabled, limit, offset })` → `GET /admin/nickname-words`、
+  `createNicknameWord(input)` → `POST /admin/nickname-words`（**别名逐个随主词同管道校验**）、
+  `updateNicknameWord(id, input)` → `PATCH /admin/nickname-words/:id`、
+  `deleteNicknameWord(id)` → `DELETE /admin/nickname-words/:id`、
+  `reloadNicknameWords()` → `POST /admin/nickname-words/reload`、
+  `fetchNicknameHits({ word, action, source, userId, limit, cursor })` → `GET /admin/nickname-hits`、
+  `fetchNicknameReviews({ keyword, limit, offset })` → `GET /admin/nickname-reviews`、
+  `reviewNickname(userId)` → `POST /admin/nickname-reviews/:userId`
+  （后七个仅真实后端，`ensureRealBackend` 守卫）。`toNicknameWord()` **未知 `action`
+  降级 `review`**（与后端 `FALLBACK_ACTION` 同口径——数据异常时"放行 + 让人看一眼"，
+  不吞用户昵称）；`aliases` 脏数据按空数组归一。
 
 > store 采用**离线优先**：本地先更新并持久化，真实模式下再后台与服务端同步（失败静默，不影响交互）。
 
@@ -519,7 +557,7 @@ npm run dev:api     # 终端 2（把 .env.api 指向 3001 即切换）
 
 ```bash
 node scripts/contract-check.mjs    # 需后端已启动 + DEMO_PASSWORD（47 项，含 18 项二级评论契约）
-# 追加校验管理端接口（当前账号须具备管理能力，共 194 项：源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + 资讯审核 31 + 评论治理 38 + 敏感词 42）
+# 追加校验管理端接口（当前账号须具备管理能力，共 206 项：源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + 资讯审核 31 + 评论治理 38 + 敏感词 42 + 昵称校验 59）
 DEMO_PASSWORD=123456 CHECK_ADMIN=1 node scripts/contract-check.mjs
 ```
 
@@ -531,6 +569,9 @@ DEMO_PASSWORD=123456 CHECK_ADMIN=1 node scripts/contract-check.mjs
 > 公开四路过滤（列表/详情/搜索/评论）对已下架条目返回与「不存在」**同码 40400**）。
 > P1-22 的评论治理三端点在 mock 上同样可用——含**演示资讯的种子评论**（其中一条已隐藏）
 > 供演示「已隐藏」分支，公开五路过滤（主列表/回复/计数/点赞/回复）与真实后端一致。
+> P1-24 的昵称校验八端点在 mock 上同样可用——含**种子昵称词**（5 条，其中 1 条带拼音别名）
+> 与**待复核账号**（2 个）供演示队列分支；`PUT /me/nickname` 的三级结果（42203/40006/review）
+> 与真实后端逐字一致。
 
 接口清单与错误码见 `../server-api/README.md`。响应统一 `{ code, message, data }`，`code: 0` 成功。
 
@@ -601,13 +642,13 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **工程基建**：ESLint + Prettier + `npm run verify` + GitHub Actions CI
 - [x] 全局错误边界（`ErrorBoundary` + `app.config.errorHandler`），消除白屏
 - [x] **无限滚动**：`useInfiniteList` + store `loadMore`（去重/并发幂等/末页判定）+ 骨架屏与底部状态
-- [x] **单元测试**：Vitest 404 项（前端）+ pytest 505 项（后端），已接入 CI
+- [x] **单元测试**：Vitest 467 项（前端）+ pytest 586 项（后端），已接入 CI
 - [x] API 层：`api/`（news / comments / auth + http 客户端，token 注入、`{code,data}` 解包），未配后端自动走 mock
 - [x] store 全面接 API（news/comments 离线优先 + 后台同步；user 增 token 与 login/logout）
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放
 - [x] Storybook 工程化（`@storybook/vue3-vite`，7 个组件 stories + 静态构建）
 - [x] **FastAPI + SQLite 后端**（`../server-api/`）：JWT 鉴权、PBKDF2 密码、资讯/评论/认证接口、SQLite 持久化
-- [x] 前后端契约自动化校验（`scripts/contract-check.mjs`，**47 项全通过**，含 `/me` 收藏与历史、排序三模式与非法 `sort` 422、热搜词与搜索即统计、**二级评论 18 项**；`CHECK_ADMIN=1` 另加管理端 **147 项**——源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + **P1-20 资讯审核 31** + **P1-22 评论治理 38** + **P1-23 敏感词 42**）
+- [x] 前后端契约自动化校验（`scripts/contract-check.mjs`，**47 项全通过**，含 `/me` 收藏与历史、排序三模式与非法 `sort` 422、热搜词与搜索即统计、**二级评论 18 项**；`CHECK_ADMIN=1` 另加管理端 **206 项**——源管理 9 + 白名单 9 + 审计 7 + 健康趋势 11 + **P1-20 资讯审核 31** + **P1-22 评论治理 38** + **P1-23 敏感词 42** + **P1-24 昵称校验 59**）
 - [x] **数据源迁移到 PostgreSQL 18.6**（JSONB 生效，SQLite 全量数据已迁移并保留回退）
 - [x] **收藏 / 浏览历史云端同步**：`api/me.ts` + `stores/user.ts`（离线优先、登录后**并集合并**、
   写操作乐观更新 + 后台推送、登出清空本地标记防串号）；服务端 `user_favorites` / `user_history`
@@ -659,6 +700,22 @@ npm run build-storybook# 产出静态站 storybook-static/
   评论治理页新增「待复核」筛选与「通过复核」（只清标记，不改可见性；仍不合适应走隐藏）。
   词库改完**立即生效**（本进程缓存失效，其他实例靠 TTL 或手动重载）；
   mock 后端七端点 + 词库/命中/待复核种子同步支持
+- [x] **用户昵称敏感词校验**（P1-24）：此前昵称**没有任何修改入口与校验**——脏昵称跟着
+  每条评论与通知展示，等于让绕过者换个地方贴。新增 `PUT /me/nickname`（注册与改名同一条链，
+  规则不搞两套），**三动作刻意无 mask**（昵称是账号属性，「脱敏后发布」等于改掉用户自己起的
+  名字）：`block` 拒绝设置（提示**不回显命中词**）、`review` **默认**——**放行** + 置待复核
+  进人工队列、`allow` 白名单完全包裹才豁免、`pass` 清待复核标志。归一化抗**七类绕过**：
+  大小写/全半角/空格标点零宽、**重复压缩**（`aabbcc→abc`，昵称短无语故评论不做的这里做）、
+  **leetspeak**（`4/@→a、0→o…`，模式与文本同管道）、**数字插字**（「博0彩→博彩」，
+  与 leetspeak 互补）、**繁简 curated 表**（零依赖）；**拼音谐音走词条别名**（同音字替换
+  无字符级算法可解，运营发现后补 `aliases`，与主词同管道——零新依赖路线）。四形态
+  `base/nodigits/collapsed/collapsed-nodigits` 各带下标映射；引擎**复用**评论的
+  Aho-Corasick 与指纹缓存，**新表不复用** `sensitive_words`（拦评论还是拦昵称要说清）。
+  新增 `/admin/nickname-words`（词库 + **别名编辑** + 命中日志——**实际命中模式**回答
+  「哪条别名拦的」）与 `/admin/nickname-reviews`（待复核队列——展示**当初提交的昵称**，
+  「通过复核」只清标志、**不改昵称本身**）；`Profile.vue` 增昵称展示（**待复核徽标**）
+  与改名弹窗（形状预检 + block/review/pass 三级反馈）。mock 后端六 admin 路由 +
+  `PUT /me/nickname` + 种子（5 词含拼音别名、2 个待复核账号）同步支持
 
 ### 待完成 / 依赖后端
 

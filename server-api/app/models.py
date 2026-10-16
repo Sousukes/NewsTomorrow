@@ -33,6 +33,14 @@ class User(Base):
     phone = Column(String(20), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     name = Column(String(50), nullable=False, default="明日头条用户")
+    # ---- P1-24 昵称待人工复核 ----
+    # 命中 review 级昵称词时置位：放行但需运营看一眼。与 comments.pending_review
+    # 同一处方——**不建索引**（待复核集预期很小，索引只会拖慢每次昵称写入），
+    # 队列查询走全表扫描 + 按 id 倒序截断即可。
+    # 与昵称本身正交：复核通过只清标志，不改用户自己起的名字。
+    name_pending_review = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    # 复核时间：复核动作同样要留痕（审计 `nickname.review`）。NULL = 未复核过
+    name_reviewed_at = Column(String(30))
     created_at = Column(String(30), nullable=False, default=now_str)
     # token 版本：JWT 载荷携带 ver，校验时比对；自增即可吊销该用户全部已签发 token
     token_version = Column(Integer, nullable=False, default=0, server_default="0")
@@ -487,4 +495,72 @@ class SensitiveHit(Base):
         # 「这个词命中过多少次 / 最近命中」按词查且要按时间倒序
         Index("ix_sensitive_hits_word_id", "word", "id"),
     )
+
+
+class NicknameWord(Base):
+    """昵称敏感词库（P1-24）：运营可维护，动作集与评论词库**不同**。
+
+    为什么不复用 `sensitive_words`：评论有 `mask`（脱敏后照常发布），昵称没有
+    这个语义——昵称是账号属性，"脱敏"意味着改掉别人的名字，而用户此刻改不了。
+    昵称的动作是 `block`（拒绝设置）与 `review`（放行 + 待人工复核）。
+    两张表的动作集不同、别名只对昵称有意义，硬合并会让"这个词拦的是评论还是
+    昵称"永远说不清（错误码/文案分发也会被迫共用一套）。
+
+    - `block`：拒绝设置（**40006**，提示不回显命中词）；
+    - `review`：**默认**——放行但置 `users.name_pending_review` 进人工队列。
+      机器的判断是概率性的，"先放行再让人看"比"直接吞掉用户起的名字"代价小；
+    - `allow`：白名单豁免（命中区间被 allow 区间完全包裹才生效），降误杀的逃生门；
+    - `aliases`：**拼音全拼 / 首字母 / 谐音 / 常见变形**。与主词走同一条归一化
+      管道、作为额外模式串参与匹配（"shabi"、"sb" 这类字母写法只有配了别名
+      才拦得住——同音汉字替换没有字符级算法可解，靠运营补别名）；
+    - `enabled=False` 是停用而非删除：删错的词要能一秒恢复；
+    - `hit_count`：累计命中次数。高频词要么是热点、要么是误杀大户，运营都必须看见；
+    - `updated_at` 参与**热更新指纹**（`MAX(updated_at)` + `COUNT(*)`）。
+    """
+
+    __tablename__ = "nickname_words"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    word = Column(String(100), nullable=False, unique=True, index=True)
+    action = Column(String(10), nullable=False, default="review")
+    category = Column(String(30), nullable=False, default="")  # 分组：广告/辱骂/违禁…
+    # 别名（JSON 数组）：拼音/谐音/变形。引擎加载时与主词走同一条归一化管道，
+    # 每个别名按各形态展开成额外模式串；命中别名时日志记 `matched` 便于回溯。
+    aliases = Column(JSONType, default=list)
+    enabled = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+    hit_count = Column(Integer, nullable=False, default=0)
+    created_by = Column(String(20), nullable=False, default="")  # 加词的运营（手机号）
+    created_at = Column(String(30), default=now_str)
+    updated_at = Column(String(30), default=now_str, index=True)
+
+
+class NicknameHit(Base):
+    """昵称敏感词命中日志（P1-24）：误杀复盘与申诉的唯一证据。
+
+    与 `sensitive_hits` 分开存：两张词库的动作集、复核流程都不同，混在一张表里
+    查询时要先按词反查是哪种词，且 `field` 之类的区分列会变成第二套语义。
+
+    - 记**主词本身**而非 `word_id`：词被删掉后日志仍要读得懂；
+    - `matched` 记**实际命中的模式**（主词或某条别名）：回答"是哪条别名拦住的"，
+      也是判断"该补哪个别名"的依据；
+    - `source` 区分注册 / 改昵称：反复尝试绕过基本发生在改名入口；
+    - `snippet` 存**提交的昵称原文**（≤24 字符，整体就是上下文）；
+    - block 时同样留痕：否则"拦了多少次改名"是黑箱。
+    """
+
+    __tablename__ = "nickname_hits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    word = Column(String(100), nullable=False)
+    matched = Column(String(100), nullable=False, default="")
+    action = Column(String(10), nullable=False)  # block | review（allow 不记）
+    source = Column(String(10), nullable=False, default="update")  # register | update
+    user_id = Column(Integer, nullable=True)
+    user_name = Column(String(50), nullable=False, default="")
+    snippet = Column(String(300), nullable=False, default="")
     created_at = Column(String(30), nullable=False, default=now_str, index=True)
+
+    __table_args__ = (
+        # 「这个词命中过多少次 / 最近命中」按词查且要按时间倒序
+        Index("ix_nickname_hits_word_id", "word", "id"),
+    )

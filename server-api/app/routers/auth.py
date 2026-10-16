@@ -1,4 +1,9 @@
-"""认证路由：注册 / 登录 / 注销。"""
+"""认证路由：注册 / 登录 / 注销。
+
+注册时的昵称（P1-24）与「个人中心改昵称」走**同一条校验链**（形状 + 敏感词）：
+两套规则必然漂移，而用户分不清自己的名字是从哪个入口设的——漂移的方向
+永远是「注册放过、改名拦住」，用户侧表现为「同一个名字有时能设有时不能」。
+"""
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,6 +12,13 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import User, now_str
+from ..nickname_moderation import (
+    RESULT_BLOCK,
+    RESULT_REVIEW,
+    engine,
+    record_hits,
+    validate_nickname_shape,
+)
 from ..response import ok
 from ..schemas import LoginIn, RegisterIn, TokenOut
 from ..security import create_token, hash_password, verify_password
@@ -26,6 +38,10 @@ def _token_payload(user: User, db: Session) -> dict:
             "name": user.name,
             "phone": user.phone,
             "isAdmin": is_admin(user.phone, db),
+            # 昵称待人工复核（P1-24）：让个人中心在下次打开时仍能显示"审核中"——
+            # 否则这个标志只有管理员看得见，用户侧只剩保存那一刻的一次性提示，
+            # 刷新即失忆（写而不读的状态，迟早被当成没用的字段删掉）。
+            "namePendingReview": bool(user.name_pending_review),
         },
     }
 
@@ -36,15 +52,44 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail={"code": 40001, "message": "请输入正确的 11 位手机号"})
     if db.query(User).filter(User.phone == body.phone).first():
         raise HTTPException(status_code=409, detail={"code": 40901, "message": "该手机号已注册，请直接登录"})
+    # 昵称是**可选**字段：None / 空 / 纯空白一律走默认名——默认名是我们自己的，
+    # 不是用户起的，不过敏感词校验。一旦提供了非空白值，就与「个人中心改昵称」
+    # 走同一条链（形状 42203 / 拦截 40006 / 待复核置位）。
+    clean = (body.name or "").strip()
+    verdict = None
+    if clean:
+        valid, msg = validate_nickname_shape(clean)
+        if not valid:
+            raise HTTPException(status_code=422, detail={"code": 42203, "message": msg})
+        verdict = engine.check(db, clean)
+        if verdict.result == RESULT_BLOCK:
+            # 拦注册而不是悄悄换成默认名：静默替换会让用户以为名字注册成功了，
+            # 事后在个人中心才发现「名字怎么变了」——更糟。手机号此时尚未落库，
+            # 换个昵称可以立即重试。被拦的尝试同样留痕（账号还没有 id，记 NULL）。
+            record_hits(
+                db, verdict.hits, user_id=None, user_name="", source="register", name=clean
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=400, detail={"code": 40006, "message": verdict.message}
+            )
     user = User(
         phone=body.phone,
         password_hash=hash_password(body.password),
-        name=body.name or "明日头条用户",
+        name=clean or "明日头条用户",
         created_at=now_str(),
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+    if verdict is not None and verdict.result == RESULT_REVIEW:
+        user.name_pending_review = True
+        # 落库后才有 user.id：命中日志要能按人定位
+        record_hits(
+            db, verdict.hits, user_id=user.id, user_name=user.name, source="register", name=clean
+        )
+        db.commit()
+        db.refresh(user)
     return ok(_token_payload(user, db), message="注册成功")
 
 

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import Button from '@/components/Button.vue';
 import { useUserStore } from '@/stores/user';
+import { updateNickname } from '@/api/me';
 import { THEME_OPTIONS } from '@/constants/theme';
 
 const router = useRouter();
@@ -52,6 +53,18 @@ const menu = computed(() => {
       to: '/admin/words',
     });
     items.push({
+      key: 'admin-nickname-words',
+      label: '昵称敏感词',
+      desc: '维护昵称词库、查看命中日志',
+      to: '/admin/nickname-words',
+    });
+    items.push({
+      key: 'admin-nickname-reviews',
+      label: '昵称复核',
+      desc: '人工复核被放行的昵称',
+      to: '/admin/nickname-reviews',
+    });
+    items.push({
       key: 'admin-users',
       label: '管理员管理',
       desc: '指定可访问后台的账号',
@@ -66,6 +79,55 @@ function go(to: string) {
   if (to) router.push(to);
 }
 
+// ------------------------------ 修改昵称（P1-24） ------------------------------
+
+/**
+ * 昵称内联编辑。三级结果都由后端把关，前端只做「少跑一轮无效请求」的预校验：
+ * - `block`（40006）：拒绝保存，提示**不回显命中词**——文案由后端下发，原样展示；
+ * - 形状问题（42203）：空 / 字符集 / 长度，同样是后端文案；
+ * - `review`：放行但待人工复核，保存成功的同时明确告知用户「将通过人工复核后展示」；
+ * - `pass`：原样保存。
+ */
+const editing = ref(false);
+const draft = ref('');
+const saving = ref(false);
+const editError = ref('');
+/** 保存成功的说明（复核态下它是用户唯一能看到的提示） */
+const notice = ref('');
+
+function openEditor() {
+  editing.value = true;
+  draft.value = user.name;
+  editError.value = '';
+  notice.value = '';
+}
+
+function closeEditor() {
+  editing.value = false;
+  editError.value = '';
+}
+
+async function saveNickname() {
+  const next = draft.value.trim();
+  if (!next) {
+    editError.value = '昵称不能为空';
+    return;
+  }
+  saving.value = true;
+  editError.value = '';
+  try {
+    const result = await updateNickname(next);
+    user.setName(result.name);
+    notice.value = result.result === 'review' ? '昵称已保存，将通过人工复核后展示' : '昵称已保存';
+    closeEditor();
+  } catch (e) {
+    // 40006 / 42203 的 message 即面向用户的提示，直接展示
+    editError.value = e instanceof Error && e.message ? e.message : '保存失败，请稍后重试';
+  } finally {
+    saving.value = false;
+  }
+}
+
 async function logout() {
   await user.logout();
   router.push('/');
@@ -77,10 +139,55 @@ async function logout() {
     <div class="profile__banner">
       <span class="profile__avatar" />
       <div class="profile__info">
-        <span class="profile__name">{{ user.isLoggedIn ? '明日头条用户' : '未登录' }}</span>
+        <span class="profile__name">
+          {{ user.isLoggedIn ? user.name || '明日头条用户' : '未登录' }}
+          <!-- 改名入口：昵称是账号级属性，注册与改名共用同一条校验链 -->
+          <button
+            v-if="user.isLoggedIn"
+            type="button"
+            class="profile__rename"
+            aria-label="修改昵称"
+            @click="openEditor"
+          >
+            修改
+          </button>
+        </span>
         <span class="profile__sub">
           {{ user.isLoggedIn ? '欢迎回来，继续浏览今日热点' : '登录后同步收藏与历史' }}
         </span>
+        <span v-if="notice" class="profile__notice" role="status">{{ notice }}</span>
+      </div>
+    </div>
+
+    <!-- 昵称编辑器：拦截（不回显命中词）/ 形状 / 复核三态都由后端文案驱动 -->
+    <div v-if="editing" class="profile__editor" role="dialog" aria-label="修改昵称">
+      <p class="profile__editor-title">修改昵称</p>
+      <input
+        v-model="draft"
+        type="text"
+        class="profile__editor-input"
+        aria-label="新昵称"
+        placeholder="2-24 个字符，支持中英文、数字与 _ - · . 等符号"
+        maxlength="24"
+        @keyup.enter="saveNickname"
+      />
+      <p class="profile__editor-count">{{ draft.length }}/24</p>
+      <p v-if="editError" class="profile__editor-error" role="alert">{{ editError }}</p>
+      <div class="profile__editor-actions">
+        <Button
+          variant="primary"
+          size="md"
+          :label="saving ? '保存中…' : '保存'"
+          :disabled="saving"
+          @click="saveNickname"
+        />
+        <Button
+          variant="secondary"
+          size="md"
+          label="取消"
+          :disabled="saving"
+          @click="closeEditor"
+        />
       </div>
     </div>
 
@@ -168,11 +275,83 @@ async function logout() {
   font-size: 19px;
   font-weight: 700;
   color: var(--color-text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 「修改」：贴在昵称旁的小入口，不抢主视觉 */
+.profile__rename {
+  border: 1px solid var(--color-divider);
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: transparent;
+  color: var(--color-primary);
+  font-size: 12px;
+  font-family: var(--font-cn);
+  cursor: pointer;
+}
+
+/* 保存结果说明：复核态下这是用户唯一能看到的提示 */
+.profile__notice {
+  font-size: 12px;
+  color: #b06000;
 }
 
 .profile__sub {
   font-size: 13px;
   color: var(--color-text-secondary);
+}
+
+/* 昵称编辑器：底部抽屉，与治理页的确认弹层同款姿态 */
+.profile__editor {
+  position: sticky;
+  bottom: 0;
+  margin: 12px 16px 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--color-card-bg);
+  box-shadow: var(--shadow-card);
+}
+
+.profile__editor-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.profile__editor-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--color-divider);
+  border-radius: 8px;
+  background: var(--color-page-bg);
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-family: var(--font-cn);
+}
+
+.profile__editor-count {
+  margin: 6px 0 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 拦截 / 形状错误：文案由后端下发（40006 不回显命中词），原样展示 */
+.profile__editor-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #d93025;
+}
+
+.profile__editor-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .profile__theme {

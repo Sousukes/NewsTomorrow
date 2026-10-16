@@ -514,6 +514,610 @@ function modRecord(list, ctx) {
   }
 }
 
+/* --------------------- 昵称敏感词校验（P1-24） --------------------- */
+
+/**
+ * 后端 `app/nickname_moderation.py` 的简化镜像。mock 不追求算法性能（词库几条，
+ * `indexOf` 足够），但**语义必须与后端一致**——否则前端在 mock 下调通的行为，
+ * 接真实后端会全变（P1-23 同款教训：看起来能跑，接上才发现开关没生效）。
+ *
+ * 与评论引擎（P1-23）的三处刻意不同，镜像里也必须不同：
+ * 1. **动作集没有 mask**：昵称是账号级属性，「脱敏后照常发布」等于改掉用户
+ *    自己起的名字，而用户此刻改不了。对应动作是 block（拒绝）与 review（放行
+ *    + 待人工复核）；
+ * 2. **多做重复字符压缩**（collapsed 形态）：评论正文做压缩误杀率高
+ *    （「我真的很喜欢」会判成刷屏），昵称短、无语义，压缩面小得多；
+ * 3. **多一条别名**（拼音全拼/首字母/谐音/leetspeak 写法）：字母写法的绕过
+ *    （「bendan」「4d99」）只有配了别名才拦得住。
+ *
+ * 与后端的两处实现差异（都是 mock 不需要的东西）：
+ * - 无指纹/TTL 缓存：词库就是内存数组，写操作后置脏标记、下次校验前重建
+ *  索引——「保存即生效」与后端 invalidate() 同口径，且不在校验路径上重复加载；
+ * - Python `casefold()` 以 JS `toLowerCase()` 代替（ß→ss 等少数边缘除外，
+ *   不影响中文与 ASCII 主路径）。
+ */
+const NICKNAME_MODERATION_ENABLED =
+  String(process.env.NICKNAME_MODERATION_ENABLED ?? 'true') !== 'false';
+const NICKNAME_MIN_LENGTH = 2;
+const NICKNAME_MAX_LENGTH = 24;
+/** 词条最短长度：按**每个归一化形态**的字符数计（折叠形态天然更短，放任会把
+ *  任何含「约」的昵称判成命中「约约」——那不是运营想要的误杀面） */
+const NICKNAME_MIN_WORD_LEN = 2;
+const NICKNAME_ALLOWED_SYMBOLS = '_-·.・';
+/** 符号白名单 = 配置项 + 空格（配置只放「非常空格」的符号：env 会 strip 整个值，
+ *  尾随空格在环境变量里活不下来，故空格在代码里补——与后端同一理由） */
+const NICK_SYMBOLS = new Set([...NICKNAME_ALLOWED_SYMBOLS, ' ']);
+const NICKNAME_ACTIONS = ['block', 'review', 'allow'];
+/** 动作严厉程度：区间重叠取最严（宁可拦住也别放过） */
+const NICK_SEVERITY = { allow: 0, review: 1, block: 2 };
+/** 库中 action 缺失/未知时的兜底：刻意取 review 而非 block——数据异常时应当降级
+ *  为「放行 + 让人看一眼」，而不是把用户的昵称直接吞掉 */
+const FALLBACK_ACTION = 'review';
+// 面向用户的合规提示（刻意不回显命中的词——回显等于给绕过者一份对照表）
+const NICK_MESSAGE_BLOCK = '昵称包含违规内容，请更换后重试';
+const NICK_MESSAGE_REVIEW = '昵称已保存，将通过人工复核后展示';
+const NICK_MESSAGE_PASS = '昵称可以使用';
+const MAX_ALIASES_PER_WORD = 20;
+const MAX_ALIAS_LENGTH = 50;
+/** 是否启用重复字符压缩形态（"aabbcc" → "abc"），默认开（同后端配置） */
+const NICKNAME_COLLAPSE_REPEATS =
+  String(process.env.NICKNAME_COLLAPSE_REPEATS ?? 'true') !== 'false';
+
+/**
+ * 字母数字混淆（leetspeak）：外形相近的字符归并到同一字母。
+ * 只做一对一归并——模式串与文本走同一条管道，任何一对一映射都不会漏放，
+ * 只会让被归并的字符互相命中（这正是对抗变形想要的）。
+ */
+const NICK_CONFUSABLES = new Map([
+  ['4', 'a'],
+  ['@', 'a'],
+  ['3', 'e'],
+  ['1', 'i'],
+  ['!', 'i'],
+  ['|', 'i'],
+  ['l', 'i'],
+  ['0', 'o'],
+  ['5', 's'],
+  ['$', 's'],
+  ['7', 't'],
+  ['+', 't'],
+  ['8', 'b'],
+  ['6', 'g'],
+  ['9', 'g'],
+  ['2', 'z'],
+]);
+
+/**
+ * 常用繁→简映射（与后端 `_T2S_PAIRS` 逐字相同，curated 子集）。
+ * 刻意不做完整 OpenCC 表：那需要数千项且要随 Unicode 更新维护，而这里要的是
+ * 零运行时依赖。未覆盖的繁体变体由运营配成词条别名。
+ */
+const NICK_T2S_PAIRS = `
+愛爱 礙碍 骯肮 壩坝 擺摆 敗败 辦办 幫帮 寶宝 報报 備备 貝贝 筆笔 幣币 畢毕 斃毙
+邊边 變变 標标 錶表 彆别 濱滨 餅饼 撥拨 補补 佈布 參参 蠶蚕 艙舱 倉仓 蒼苍 測测
+層层 纏缠 蟬蝉 讒谗 顫颤 懺忏 長长 場场 嘗尝 償偿 廠厂 暢畅 車车 徹彻 塵尘 陳陈
+襯衬 撐撑 稱称 懲惩 癡痴 馳驰 齒齿 熾炽 衝冲 蟲虫 醜丑 齣出 處处 觸触 辭辞 聰聪
+叢丛 湊凑 竄窜 錯错 達达 帶带 貸贷 擔担 膽胆 誕诞 彈弹 當当 黨党 導导 燈灯 鄧邓
+敵敌 遞递 點点 澱淀 電电 釣钓 調调 疊叠 動动 棟栋 鬥斗 獨独 讀读 斷断 鍛锻 隊队
+對对 噸吨 奪夺 墮堕 鵝鹅 額额 惡恶 餓饿 兒儿 爾尔 餌饵 貳贰 發发 罰罚 閥阀 範范
+販贩 飯饭 訪访 紡纺 飛飞 誹诽 廢废 費费 紛紛 墳坟 奮奋 憤愤 糞粪 豐丰 風风 鳳凤
+膚肤 輻辐 撫抚 輔辅 復复 負负 婦妇 縛缚 該该 鈣钙 幹干 趕赶 剛刚 崗岗 綱纲 鋼钢
+寫写 學学 畫画 劃划 壞坏 歡欢 環环 還还 會会 繪绘 擊击 饑饥 雞鸡 積积 績绩 擠挤
+濟济 紀纪 繼继 傢家 價价 堅坚 間间 艱艰 檢检 簡简 見见 劍剑 薦荐 賤贱 濺溅 將将
+獎奖 講讲 醬酱 嬌娇 腳脚 絞绞 餃饺 繳缴 節节 潔洁 結结 階阶 莖茎 經经 驚惊 競竞
+舊旧 駒驹 舉举 據据 懼惧 捲卷 覺觉 絕绝 軍军 開开 凱凯 慨慨 顆颗 殼壳 課课 墾垦
+懇恳 誇夸 塊块 寬宽 礦矿 虧亏 擴扩 臘腊 蠟蜡 來来 賴赖 蘭兰 攔拦 覽览 懶懒 爛烂
+勞劳 澇涝 樂乐 類类 淚泪 壘垒 稜棱 離离 禮礼 麗丽 歷历 曆历 練练 糧粮 療疗 遼辽
+獵猎 臨临 鄰邻 齡龄 劉刘 婁娄 盧卢 虜虏 鹵卤 陸陆 錄录 綠绿 論论 蘿萝 邏逻 駱骆
+馬马 罵骂 滿满 貓猫 貿贸 們们 夢梦 廟庙 滅灭 納纳 腦脑 惱恼 內内 擬拟 釀酿 鳥鸟
+聶聂 檸柠 農农 歐欧 盤盘 龐庞 賠赔 噴喷 闢辟 貧贫 評评 蘋苹 憑凭 撲扑 鋪铺 樸朴
+譜谱 齊齐 啟启 棄弃 簽签 錢钱 鉛铅 喬乔 竅窍 親亲 窮穷 瓊琼 區区 權权 勸劝 確确
+讓让 擾扰 熱热 認认 韌韧 榮荣 軟软 潤润 灑洒 傘伞 喪丧 殺杀 曬晒 閃闪 傷伤 賞赏
+燒烧 紹绍 捨舍 攝摄 聲声 濕湿 識识 駛驶 勢势 壽寿 獸兽 輸输 贖赎 稅税 順顺 說说
+碩硕 絲丝 鬆松 聳耸 蘇苏 隨随 歲岁 孫孙 損损 鎖锁 態态 攤摊 貪贪 談谈 壇坛 嘆叹
+燙烫 討讨 騰腾 題题 體体 糴籴 鐵铁 聽听 廳厅 銅铜 頭头 圖图 塗涂 團团 窪洼 襪袜
+彎弯 萬万 網网 圍围 違违 維维 偽伪 衛卫 穩稳 務务 霧雾 錫锡 習习 戲戏 峽峡 俠侠
+轄辖 鮮鲜 纖纤 現现 線线 鄉乡 響响 項项 蕭萧 銷销 曉晓 嘯啸 協协 脅胁 攜携 瀉泻
+謝谢 興兴 擇择 債债 戰战 張张 趙赵 鎮镇 爭争 徵征 證证 織织 職职 執执 紙纸 質质
+鐘钟 腫肿 種种 眾众 皺皱 豬猪 諸诸 緒绪 築筑 鑄铸 專专 轉转 賺赚 莊庄 裝装 壯壮
+狀状 準准 蹤踪 總总 縱纵 鑽钻 於于 韓韩 馮冯 許许 蔣蒋 賈贾 葉叶 閻阎 譚谭 鄒邹
+顧顾 湯汤 龔龚 偉伟 傑杰 穎颖 靜静 詩诗 書书 圓圆 戀恋 陽阳 樹树 鷹鹰 鶴鹤 鯉鲤
+魚鱼 蝦虾 裡里 裏里 麵面 隻只 麼么 麽么 臺台 颱台 乾干 髮发 嶽岳 巖岩 嶺岭 甕瓮
+賭赌 髒脏 詐诈 騙骗 竊窃 搶抢 贓赃 謊谎
+広广 沢泽 浜滨 対对 単单 仏佛 仮假 戸户 巣巢 桜樱 斉齐 効效 駅驿 圧压 醤酱 囲围
+暦历 覚觉 気气 芸艺 戯戏 県县 険险 験验 酔醉 浄净 砕碎 図图 悩恼 拝拜 売卖 発发
+歩步 黒黑 涙泪 絵绘 営营 栄荣 従从 処处 歯齿 毎每 訳译 薬药 円圆
+`;
+const NICK_T2S = new Map();
+for (const tok of NICK_T2S_PAIRS.split(/\s+/)) {
+  // 每个 token 是「繁+简」两个字；长度不为 2 的是排版事故，直接跳过
+  // （错位的映射会把正常汉字改坏，比没有映射糟得多）
+  if (tok.length === 2 && tok[0] !== tok[1]) NICK_T2S.set(tok[0], tok[1]);
+}
+
+let nicknameWordSeq = 0;
+/** 昵称词库：与后端 nickname_words 同构（mock 无 JSON 列，aliases 直接存数组） */
+const nicknameWords = [
+  {
+    id: 1,
+    word: '加微信',
+    action: 'block',
+    category: '广告引流',
+    aliases: [],
+    enabled: true,
+    hitCount: 1,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:00:00',
+    updatedAt: '2026-10-15T09:00:00',
+  },
+  {
+    id: 2,
+    word: '博彩',
+    action: 'block',
+    category: '违规推广',
+    aliases: [],
+    enabled: true,
+    hitCount: 1,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:05:00',
+    updatedAt: '2026-10-15T09:05:00',
+  },
+  // 别名 adgg：leetspeak「4d99」折叠后正是 adgg——字母写法的绕过靠别名拦
+  {
+    id: 3,
+    word: '广告',
+    action: 'review',
+    category: '广告引流',
+    aliases: ['adgg'],
+    enabled: true,
+    hitCount: 2,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:10:00',
+    updatedAt: '2026-10-15T09:10:00',
+  },
+  // 别名 bendan：拼音全拼。同音汉字替换（傻→莎）没有字符级算法可解，靠运营补别名
+  {
+    id: 4,
+    word: '笨蛋',
+    action: 'review',
+    category: '言语不当',
+    aliases: ['bendan'],
+    enabled: true,
+    hitCount: 2,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T09:15:00',
+    updatedAt: '2026-10-15T09:15:00',
+  },
+  // 白名单：单看「广告」会误杀「广告哥来了」，把整段加进来即豁免
+  {
+    id: 5,
+    word: '广告哥',
+    action: 'allow',
+    category: '白名单',
+    aliases: [],
+    enabled: true,
+    hitCount: 0,
+    createdBy: '13800138000',
+    createdAt: '2026-10-15T10:00:00',
+    updatedAt: '2026-10-15T10:00:00',
+  },
+];
+nicknameWordSeq = nicknameWords.length;
+
+let nicknameHitSeq = 0;
+/** 昵称命中日志：与后端 nickname_hits 同构；snippet 是当次提交的昵称原文 */
+const nicknameHits = [
+  // 别名拦的：matched ≠ word——回答「是哪条别名拦住的」，也是「该补哪个别名」的依据
+  {
+    id: 1,
+    word: '广告',
+    matched: 'adgg',
+    action: 'review',
+    source: 'register',
+    userId: 101,
+    userName: 'adgg来了',
+    snippet: 'adgg来了',
+    createdAt: '2026-10-15T09:20:00',
+  },
+  // 同一用户改名再中一次（当时「广告哥」白名单还没配，仍按 review 放行）。
+  // 队列取**最近一条** review 命中 → 101 的「当初提交」就是当前名
+  {
+    id: 2,
+    word: '广告',
+    matched: '广告',
+    action: 'review',
+    source: 'update',
+    userId: 101,
+    userName: 'adgg来了',
+    snippet: '广告哥来了',
+    createdAt: '2026-10-15T10:20:00',
+  },
+  // 拼音别名拦的注册：bendan → 主词「笨蛋」
+  {
+    id: 3,
+    word: '笨蛋',
+    matched: 'bendan',
+    action: 'review',
+    source: 'register',
+    userId: 102,
+    userName: 'bendan大佬',
+    snippet: 'bendan大佬',
+    createdAt: '2026-10-15T09:40:00',
+  },
+  // 绕过失败后直接用主词，照样 review——换写法不换词
+  {
+    id: 4,
+    word: '笨蛋',
+    matched: '笨蛋',
+    action: 'review',
+    source: 'update',
+    userId: 102,
+    userName: 'bendan大佬',
+    snippet: '笨蛋大佬',
+    createdAt: '2026-10-15T10:40:00',
+  },
+  // 改名被拦：名字不变，snippet 是**被拒的新名字**——「拦了多少次」不能是黑箱
+  {
+    id: 5,
+    word: '博彩',
+    matched: '博彩',
+    action: 'block',
+    source: 'update',
+    userId: 102,
+    userName: '笨蛋大佬',
+    snippet: '博彩大哥',
+    createdAt: '2026-10-15T11:05:00',
+  },
+  // 注册被拦：账号尚未落库，userId 记 NULL（昵称原文在 snippet 里，证据不丢）
+  {
+    id: 6,
+    word: '加微信',
+    matched: '加微信',
+    action: 'block',
+    source: 'register',
+    userId: null,
+    userName: '',
+    snippet: '加微信领资料',
+    createdAt: '2026-10-15T11:10:00',
+  },
+];
+nicknameHitSeq = nicknameHits.length;
+
+/**
+ * 索引脏标记：与后端 `invalidate()` 对应——任何写操作后置位，下次校验前重建。
+ * 校验路径**不重复加载词库**（后端是指纹 + TTL，mock 是脏标记，同宗旨）。
+ */
+let nicknameIndexDirty = true;
+/** 形态名 → Map<模式串, {owner 主词, action, matched 实际命中的模式, category}> */
+let nicknameIndex = null;
+
+function nicknameInvalidate() {
+  nicknameIndexDirty = true;
+}
+
+function ensureNicknameIndex() {
+  if (!nicknameIndexDirty && nicknameIndex) return nicknameIndex;
+  const byForm = {
+    base: new Map(),
+    nodigits: new Map(),
+    collapsed: new Map(),
+    'collapsed-nodigits': new Map(),
+  };
+  // 同一（形态, 归一化模式）的冲突保留更严者：否则后加载的会静默覆盖先加载的，
+  // 先建的词莫名失效——而这种失效在测试里几乎看不见
+  const severityByKey = new Map();
+  for (const w of nicknameWords) {
+    if (w.enabled !== true) continue;
+    const act = NICKNAME_ACTIONS.includes(w.action) ? w.action : FALLBACK_ACTION;
+    const cat = String(w.category ?? '').trim();
+    // 主词与每条别名走同一条归一化管道：别名不是「另一个词」，
+    // 而是同一个词的另一种写法（拼音/谐音/变形）
+    for (const variant of [w.word, ...aliasList(w.aliases)]) {
+      for (const vf of nickForms(variant)) {
+        const pat = vf.text;
+        // 最短词长对**每个形态**都把关：折叠形态比主词短是正常的
+        // （「约约」压缩成「约」），但放它进去会让任何含「约」的昵称都命中
+        if (pat.length < NICKNAME_MIN_WORD_LEN) continue;
+        const key = `${vf.name}\u0000${pat}`;
+        const prev = severityByKey.get(key);
+        if (prev !== undefined && NICK_SEVERITY[act] <= prev) continue;
+        severityByKey.set(key, NICK_SEVERITY[act]);
+        byForm[vf.name].set(pat, { owner: w.word, action: act, matched: variant, category: cat });
+      }
+    }
+  }
+  nicknameIndex = byForm;
+  nicknameIndexDirty = false;
+  return byForm;
+}
+
+/**
+ * 解析词条别名（数组或 JSON 字符串）。脏数据（非数组 / 非字符串项 / 超长 / 重复）
+ * 逐个剔除——与后端 `alias_list` 同规则，前端拿到的永远是干净数组。
+ */
+function aliasList(raw) {
+  let list = raw;
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const a of list) {
+    if (typeof a !== 'string') continue;
+    const t = a.trim();
+    if (!t || out.includes(t)) continue;
+    if ([...t].length > MAX_ALIAS_LENGTH) continue;
+    out.push(t);
+    if (out.length >= MAX_ALIASES_PER_WORD) break;
+  }
+  return out;
+}
+
+/**
+ * 整串折叠：逐字符 NFKC → 小写 → 混淆归并 → 繁简 → 只留 Unicode 字母与数字
+ * （丢弃空格、标点、零宽字符、符号、emoji）。
+ *
+ * 返回 `{ norm, indexMap, digitFlags }`：indexMap 记**原文**下标（码点位），
+ * digitFlags 按**混淆归并之前**的类别判定——「博0彩」的 0 归并成 o 之后就看不出
+ * 它原来是数字了，而 nodigits 形态正需要删掉这些字符。
+ */
+function nickFold(text) {
+  const src = String(text ?? '');
+  const chars = [];
+  const indexMap = [];
+  const digitFlags = [];
+  let i = 0;
+  for (const ch of src) {
+    // 逐字符 NFKC：整串 normalize 会改变长度，逐字符才保住下标
+    for (const c of ch.normalize('NFKC').toLowerCase()) {
+      const isDigit = /\p{Nd}/u.test(c);
+      let m = NICK_CONFUSABLES.get(c) ?? c;
+      m = NICK_T2S.get(m) ?? m;
+      // \p{L} 字母（含 CJK），\p{N} 数字；这一步就是「加空格 / 插零宽 /
+      // 用标点隔断」绕过的解法
+      if (/[\p{L}\p{N}]/u.test(m)) {
+        chars.push(m);
+        indexMap.push(i);
+        digitFlags.push(isDigit);
+      }
+    }
+    i += 1;
+  }
+  return { norm: chars.join(''), indexMap, digitFlags };
+}
+
+/** nodigits 形态：把「数字来源」字符整体去掉（"博0彩" → "博彩"） */
+function nickStripDigits(folded) {
+  const chars = [];
+  const indexMap = [];
+  for (let j = 0; j < folded.norm.length; j++) {
+    if (folded.digitFlags[j]) continue;
+    chars.push(folded.norm[j]);
+    indexMap.push(folded.indexMap[j]);
+  }
+  return { text: chars.join(''), indexMap };
+}
+
+/**
+ * collapsed 形态：压缩连续重复字符（"aabbcc" → "abc"）。
+ * 下标取该字符**首次**出现的位置：命中区间回到原文时要能圈住最早那一段。
+ */
+function nickCollapse(text, indexMap) {
+  const chars = [];
+  const imap = [];
+  let prev = null;
+  for (let j = 0; j < text.length; j++) {
+    const c = text[j];
+    if (c === prev) continue;
+    prev = c;
+    chars.push(c);
+    imap.push(indexMap[j]);
+  }
+  return { text: chars.join(''), indexMap: imap };
+}
+
+/**
+ * 四形态（顺序固定）：base → nodigits → collapsed → collapsed-nodigits。
+ * 每个形态各自带 index_map，命中后能回到**原文**定位（写日志、圈区间）。
+ */
+function nickForms(text) {
+  const base = nickFold(text);
+  const forms = [{ name: 'base', text: base.norm, indexMap: base.indexMap }];
+  const nod = nickStripDigits(base);
+  forms.push({ name: 'nodigits', text: nod.text, indexMap: nod.indexMap });
+  if (NICKNAME_COLLAPSE_REPEATS) {
+    const col = nickCollapse(base.norm, base.indexMap);
+    forms.push({ name: 'collapsed', text: col.text, indexMap: col.indexMap });
+    const colnd = nickCollapse(nod.text, nod.indexMap);
+    forms.push({ name: 'collapsed-nodigits', text: colnd.text, indexMap: colnd.indexMap });
+  }
+  return forms;
+}
+
+/** 归一化后剩余的有效字符数（判断「词是不是太短」用这个，不是原文长度） */
+const nickLength = (text) => nickForms(text)[0].text.length;
+
+/**
+ * 校验昵称的**形状**（长度/字符集/空值），与敏感词无关。
+ * 返回 `[是否合法, 消息]`；不合法时消息即面向用户的提示（42203）。
+ *
+ * 顺序有讲究：先判空、再判字符集、最后判长度。字符集先于长度是因为
+ * 「这个字符根本不能用」比「太长了」更根本。
+ */
+function validateNicknameShape(name) {
+  if (typeof name !== 'string') return [false, '昵称格式不正确'];
+  // 首尾空白先 trim 再校验（内部空格合法——「王 小明」是正常名字）
+  const stripped = name.trim();
+  if (!stripped) return [false, '昵称不能为空'];
+  const cps = [...stripped];
+  let hasWordChar = false;
+  for (const ch of cps) {
+    // 先过 NFKC：全角空格等「看着是空格」的字符归一后与半角同等对待
+    for (const c of ch.normalize('NFKC')) {
+      if (NICK_SYMBOLS.has(c)) continue;
+      // L* 字母（含 CJK）/ N* 数字；代理字符（异常编码）与控制字符不在内 → 拒绝
+      if (/[\p{L}\p{N}]/u.test(c)) {
+        hasWordChar = true;
+        continue;
+      }
+      return [false, `昵称仅支持中英文、数字及 ${NICKNAME_ALLOWED_SYMBOLS} 等符号`];
+    }
+  }
+  if (cps.length < NICKNAME_MIN_LENGTH)
+    return [false, `昵称至少需要 ${NICKNAME_MIN_LENGTH} 个字符`];
+  if (cps.length > NICKNAME_MAX_LENGTH)
+    return [false, `昵称不能超过 ${NICKNAME_MAX_LENGTH} 个字符`];
+  if (!hasWordChar) {
+    // 纯符号名（「____」）落在字符白名单里，但它既无法被匹配也没有信息量
+    return [false, '昵称需至少包含一个字母、数字或汉字'];
+  }
+  return [true, ''];
+}
+
+/** 白名单豁免：完全落在 allow 区间内的命中被剔除（与 P1-23 同处方） */
+function exemptNicknameSpans(spans) {
+  const allow = spans.filter((s) => s.action === 'allow').map((s) => [s.start, s.end]);
+  const kept = allow.length
+    ? spans.filter((s) => !allow.some(([a, b]) => s.start >= a && s.end <= b))
+    : spans;
+  return kept.filter((s) => s.action !== 'allow');
+}
+
+/**
+ * 合并重叠区间：动作取最严，词取最长（与后端 `_merge` 同规则）。
+ * 多形态扫描会让同一段被命中多次（base 与 collapsed 都中「笨蛋」），
+ * 不合并会把同一段算成多个命中，日志与原因都会虚高。
+ */
+function mergeNicknameSpans(spans) {
+  const sorted = [...spans].sort(
+    (x, y) => x.start - y.start || y.end - y.start - (x.end - x.start) || y.end - x.end,
+  );
+  const merged = [];
+  for (const s of sorted) {
+    if (merged.length && s.start <= merged[merged.length - 1].end) {
+      const last = merged[merged.length - 1];
+      last.end = Math.max(last.end, s.end);
+      if (
+        NICK_SEVERITY[s.action] > NICK_SEVERITY[last.action] ||
+        (NICK_SEVERITY[s.action] === NICK_SEVERITY[last.action] &&
+          s.end - s.start > last.end - last.start)
+      ) {
+        last.entry = s.entry;
+        last.action = s.action;
+      }
+    } else {
+      merged.push({ ...s });
+    }
+  }
+  return merged;
+}
+
+/**
+ * 校验昵称，返回分级结果。**不写库**（命中日志走 `nicknameRecordHits`，
+ * 注册与改名两条路径共用同一份「什么算一次事件」的判定）。
+ *
+ * `reason`/`message` 面向用户，**刻意不含命中的敏感词原文**；`hits` 仅供
+ * 服务端写日志与测试断言，不下发给客户端。
+ */
+function nicknameCheck(name) {
+  const pass = { result: 'pass', reason: '', message: NICK_MESSAGE_PASS, hits: [] };
+  if (!NICKNAME_MODERATION_ENABLED) return pass;
+  const index = ensureNicknameIndex();
+  const hasPattern = Object.values(index).some((m) => m.size > 0);
+  if (!hasPattern) return pass;
+
+  const forms = {};
+  for (const f of nickForms(name)) forms[f.name] = f;
+  const spans = [];
+  for (const [formName, pats] of Object.entries(index)) {
+    const form = forms[formName];
+    if (!form || !form.text) continue;
+    // 键是归一化模式串，value 是词条元数据——匹配用键，取词用 value
+    for (const [pat, p] of pats) {
+      let from = 0;
+      for (;;) {
+        const at = form.text.indexOf(pat, from);
+        if (at < 0) break;
+        // 归一化下标 → 原文下标（同一段被多个形态同时命中时区间一致，合并阶段会去重）
+        spans.push({
+          start: form.indexMap[at],
+          end: form.indexMap[at + pat.length - 1],
+          entry: p,
+          action: p.action,
+        });
+        from = at + 1;
+      }
+    }
+  }
+
+  const merged = mergeNicknameSpans(exemptNicknameSpans(spans));
+  if (!merged.length) return pass;
+
+  // 命中原因取最严那一条的分类（多个词命中时，最严的才是「为什么被拒」的答案）
+  const worst = merged.reduce((a, b) =>
+    NICK_SEVERITY[b.action] > NICK_SEVERITY[a.action] ? b : a,
+  );
+  const category = worst.entry.category;
+  const hits = merged.map((m) => ({
+    word: m.entry.owner,
+    matched: m.entry.matched,
+    action: m.action,
+    start: m.start,
+    end: m.end,
+  }));
+  if (worst.action === 'block') {
+    return {
+      result: 'block',
+      reason: category ? `包含${category}违规内容` : '包含违规内容',
+      message: NICK_MESSAGE_BLOCK,
+      hits,
+    };
+  }
+  return {
+    result: 'review',
+    reason: category ? `包含${category}内容，需人工复核` : '包含需人工复核的内容',
+    message: NICK_MESSAGE_REVIEW,
+    hits,
+  };
+}
+
+/**
+ * 落昵称命中日志 + 累加词命中次数。与后端 `record_hits` 同口径：
+ * 同一 `(主词, 命中模式)` 一次提交只记一行；`block` 同样留痕——
+ * 否则「拦了多少次改名/注册」是黑箱，也识别不出反复尝试绕过。
+ * 注册被拦时账号尚未落库，`userId` 记 NULL（昵称原文在 snippet 里，证据不丢）。
+ */
+function nicknameRecordHits(hitList, ctx) {
+  const seen = new Set();
+  const ts = new Date().toISOString();
+  for (const h of hitList) {
+    const key = `${h.word}\u0000${h.matched}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    nicknameHitSeq += 1;
+    nicknameHits.unshift({
+      id: nicknameHitSeq,
+      word: h.word,
+      matched: h.matched,
+      action: h.action,
+      source: ctx.source,
+      userId: ctx.userId ?? null,
+      // 记账号当前昵称：运营要按人定位，被拒的新名字在 snippet 里
+      userName: ctx.userName ?? '',
+      // 昵称整体就是上下文（≤24 字符），无需截取
+      snippet: String(ctx.name ?? '').slice(0, 300),
+      createdAt: ts,
+    });
+    const row = nicknameWords.find((x) => x.word === h.word);
+    if (row) row.hitCount = (row.hitCount ?? 0) + 1;
+  }
+  // hit_count 不进匹配索引，无需 invalidate——但它决定列表排序，读取时现算
+}
+
 /** 回复 → 输出形态：附「回复 @谁」（父行查找），无嵌套计数 */
 function replyOut(r, parents) {
   const p = r.parentId ? parents.get(r.parentId) : null;
@@ -566,6 +1170,45 @@ function marksOf(phone) {
 }
 /** 历史保留上限（与后端 HISTORY_MAX 对齐） */
 const HISTORY_LIMIT = 50;
+
+/**
+ * 账号注册表（P1-24）：phone → { id, name, pendingReview, reviewedAt }。
+ * mock 无注册端点，账号在**登录时懒创建**（默认名与后端新用户一致），改名走
+ * `PUT /me/nickname`；管理端昵称复核队列读的就是 `pendingReview`。
+ *
+ * 两个种子账号演示复核队列的两种来路：
+ * - 101：注册时用别名 adgg（leetspeak「4d99」的折叠形）绕过 → review 放行；
+ *   改名「广告哥来了」时「广告哥」白名单还没配，仍按 review 放行；后来运营补了
+ *   白名单——现在这个名字能过了，但标志挂着（服务端不做追溯式回填），等人看；
+ * - 102：注册用拼音 bendan → review；改用「笨蛋大佬」照样中——换写法不换词。
+ */
+const accounts = new Map([
+  // 演示管理员账号：默认名，登录后可在「我的」页自行改名体验完整链路
+  ['13800138000', { id: 1, name: '明日头条用户', pendingReview: false, reviewedAt: null }],
+  ['13900139001', { id: 101, name: '广告哥来了', pendingReview: true, reviewedAt: null }],
+  ['13900139002', { id: 102, name: '笨蛋大佬', pendingReview: true, reviewedAt: null }],
+]);
+let accountSeq = 102;
+function accountOf(phone) {
+  const p = String(phone ?? '');
+  if (!accounts.has(p)) {
+    accountSeq += 1;
+    accounts.set(p, {
+      id: accountSeq,
+      name: '明日头条用户',
+      pendingReview: false,
+      reviewedAt: null,
+    });
+  }
+  return accounts.get(p);
+}
+/** 按 userId 反查账号（复核队列/复核操作按 id 定位，与后端 User.id 对齐） */
+function accountById(userId) {
+  for (const [phone, acc] of accounts) {
+    if (acc.id === Number(userId)) return { phone, acc };
+  }
+  return null;
+}
 
 /** 与后端 app/ranking.py 的 SORT_MODES、前端 constants/sort.ts 三方一致 */
 const SORT_MODES = ['latest', 'hot', 'for-you'];
@@ -954,7 +1597,10 @@ function send(res, status, payload) {
   res.end(body);
 }
 
-const ok = (res, data) => send(res, 200, { code: 0, message: 'ok', data });
+// message 参与响应体：与真实后端 `ok(data, message=...)` 对齐。此前只收两参，
+// 调用点传的第三参被静默丢弃——成功消息前端虽不读，但 mock 与真后端同形，
+// 排查「mock 与真后端响应不一致」时少一个干扰项
+const ok = (res, data, message = 'ok') => send(res, 200, { code: 0, message, data });
 const fail = (res, status, code, message) => send(res, status, { code, message, data: null });
 
 function readBody(req) {
@@ -1014,10 +1660,19 @@ const server = createServer(async (req, res) => {
     const token = `tk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     tokens.set(token, { phone });
     seenPhones.add(String(phone));
-    // isAdmin 与后端一致：按白名单判定后随登录响应下发，前端据此展示运营入口
+    // 账号昵称随登录下发（P1-24，与后端 _token_payload 同口径）：前端「我的」页
+    // 据此展示，改名成功后同步；namePendingReview 让个人中心在下次打开时仍能
+    // 显示「审核中」——否则这个标志只有管理员看得见，刷新即失忆
+    const acc = accountOf(phone);
     return ok(res, {
       token,
-      user: { name: '明日头条用户', phone, isAdmin: isAdminPhone(phone) },
+      user: {
+        id: acc.id,
+        name: acc.name,
+        phone,
+        isAdmin: isAdminPhone(phone),
+        namePendingReview: acc.pendingReview,
+      },
     });
   }
 
@@ -1281,6 +1936,54 @@ const server = createServer(async (req, res) => {
       merge(Array.isArray(ids) ? ids.map(String) : []);
       return ok(res, payload());
     }
+  }
+
+  // ---- 昵称（PUT /me/nickname，需登录；P1-24）----
+  // 与后端 me.update_nickname 同序：形状校验 → 引擎校验 → 落命中日志 → 拦截或保存。
+  // 三级结果（与注册入口同一条链，规则不搞两套）：
+  // - 形状不合法 → 42203，消息即面向用户的提示（前端 maxlength 只是第一道闸）；
+  // - 命中 block → 40006，提示**不回显命中词**；拦截同样留痕；
+  // - 命中 review → 放行 + 置待复核进人工队列（机器的判断是概率性的，
+  //   「先放行再让人看」比吞掉用户的名字代价小）；
+  // - 通过 → 原样保存，并**清除**待复核标志（它只描述当前名字的审核状态；
+  //   当初提交过什么由命中日志留痕，不挂在队列上）。
+  if (head === 'me' && a === 'nickname' && !b && method === 'PUT') {
+    const t = requireAuth(req, res);
+    if (!t) return;
+    const account = accountOf(tokens.get(t)?.phone ?? 'unknown');
+    const body = await readBody(req);
+    const clean = String(body.name ?? '').trim();
+    const [valid, msg] = validateNicknameShape(clean);
+    if (!valid) return fail(res, 422, 42203, msg);
+
+    const verdict = nicknameCheck(clean);
+    if (verdict.result !== 'pass') {
+      // 先落日志再谈拦不拦：block 的证据与 review 的入队是同一份事实
+      nicknameRecordHits(verdict.hits, {
+        source: 'update',
+        userId: account.id,
+        userName: account.name,
+        name: clean,
+      });
+    }
+    if (verdict.result === 'block') {
+      return fail(res, 400, 40006, verdict.message);
+    }
+
+    account.name = clean;
+    account.pendingReview = verdict.result === 'review';
+    // 同名重设不做特殊分支：保存是显式动作，服务端对提交值一视同仁
+    const message = verdict.result === 'review' ? NICK_MESSAGE_REVIEW : '昵称已保存';
+    return ok(
+      res,
+      {
+        name: account.name,
+        result: verdict.result,
+        reason: verdict.reason,
+        pendingReview: account.pendingReview,
+      },
+      message,
+    );
   }
 
   /* --------------------- /admin/sources --------------------- */
@@ -1927,6 +2630,290 @@ const server = createServer(async (req, res) => {
     });
   }
 
+  /* --------------------- 管理端：昵称词库 / 命中日志 / 复核队列（P1-24） --------------------- */
+
+  const nicknameWordOut = (w) => ({
+    id: w.id,
+    word: w.word,
+    action: w.action,
+    category: w.category,
+    // 脏数据（非数组/非字符串项）按空处理：前端永远拿到数组，不做二次防御
+    aliases: aliasList(w.aliases),
+    enabled: w.enabled !== false,
+    hitCount: w.hitCount ?? 0,
+    createdBy: w.createdBy,
+    createdAt: w.createdAt,
+    updatedAt: w.updatedAt,
+  });
+
+  // GET /admin/nickname-words（按命中次数降序：高频词要么是热点，要么是误杀大户）
+  if (head === 'admin' && a === 'nickname-words' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const kw = (q.get('keyword') ?? '').trim().toLowerCase();
+    const action = q.get('action') ?? '';
+    if (action && !NICKNAME_ACTIONS.includes(action)) {
+      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/review/allow 之一');
+    }
+    const enabledRaw = q.get('enabled');
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 200) || 200, 1), 500);
+    const offset = Math.max(Number(q.get('offset') ?? 0) || 0, 0);
+    let rows = [...nicknameWords];
+    // keyword 只匹配主词不搜别名：别名在每行的 aliases 字段里可见
+    if (kw) rows = rows.filter((w) => w.word.toLowerCase().includes(kw));
+    if (action) rows = rows.filter((w) => w.action === action);
+    if (enabledRaw !== null) rows = rows.filter((w) => w.enabled !== (enabledRaw !== 'true'));
+    rows.sort((x, y) => (y.hitCount ?? 0) - (x.hitCount ?? 0) || y.id - x.id);
+    return ok(res, {
+      list: rows.slice(offset, offset + limit).map(nicknameWordOut),
+      total: rows.length,
+    });
+  }
+
+  // POST /admin/nickname-words（新增：主词/别名太短 42204，重复 40906；保存即生效）
+  if (head === 'admin' && a === 'nickname-words' && !b && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const body = await readBody(req);
+    const word = String(body.word ?? '').trim();
+    const action = String(body.action ?? 'review');
+    if (!word) {
+      return fail(res, 422, 42200, '参数校验失败：昵称敏感词不能为空');
+    }
+    if (!NICKNAME_ACTIONS.includes(action)) {
+      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/review/allow 之一');
+    }
+    const category = String(body.category ?? '').slice(0, 30);
+    const aliases = aliasList(body.aliases);
+    // 与后端同口径：按**归一化后**的有效字符数判断（「傻 逼」算 2，「傻!」算 1）。
+    // 新码 42204——42202 已承载评论词库的「太短」语义，复用会让前端文案错配
+    if (nickLength(word) < NICKNAME_MIN_WORD_LEN) {
+      return fail(
+        res,
+        422,
+        42204,
+        `昵称敏感词至少需 ${NICKNAME_MIN_WORD_LEN} 个有效字符（空格与标点不计）`,
+      );
+    }
+    // 别名逐个查而不是只查主词：引擎加载时会静默跳过过短的形态，
+    // 「配了却没生效」比报错难发现得多
+    for (const a of aliases) {
+      if (nickLength(a) < NICKNAME_MIN_WORD_LEN) {
+        return fail(
+          res,
+          422,
+          42204,
+          `别名「${a}」至少需 ${NICKNAME_MIN_WORD_LEN} 个有效字符（空格与标点不计）`,
+        );
+      }
+    }
+    if (nicknameWords.some((w) => w.word === word)) {
+      return fail(res, 409, 40906, '该昵称敏感词已存在');
+    }
+    const ts = new Date().toISOString();
+    nicknameWordSeq += 1;
+    const row = {
+      id: nicknameWordSeq,
+      word,
+      action,
+      category,
+      aliases,
+      enabled: body.enabled !== false,
+      hitCount: 0,
+      createdBy: operator,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    nicknameWords.push(row);
+    // 保存即生效：让本进程索引立刻失效（集群其他实例在真后端靠 TTL 兜底）
+    nicknameInvalidate();
+    audit(operator, 'nicknameWord.create', word, {
+      word,
+      action,
+      category,
+      aliases,
+      enabled: row.enabled,
+    });
+    return ok(res, nicknameWordOut(row), '已添加');
+  }
+
+  // POST /admin/nickname-words/reload（强制重建索引：改词本进程已即时生效，
+  // 这是给其他实例用的）。放在 :word_id 两条之前——路径段同名时分句更清晰
+  if (head === 'admin' && a === 'nickname-words' && b === 'reload' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    nicknameInvalidate();
+    ensureNicknameIndex();
+    const count = nicknameWords.filter((w) => w.enabled !== false).length;
+    audit(operator, 'nicknameWord.reload', '', { count });
+    return ok(res, { count }, '昵称词库已重载');
+  }
+
+  // PATCH /admin/nickname-words/:id（**不许改词本身**：改词等于删一条加一条）
+  if (head === 'admin' && a === 'nickname-words' && b && !c && method === 'PATCH') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const row = nicknameWords.find((w) => String(w.id) === String(b));
+    if (!row) return fail(res, 404, 40407, '昵称敏感词不存在');
+    const body = await readBody(req);
+    const changes = {};
+    if (body.action !== undefined && body.action !== row.action) {
+      if (!NICKNAME_ACTIONS.includes(String(body.action))) {
+        return fail(res, 422, 42200, '参数校验失败：action 必须是 block/review/allow 之一');
+      }
+      changes.action = [row.action, body.action];
+      row.action = body.action;
+    }
+    if (body.category !== undefined && body.category !== row.category) {
+      changes.category = [
+        row.category,
+        body.category === null ? '' : String(body.category).slice(0, 30),
+      ];
+      row.category = changes.category[1];
+    }
+    // aliases 传空数组 = 清空全部别名；不传 = 不动（与后端 None 语义一致）
+    if (body.aliases !== undefined) {
+      const before = aliasList(row.aliases);
+      const next = aliasList(body.aliases);
+      if (before.length !== next.length || before.some((x, i) => x !== next[i])) {
+        changes.aliases = [before, next];
+        row.aliases = next;
+      }
+    }
+    const nextEnabled = body.enabled === undefined ? undefined : body.enabled !== false;
+    if (nextEnabled !== undefined && nextEnabled !== (row.enabled !== false)) {
+      changes.enabled = [row.enabled !== false, nextEnabled];
+      row.enabled = nextEnabled;
+    }
+    // 字段级 diff：无变化不记审计（与资讯置顶同款，"点了一下"不等于"改了"）
+    if (!Object.keys(changes).length) return ok(res, nicknameWordOut(row));
+    row.updatedAt = new Date().toISOString();
+    // 改别名同样走 invalidate——别名是模式串的一部分，改了不重载等于没改
+    nicknameInvalidate();
+    audit(operator, 'nicknameWord.update', row.word, { changes });
+    return ok(res, nicknameWordOut(row), '已更新');
+  }
+
+  // DELETE /admin/nickname-words/:id（审计留快照：删错了要能知道原来是什么）
+  if (head === 'admin' && a === 'nickname-words' && b && !c && method === 'DELETE') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const i = nicknameWords.findIndex((w) => String(w.id) === String(b));
+    if (i < 0) return fail(res, 404, 40407, '昵称敏感词不存在');
+    // 快照必须在 splice 之前取：删完就没了
+    const snapshot = nicknameWordOut(nicknameWords[i]);
+    audit(operator, 'nicknameWord.delete', snapshot.word, { snapshot });
+    nicknameWords.splice(i, 1);
+    nicknameInvalidate();
+    return ok(res, snapshot, '已删除');
+  }
+
+  // GET /admin/nickname-hits（只读；价值在回答误杀与受理申诉，不在"看出事了"）
+  if (head === 'admin' && a === 'nickname-hits' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const word = (q.get('word') ?? '').trim();
+    const action = q.get('action') ?? '';
+    const source = q.get('source') ?? '';
+    if (action && !['block', 'review'].includes(action)) {
+      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/review 之一');
+    }
+    if (source && !['register', 'update'].includes(source)) {
+      return fail(res, 422, 42200, '参数校验失败：source 必须是 register/update 之一');
+    }
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    const cursor = q.get('cursor');
+    let rows = [...nicknameHits];
+    if (word) rows = rows.filter((h) => h.word === word);
+    if (action) rows = rows.filter((h) => h.action === action);
+    if (source) rows = rows.filter((h) => h.source === source);
+    const userIdRaw = q.get('userId');
+    if (userIdRaw !== null && userIdRaw !== '') {
+      if (!/^\d+$/.test(userIdRaw)) {
+        return fail(res, 422, 42200, '参数校验失败：userId 须为整数');
+      }
+      rows = rows.filter((h) => h.userId === Number(userIdRaw));
+    }
+    const total = rows.length;
+    rows.sort((x, y) => y.id - x.id); // 新的在前
+    if (cursor) {
+      if (!/^\d+$/.test(cursor)) return fail(res, 400, 40003, '分页游标无效');
+      rows = rows.filter((h) => h.id < Number(cursor));
+    }
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    return ok(res, {
+      list: page.map((h) => ({ ...h })),
+      total,
+      hasMore,
+      nextCursor: hasMore ? page[page.length - 1].id : null,
+    });
+  }
+
+  // GET /admin/nickname-reviews（limit+offset：运营要一遍扫完 + 跳页核对）
+  if (head === 'admin' && a === 'nickname-reviews' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const kw = (q.get('keyword') ?? '').trim().toLowerCase();
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    const offset = Math.max(Number(q.get('offset') ?? 0) || 0, 0);
+    const rows = [];
+    for (const [phone, acc] of accounts) {
+      if (!acc.pendingReview) continue;
+      // 三个标量子查询的 mock 版：该用户最近一条 review 级命中。
+      // 队列回答「哪个提交需要人看」而不是「他现在叫什么」
+      const latest =
+        nicknameHits
+          .filter((h) => h.userId === acc.id && h.action === 'review')
+          .sort((x, y) => y.id - x.id)[0] ?? null;
+      rows.push({
+        userId: acc.id,
+        name: acc.name,
+        phone,
+        flaggedAt: latest?.createdAt ?? null,
+        flaggedName: latest?.snippet ?? null,
+        flaggedMatched: latest?.matched ?? null,
+      });
+    }
+    let out = rows;
+    if (kw) {
+      out = out.filter((r) => r.name.toLowerCase().includes(kw) || r.phone.includes(kw));
+    }
+    // 按最近被标记排序（coalesce 空串），再按 id 降序——新提交的坏名字浮在上面
+    out.sort(
+      (x, y) =>
+        String(y.flaggedAt ?? '').localeCompare(String(x.flaggedAt ?? '')) || y.userId - x.userId,
+    );
+    return ok(res, { list: out.slice(offset, offset + limit), total: out.length });
+  }
+
+  // POST /admin/nickname-reviews/:userId（**幂等**：只清标志不改昵称本身）
+  if (head === 'admin' && a === 'nickname-reviews' && b && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const found = accountById(b);
+    if (!found) return fail(res, 404, 40408, '用户不存在');
+    const { phone, acc } = found;
+    if (acc.pendingReview) {
+      acc.pendingReview = false;
+      acc.reviewedAt = new Date().toISOString();
+      // 名字是用户自己起的，复核是「人看过了」这个事实，不是运营替他改名。
+      // 重复调用不重复审计（没有新事实就不留新痕）
+      audit(operator, 'nickname.review', String(acc.id), { name: acc.name, phone });
+    }
+    return ok(
+      res,
+      {
+        userId: acc.id,
+        name: acc.name,
+        phone,
+        pendingReview: false,
+        reviewedAt: acc.reviewedAt,
+      },
+      '已通过复核',
+    );
+  }
+
   /* --------------------- 管理端：管理员白名单（P1-14） --------------------- */
 
   const adminUserOut = (phone, row) => ({
@@ -1935,7 +2922,9 @@ const server = createServer(async (req, res) => {
     addedBy: row.addedBy || '',
     createdAt: row.createdAt,
     registered: seenPhones.has(phone),
-    name: seenPhones.has(phone) ? '明日头条用户' : '',
+    // P1-24：读账号注册表里的真实昵称（登录即懒创建），不再是硬编码默认名——
+    // 否则「用户已改名」与「管理员页看到的昵称」两张皮
+    name: seenPhones.has(phone) ? accountOf(phone).name : '',
   });
 
   // GET /admin/users

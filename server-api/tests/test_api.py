@@ -913,8 +913,9 @@ class TestMessageEvents:
         from app.database import SessionLocal
         from app.models import Message, User
 
-        a = _register(client, "13900004444", "甲")
-        b = _register(client, "13900005555", "乙")
+        # 昵称走 P1-24 形状校验（2~24 字符），单字名已不再被接受
+        a = _register(client, "13900004444", "用户甲")
+        b = _register(client, "13900005555", "用户乙")
 
         with SessionLocal() as db:
             uid_a = db.query(User).filter(User.phone == "13900004444").first().id

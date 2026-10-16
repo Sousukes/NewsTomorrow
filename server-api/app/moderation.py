@@ -418,3 +418,9 @@ class ModerationEngine:
 
 
 engine = ModerationEngine()
+
+# Aho-Corasick 自动机的公开导出：供昵称校验（P1-24，`nickname_moderation`）
+# 复用，避免出现第二份实现后各自演化、行为漂移。**新增场景优先用它**，
+# 不要复制一份——两份 AC 的实现只要有一处细节不同（如 fail 自环处理），
+# 同一个绕过样本就会在两条链路上得到不同结果，而测试几乎发现不了。
+AhoCorasick = _Automaton

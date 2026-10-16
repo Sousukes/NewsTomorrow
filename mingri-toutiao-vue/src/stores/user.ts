@@ -46,6 +46,12 @@ interface PrefsShape {
    * 但接口自身仍会 403，不会越权。
    */
   isAdmin: boolean;
+  /**
+   * 当前账号昵称（P1-24）。
+   * 登录响应下发，改名成功后同步；与 isAdmin 同理落库——
+   * 刷新页面后「我的」页不退回默认名。服务端改动要等下次登录才可见。
+   */
+  name: string;
 }
 
 interface MarksShape {
@@ -148,6 +154,7 @@ function loadPrefs(): PrefsShape {
     // 主题单独归一化：历史存档可能没有该字段或值非法
     theme: toThemeMode(parsed?.theme),
     isAdmin: parsed?.isAdmin === true,
+    name: typeof parsed?.name === 'string' ? parsed.name : '',
   };
 }
 
@@ -169,6 +176,8 @@ export const useUserStore = defineStore('user', () => {
   const userId = ref<number | null>(isLoggedIn.value ? prefs.userId : null);
   /** 管理能力标志（决定是否展示 RSS 源管理等运营入口） */
   const isAdmin = ref(prefs.isAdmin && isLoggedIn.value);
+  /** 当前账号昵称；未登录/无记录时为空，界面回落默认名 */
+  const name = ref(prefs.name && isLoggedIn.value ? prefs.name : '');
   const theme = ref<ThemeMode>(prefs.theme);
 
   const marks = loadMarks(userId.value);
@@ -182,13 +191,14 @@ export const useUserStore = defineStore('user', () => {
   const syncError = ref('');
 
   watch(
-    [isLoggedIn, userId, theme, isAdmin],
+    [isLoggedIn, userId, theme, isAdmin, name],
     () =>
       writeJson(PREFS_KEY, {
         isLoggedIn: isLoggedIn.value,
         userId: userId.value,
         theme: theme.value,
         isAdmin: isAdmin.value,
+        name: name.value,
       }),
     { deep: true },
   );
@@ -216,6 +226,7 @@ export const useUserStore = defineStore('user', () => {
       token.value = '';
       isLoggedIn.value = false;
       isAdmin.value = false;
+      name.value = '';
       switchScope(null);
     });
   }
@@ -302,6 +313,8 @@ export const useUserStore = defineStore('user', () => {
     userId.value = nextUserId;
     // 管理能力以后台判定为准：登录即刷新，不沿用上一次会话的旧值
     isAdmin.value = res.user?.isAdmin === true;
+    // 昵称同样以登录响应为准（P1-24：改名后下次登录会拿到新值）
+    name.value = typeof res.user?.name === 'string' ? res.user.name : '';
     favorites.value = adopted.favorites;
     history.value = adopted.history;
     saveMarks(nextUserId, adopted);
@@ -322,6 +335,7 @@ export const useUserStore = defineStore('user', () => {
     setToken('');
     isLoggedIn.value = false;
     isAdmin.value = false;
+    name.value = '';
     switchScope(null);
   }
 
@@ -396,11 +410,21 @@ export const useUserStore = defineStore('user', () => {
     theme.value = toThemeMode(mode);
   }
 
+  /**
+   * 更新昵称（P1-24）：改名接口成功后调用。
+   * 只改本地展示与持久化——服务端校验（拦截/复核/形状）已在 api 层拦下，
+   * 能走到这里说明服务端已接受。
+   */
+  function setName(next: string) {
+    name.value = next;
+  }
+
   return {
     token,
     isLoggedIn,
     userId,
     isAdmin,
+    name,
     favorites,
     history,
     searchTerms,
@@ -418,5 +442,6 @@ export const useUserStore = defineStore('user', () => {
     removeSearchTerm,
     clearSearchHistory,
     setTheme,
+    setName,
   };
 });

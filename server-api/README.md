@@ -173,6 +173,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | POST | `/api/me/history` | ✅ | 记录浏览（同一资讯只刷新时间；资讯不存在时静默忽略） |
 | PUT | `/api/me/history` | ✅ | **并集合并**本地历史，随后按上限裁剪 |
 | DELETE | `/api/me/history` | ✅ | 清空浏览历史 |
+| PUT | `/api/me/nickname` | ✅ | **修改昵称**（P1-24，与注册同一套校验）：形状不合法 **42203**（空/纯空白/越界/非法字符/纯符号，消息即面向用户的提示）；命中 `block` 级词 **40006**（提示**不回显命中词**）；命中 `review` 级词**放行**并置 `name_pending_review` 进人工队列；通过则原样保存并**清除**待复核标志。返回 `{ name, result, reason, pendingReview }` |
 | GET | `/api/admin/sources` | ✅ 管理员 | RSS 源列表（含抓取健康状态、`respectRobots` 开关与**近期健康摘要**），返回 `{ list, total, healthDays }`；读取前自动播种内置源。`list[].health` 为 `{ attempts, rate, avgItems }` 或 `null`（窗口内没抓过），`rate` 为 `null` 表示**没有尝试**而非"全失败" |
 | GET | `/api/admin/sources/{key}/health?days=` | ✅ 管理员 | **单源健康趋势**（P1-19）：返回 `{ key, days, keepDays, summary, points, failures }`。`days` 会被收敛到保留期；`points` 按天分桶且**缺的天不补零**（空白 = 那天没抓它）；`failures` 只列失败并带 `kind` |
 | POST | `/api/admin/sources` | ✅ 管理员 | 新增源；`key` 冲突 409、非 http(s) 地址 400 |
@@ -199,6 +200,14 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | DELETE | `/api/admin/words/{id}` | ✅ 管理员 | 删除敏感词（审计留快照；停用通常比删除更合适）；不存在 40406 |
 | POST | `/api/admin/words/reload` | ✅ 管理员 | 强制重建**本进程**词库索引（其他实例靠 TTL 兜底，需即时同步时调它） |
 | GET | `/api/admin/moderation/hits?word=&action=&field=&limit=&cursor=` | ✅ 管理员 | **命中日志**（P1-23，只读）：`field` 取 `content`/`name`；`snippet` 为**原文**片段（脱敏不可逆，误杀复盘与申诉的唯一证据）；被拦截的命中 `commentId` 为 `NULL` |
+| GET | `/api/admin/nickname-words?keyword=&action=&enabled=&limit=&offset=` | ✅ 管理员 | **昵称敏感词库**（P1-24）：`action` 取 `block`/`review`/`allow`，非法值 422；`keyword` 只匹配主词（别名在每行 `aliases` 字段可见）；按 `hit_count DESC, id DESC`；`total` 为筛选后总数 |
+| POST | `/api/admin/nickname-words` | ✅ 管理员 | 新增昵称敏感词：`{word, action, category, aliases, enabled}`；主词或**任一别名**归一化后不足 `NICKNAME_MIN_WORD_LEN` 个有效字符 → 42204；重复 → 40906；**保存即生效**（本进程缓存立即失效） |
+| PATCH | `/api/admin/nickname-words/{id}` | ✅ 管理员 | 局部更新（动作/分组/别名/启用），**不允许改词本身**；`aliases` 传空数组 = 清空，不传 = 不动；字段级 diff 审计，无变化不记 |
+| DELETE | `/api/admin/nickname-words/{id}` | ✅ 管理员 | 删除昵称敏感词（审计留快照；停用通常比删除更合适）；不存在 40407 |
+| POST | `/api/admin/nickname-words/reload` | ✅ 管理员 | 强制重建**本进程**昵称词库索引（返回生效条数；其他实例靠 TTL 兜底） |
+| GET | `/api/admin/nickname-hits?word=&action=&source=&userId=&limit=&cursor=` | ✅ 管理员 | **昵称命中日志**（P1-24，只读）：`source` 取 `register`/`update`；`matched` 记**实际命中的模式**（主词或某条别名——回答"哪条别名拦住的"）；`snippet` 为当次提交的昵称原文；游标为 id keyset |
+| GET | `/api/admin/nickname-reviews?keyword=&limit=&offset=` | ✅ 管理员 | **昵称待复核队列**（P1-24）：`name_pending_review=true` 的用户；`keyword` 按**当前**昵称/手机号筛；行含 `flaggedAt`/`flaggedName`/`flaggedMatched`（取该用户最近一条 review 级命中——队列回答"哪个提交需要人看"，不是"他现在叫什么"）；按最近被标记降序 |
+| POST | `/api/admin/nickname-reviews/{userId}` | ✅ 管理员 | **通过昵称人工复核**（幂等）：只清 `name_pending_review` 并写 `name_reviewed_at`，**不改昵称本身**（复核是"人看过了"这个事实，不是运营替他改名）；用户不存在 40408 |
 
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
@@ -632,6 +641,10 @@ alembic check                       # 检测 models 与迁移是否漂移
   `0023_sensitive_words`（敏感词库 `sensitive_words` + 命中日志 `sensitive_hits`，
   `word` 唯一索引、日志记词本身而非外键；`comments` 增 `pending_review` / `reviewed_at`，
   `pending_review` 非空 `server_default=false` 且**不建索引**——它与 `hidden` 正交且短暂）。
+  `0024_nickname_moderation`（昵称词库 `nickname_words`（`aliases` JSON 列，PG 上 JSONB）+
+  命中日志 `nickname_hits`（记 `matched` 实际命中模式）；`users` 增 `name_pending_review`
+  （非空 `server_default=false`，**不建索引**——待复核集小，避免拖慢每次昵称写入）/
+  `name_reviewed_at`）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -922,10 +935,145 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 
 审计动作：`word.create` / `word.update` / `word.delete` / `word.reload` / `comment.review`。
 
+## 用户昵称敏感词校验（P1-24）
+
+> 迁移 `0024_nickname_moderation`；引擎 `app/nickname_moderation.py`；管理端 `/api/admin/nickname-words*`、`/api/admin/nickname-hits`、`/api/admin/nickname-reviews*`。
+
+### 接入位置：注册与改名同一条链
+
+两个写入口共用同一个引擎入口，**规则不搞两套**：
+
+- 注册（`auth.py`，`body.name or 默认名`）；
+- 改名（`PUT /api/me/nickname`，P1-24 新增——此前昵称**没有任何修改入口**，
+  一个脏昵称会跟着用户的每一条评论、每一个通知展示出去，等于让绕过者换个地方贴）。
+
+**为什么另起一套而不复用 P1-23 的 `sensitive_words`**（不同语义的资源不挤进同一张表，
+否则"这个词是拦评论还是拦昵称"永远说不清）：
+
+1. **动作集不同**：评论有 `mask`（脱敏后照常发布）——昵称没有这个语义，
+   昵称是账号级属性，"脱敏后发布"意味着改掉用户自己起的名字，而他此刻改不了。
+   昵称的动作是 `block`（拒绝设置）与 `review`（放行 + 待人工复核）；
+2. **归一化强度不同**：评论刻意**不做**重复压缩（误杀率高，见 `moderation.py`）；
+   昵称场景要求覆盖"重复字符"绕过，且昵称短、无语义（不是句子），压缩的误杀面小得多；
+3. **别名只对昵称有意义**：拼音全拼/首字母/谐音是昵称绕过的主力（"shabi"、"sb"），
+   评论正文走自然语言不需要它。
+
+引擎**复用** `moderation.AhoCorasick` 自动机与指纹缓存模式（不复制第二份实现）。
+
+### 三种动作
+
+| 动作 | 语义 | 适用 |
+| --- | --- | --- |
+| `block` | 拒绝设置（**不保存**），返回 40006 | 高危内容 |
+| `review` | **放行**并置 `name_pending_review` 进人工队列 | 默认（`NicknameWord.action` 缺省） |
+| `allow` | 白名单：被它**完全包裹**的命中区间豁免 | 降误杀（如「射手」豁免「射」） |
+| `pass` | 未命中，原样保存并清除待复核标志 | — |
+
+默认 review 而非 block：机器的判断是概率性的，"先放行 + 让人看一眼"的代价远小于
+"把用户的名字直接吞掉"——后者不可逆，且用户此刻无法在输入框里改一个不让他保存的名字。
+
+### 匹配策略（对抗七类绕过）
+
+归一化由 `nickname_moderation.normalize_forms()` 完成，产出**四个形态**，
+每个形态各自带 `index_map`（命中后能回到原文定位）：
+
+1. **大小写**：`casefold()`（比 `lower` 更彻底，ß → ss）；
+2. **全角/半角与兼容字符**：**逐字符** NFKC（`ｆｕｃｋ` → `fuck`、`①` → `1`）；
+3. **空格 / 标点 / 零宽 / emoji 干扰**：只保留 Unicode 类别 `L*` 与 `N*`，
+   其余全部丢弃——「傻-逼」「傻 逼」归一后与「傻逼」同形；
+4. **重复字符**：`collapsed` 形态压缩连续重复段（`aabbcc` → `abc`，
+   对付逐字重复使子串断裂的场景；`NICKNAME_COLLAPSE_REPEATS` 可关）；
+5. **字母数字混淆**（leetspeak）：`4/@→a、3→e、1/!/|/l→i、0→o、5/$→s、
+   7/+→t、8→b、6/9→g、2→z`。模式串与文本走**同一条管道**，任意一对一归并都安全；
+6. **数字插字**：`nodigits` 形态把数字来源字符整体去掉（"博0彩" → "博彩"）——
+   与 leetspeak 互补：leetspeak 把 0 当字母 o 用，本形态把 0 当噪声删掉；
+7. **繁简体**：内置 curated 繁→简映射表（**非完整 OpenCC 表**——零运行时依赖，
+   未覆盖的繁体变体由运营配成词条别名）。
+
+**拼音与谐音**没有字符级算法可解（同音字替换需要字→拼音表），走**词条别名**
+（`nickname_words.aliases`，拼音全拼/首字母/谐音/变形），与主词走同一条归一化管道——
+这是零新依赖下覆盖"字母写法绕过"的路线。
+
+### 性能
+
+- 昵称上限 24 码点，四形态各扫一遍仍是微秒级；
+- **检测路径不查库**：词库缓存在进程内，只有 TTL（默认 30s）到期才回库查一次
+  **指纹**（`COUNT(*) + MAX(updated_at)`），指纹没变继续用旧索引；
+- 重建索引只发生在**改词时**，不在请求关键路径上。
+
+### 热更新
+
+与 P1-23 同构：管理端增删改词（**含改别名**——别名是模式串的一部分）→
+`nickname_engine.invalidate()` → 本进程保存即生效；其他实例靠 TTL 兜底，
+需要即时同步时调 `POST /admin/nickname-words/reload`。
+
+### 误杀控制
+
+- 默认 review；`allow` 白名单豁免；
+- **最短词长** `NICKNAME_MIN_WORD_LEN`（默认 2）挡在入库（42204，
+  主词与**每个别名逐个查**——引擎会静默跳过过短形态，"配了却没生效"比报错难发现）；
+- **block 提示不回显命中词**：只说"包含违规内容"——回显等于给绕过者一份对照表；
+- **命中日志留 `snippet`**（当次提交的昵称原文）：昵称整体即上下文，
+  误杀复盘与申诉靠它；
+- **停用优于删除**：删除后命中日志里那个词会失去对应配置；
+- **未知 action 兜底 review**（`FALLBACK_ACTION`）：数据异常时降级为
+  "放行 + 让人看一眼"，而不是把用户的昵称直接吞掉；
+- **不做追溯式回填**：词库事后变严时，老名字在**下一次保存时**同样被校验，
+  复核队列针对「新提交」，不回头翻旧账。
+
+### 数据结构（迁移 0024）
+
+- `nickname_words`：`word`（唯一索引）/ `action` / `category` /
+  `aliases`（JSON 数组，拼音/谐音/变形）/ `enabled` / `hit_count` /
+  `created_by` / `created_at` / `updated_at`（`updated_at` 参与指纹，有索引）；
+- `nickname_hits`：一次提交一行，记**词本身**（删词后日志仍可读）+
+  `matched`（实际命中的模式：主词或某条别名）/ `action` /
+  `source`（`register`/`update`）/ `user_id` / `user_name` /
+  `snippet`（昵称原文）/ `created_at`。**block 也留痕**——
+  「拦了多少次改名」不能是黑箱，也识别不出反复尝试绕过；
+- `users` 增 `name_pending_review`（非空默认 false，**不建索引**——
+  待复核集预期很小，索引只会拖慢每次昵称写入）+ `name_reviewed_at`（复核时间）。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `NICKNAME_MODERATION_ENABLED` | `true` | 总开关（关闭后昵称不检测，走人工治理） |
+| `NICKNAME_MIN_LENGTH` | `2` | 昵称最短长度（按 Unicode 码点计） |
+| `NICKNAME_MAX_LENGTH` | `24` | 昵称最长长度（码点；emoji 记 1） |
+| `NICKNAME_MIN_WORD_LEN` | `2` | 入库最短有效字符数（归一化后计，主词与别名都查） |
+| `NICKNAME_CACHE_TTL_SECONDS` | `30` | 词库指纹检查间隔（0 = 每次请求都查库，仅测试用） |
+| `NICKNAME_MAX_WORDS` | `20000` | 词库上限（超出截断并告警，防误导入拖垮重建） |
+| `NICKNAME_COLLAPSE_REPEATS` | `true` | 是否启用重复压缩形态（collapsed 两形态） |
+| `NICKNAME_ALLOWED_SYMBOLS` | `_-·.・` | 昵称符号白名单（空格在代码内补——`_env` 会 strip 整个值） |
+
+### 输入边界（`validate_nickname_shape`）
+
+长度 2~24（码点）；字符白名单 `L*`/`N*` + 有限符号 `_ - · . ・` + 内部空格；
+空值/纯空白拒绝（先 trim 再校验）；代理字符（lone surrogate）与控制字符（Cc）拒绝；
+emoji/符号（So）拒绝。**顺序刻意是「字符集先于长度」**——字符根本不能用，
+比"太长"更根本。全部失败统一以 **42203** 返回，消息即面向用户的提示。
+
+### 管理端接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/admin/nickname-words` | 词库（keyword 只匹配主词 / action / enabled 筛选，limit+offset，按 `hit_count` 降序） |
+| POST | `/api/admin/nickname-words` | 新增（主词或任一别名过短 42204 / 重复 40906），保存即生效 |
+| PATCH | `/api/admin/nickname-words/{id}` | 改动作/分组/别名/启用（**不许改词本身**；字段级 diff 审计） |
+| DELETE | `/api/admin/nickname-words/{id}` | 删除（审计留快照；不存在 40407） |
+| POST | `/api/admin/nickname-words/reload` | 强制重建本进程索引（返回生效条数） |
+| GET | `/api/admin/nickname-hits` | 命中日志（只读；word/action/source/userId 筛选 + id keyset 游标） |
+| GET | `/api/admin/nickname-reviews` | 待复核队列（keyword 按当前昵称/手机号筛；limit+offset；按最近被标记降序） |
+| POST | `/api/admin/nickname-reviews/{userId}` | 通过人工复核（幂等；只清标志 + 写 `name_reviewed_at`，不改昵称；40408） |
+
+审计动作：`nicknameWord.create` / `nicknameWord.update` / `nicknameWord.delete` /
+`nicknameWord.reload` / `nickname.review`。
+
 ## 单元测试
 
 ```bash
-pytest -q          # 505 项
+pytest -q          # 586 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -1054,6 +1202,15 @@ pytest -q          # 505 项
   **新词/停用立即生效**（热更新）、`reload`、CRUD 与审计、**太短 42202 / 重复 40905 /
   不存在 40406**、非管理员 40301、命中日志筛选、`pending` 筛选与复核（幂等 + 40405）、
   总开关关闭后不检测、回复同样受检、正常评论零影响。
+- `tests/test_nickname_moderation.py`（81 项）：**用户昵称敏感词校验**（P1-24）——
+  归一化（**全角/大小写/零宽/leetspeak/数字插字/繁简体/同音别名**七类绕过全拦、
+  四形态与下标映射）、形状校验（六态拒绝 + 边界 accepted + lone surrogate/非字符串）、
+  三动作语义（**block 拒绝且旧名不丢**、review 放行置位、**pass 清待复核标志**、
+  **allow 完全包裹才豁免**、多词重叠取最严）、**一次提交同一词只记一行**、
+  `hit_count` SQL 自增、**注册链路**（block 不建账号、review 置位并留痕、默认名、
+  非法形状）、命中日志（筛选/游标/`matched` 记别名）、**改词立即生效**、
+  `reload` 返回条数、CRUD 与审计、**主词/别名太短 42204 / 重复 40906 / 不存在 40407**、
+  同名重设放行。
 - `tests/test_me.py`（18 项）：**收藏 / 浏览历史云端同步**——鉴权（6 个端点）、收藏增删幂等、
   并集合并且不丢数据/不误删、非法 id 跳过、历史去重与置顶、超限裁剪、被动副作用静默、
   **跨用户隔离**、**资讯清理时标记级联清除**。
@@ -1072,10 +1229,15 @@ pytest -q          # 505 项
 > 以及 `/api/admin/words` 与 `/api/admin/moderation/hits` 的词库 CRUD 与命中日志
 > （太短 42202 / 重复 40905 / 不存在 40406、**停用后立即不再命中**（热更新）、
 > block 提示不回显命中词且仍留痕、mask 脱敏按词长、allow 豁免、**空格/标点/全角/
-> 零宽隔断全部拦住**、命中筛选与游标、复核幂等 + 40405、收尾自销临时词与演示评论）
-> （共 **194 项**；mock 后端同样支持，见前端 README）。
+> 零宽隔断全部拦住**、命中筛选与游标、复核幂等 + 40405、收尾自销临时词与演示评论），
+> 以及 `/me/nickname` 与 `/api/admin/nickname-*` 的昵称敏感词校验
+> （形状六态 42203、block 40006 不回显且**旧昵称不被改写**、review 放行 + 待复核下发、
+> 符号隔断与别名照样命中、命中日志四维筛选与 `matched`、复核队列按 flaggedAt 降序 +
+> 复核幂等 + 40408、allow 豁免、hitCount 精确断言、**改词立即生效**、reload、
+> 主词/别名太短 42204 / 重复 40906 / 不存在 40407、收尾删词并恢复原昵称）
+> （共 **253 项**；mock 后端同样支持，见前端 README）。
 >
-> ⚠️ 真实后端跑全量契约（194 项 ≈ 190+ 请求）会撞上默认限流
+> ⚠️ 真实后端跑全量契约（253 项 ≈ 250+ 请求）会撞上默认限流
 > （`RATE_LIMIT_PER_MINUTE=120`，表现为后段检查报「请求过于频繁」而非真实结论）。
 > 本地验证时以 `RATE_LIMIT_ENABLED=false` 启动后端即可——限流器本身由
 > `tests/test_units.py` 覆盖，契约脚本不重复校验它。
@@ -1086,18 +1248,19 @@ pytest -q          # 505 项
 
 | HTTP | code | 场景 |
 | --- | --- | --- |
-| 400 | 40001 / 40002 / 40003 / 40004 / 40005 | 手机号格式错误 / 评论内容为空 / 分页游标无效 / RSS 源地址不是 http(s) / **评论包含不当内容**（敏感词 block，**不回显命中词**） |
+| 400 | 40001 / 40002 / 40003 / 40004 / 40005 / 40006 | 手机号格式错误 / 评论内容为空 / 分页游标无效 / RSS 源地址不是 http(s) / **评论包含不当内容**（敏感词 block，**不回显命中词**）/ **昵称包含违规内容**（昵称敏感词 block，**不回显命中词**） |
 | 401 | 40100 | 未登录或 token 失效（含被 `token_version` 吊销） |
 | 401 | 40101 | 手机号或密码错误 |
 | 403 | 40301 | 无权限（非管理员调用 `/api/news/refresh`、`/api/admin/*`；白名单为空时该能力整体关闭） |
 | 403 | 40302 | 只能删除自己发表的评论 |
-| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 / 40406 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除）/ 敏感词不存在 |
+| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 / 40406 / 40407 / 40408 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除）/ 敏感词不存在 / **昵称敏感词不存在** / **用户不存在**（昵称复核） |
 | 409 | 40901 | 手机号已注册 |
 | 409 | 40902 | RSS 源标识（`key`）已存在 |
 | 409 | 40903 | 该手机号已是管理员（含 env 与库两个来源） |
 | 409 | 40904 | 已是最后一位管理员，不能移除（末位保护） |
 | 409 | 40905 | 该敏感词已存在 |
-| 422 | 42200 / 42201 / 42202 | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持或频道不存在 / **敏感词有效字符不足**（`MODERATION_MIN_WORD_LEN`，空格与标点不计） |
+| 409 | 40906 | 该昵称敏感词已存在 |
+| 422 | 42200 / 42201 / 42202 / 42203 / 42204 | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持或频道不存在 / **评论敏感词有效字符不足**（`MODERATION_MIN_WORD_LEN`，空格与标点不计）/ **昵称形状不合法**（空/纯空白/越界/非法字符/纯符号，消息即面向用户的提示）/ **昵称敏感词有效字符不足**（`NICKNAME_MIN_WORD_LEN`，主词与别名都查） |
 | 429 | 42900 / 42901 | 触发限流（普通 / 登录） |
 
 > 注：`40901`–`40904` 刻意分开——同一错误码承载多种语义会让前端文案错配。
@@ -1139,6 +1302,8 @@ server-api/
     ├── ranking.py       # 热度分 + 频道偏好（排序与个性化）
     ├── search_stats.py  # 搜索词日志 + 热词时间窗口聚合
     ├── notify.py        # 互动事件 → 消息
+    ├── moderation.py    # 评论敏感词引擎（P1-23，Aho-Corasick + 归一化）
+    ├── nickname_moderation.py  # 昵称敏感词引擎（P1-24，四形态 + 别名 + leetspeak/繁简）
     ├── response.py      # { code, message, data } 封装
     ├── scheduler.py     # 双 cron：定时抓取 + 热度重算（asyncio lifespan，各持独立 advisory lock）
     ├── seed.py          # 种子数据（幂等补齐 + 孤立引用自愈）

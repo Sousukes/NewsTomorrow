@@ -6,7 +6,8 @@
  *
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
- * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）。
+ * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）、
+ * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -1612,6 +1613,588 @@ const run = async () => {
       }
     }
     const wordsFinal = await request('/admin/words?limit=500', { token });
+    check(
+      '收尾后词库回到初始规模',
+      wordsFinal.total === beforeAdd,
+      `${wordsFinal.total} vs ${beforeAdd}`,
+    );
+  }
+
+  // 17) 用户昵称敏感词校验（P1-24）
+  //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //     核心口径：注册与改名**同一条链**（形状 42203 / block 40006 / review 放行待复核）；
+  //     匹配抗符号隔断与拼音别名（同音字没有字符级算法，靠运营补别名）；allow 白名单
+  //     只豁免被完全包裹的片段；命中留痕（含被拦的）；词库 CRUD + 保存即生效；
+  //     复核队列幂等且只清标志不改名。
+  //     双端通用要点：mock 有 5 条种子词与 2 个待复核账号，**真后端词库零种子**——
+  //     故一律用「契约昵称」前缀的自建词（先清遗留再快照总数），队列断言用
+  //     「包含演示用户」而非绝对总数；演示昵称收尾恢复原值。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    // 重新登录取当前用户形态（第 4 步的 auth 在 if 块内，外层拿不到）
+    const demoLogin = await request('/auth/login', { method: 'POST', body: { phone, password } });
+    const demoUser = demoLogin.user;
+    const originalName = demoUser.name;
+    const demoUserId = demoUser.id;
+
+    // 17.1 形状校验（42203）：消息即面向用户的提示，六态逐一比对
+    //      （空/纯空白靠 trim；单字与纯符号是两回事；emoji 撞字符集——字符集
+    //      先于长度，否则用户会收到"至少 2 个字符"而他再加多少字都过不了）
+    const shapeCases = [
+      ['', '昵称不能为空'],
+      ['   ', '昵称不能为空'],
+      ['x', '昵称至少需要 2 个字符'],
+      ['昵'.repeat(25), '昵称不能超过 24 个字符'],
+      ['昵称😀测试', 'CHARSET'], // 符号表可配置，只断言行式
+      ['____', '昵称需至少包含一个字母、数字或汉字'],
+    ];
+    let shapeOk = 0;
+    const shapeBad = [];
+    for (const [name, expect] of shapeCases) {
+      try {
+        await request('/me/nickname', { method: 'PUT', token, body: { name } });
+        shapeBad.push(`「${name || '空'}」未被拒`);
+      } catch (e) {
+        if (expect === 'CHARSET' ? e.message.includes('仅支持') : e.message === expect)
+          shapeOk += 1;
+        else shapeBad.push(`「${name || '空'}」→ ${e.message}`);
+      }
+    }
+    check(
+      '形状校验六态全部 42203 且文案精准（消息即用户提示）',
+      shapeOk === shapeCases.length,
+      shapeBad.join('；'),
+    );
+
+    // 未登录改昵称 → 401（鉴权先于形状，别把未登录报成"昵称不合法"）
+    let nick401 = false;
+    try {
+      await request('/me/nickname', { method: 'PUT', body: { name: '未登录尝试' } });
+    } catch (e) {
+      nick401 = e.message === '未登录或登录已过期';
+    }
+    check('未登录改昵称 → 401 且透传提示', nick401);
+
+    // 17.2 词库 CRUD。四个临时词：block / review / 带拼音别名的 review /
+    //      allow（整段包裹 review 词——白名单的豁免设计）。刻意互不为子串
+    //      （allow 包含 review 是有意的），否则一条用例的文本会命中别的词
+    const W_N_BLOCK = '契约昵称拦截';
+    const W_N_REVIEW = '契约昵称待核';
+    const W_N_ALIAS = '契约昵称主词';
+    const W_N_ALLOW = '契约昵称待核整段';
+    const ALIAS_PY = 'qiyuebingming'; // 拼音全拼：QiyueBingMing 这类写法靠它拦
+
+    // 先清掉上次异常退出遗留的同前缀词（幂等：本段可反复跑）
+    const stale = (
+      await request(
+        '/admin/nickname-words?keyword=' + encodeURIComponent('契约昵称') + '&limit=500',
+        {
+          token,
+        },
+      )
+    ).list;
+    for (const w of stale ?? []) {
+      try {
+        await request(`/admin/nickname-words/${w.id}`, { method: 'DELETE', token });
+      } catch {
+        /* 遗留清理不影响结论 */
+      }
+    }
+    const allNickWords = await request('/admin/nickname-words?limit=500', { token });
+    check(
+      'GET /admin/nickname-words 返回 {list,total}',
+      Array.isArray(allNickWords.list) && typeof allNickWords.total === 'number',
+      `${allNickWords.total} 条`,
+    );
+    check(
+      '词行含 word/action/category/aliases/enabled/hitCount 与时间戳',
+      (allNickWords.list ?? []).every(
+        (w) =>
+          typeof w.word === 'string' &&
+          ['block', 'review', 'allow'].includes(w.action) &&
+          Array.isArray(w.aliases) &&
+          typeof w.enabled === 'boolean' &&
+          typeof w.hitCount === 'number' &&
+          typeof w.updatedAt === 'string',
+      ),
+    );
+    const beforeAdd = allNickWords.total ?? 0;
+
+    const baseCreateAudit =
+      (await request(`/admin/audit?target=${encodeURIComponent(W_N_BLOCK)}&limit=100`, { token }))
+        .list?.[0]?.id ?? 0;
+    const nwBlock = await request('/admin/nickname-words', {
+      method: 'POST',
+      token,
+      body: { word: W_N_BLOCK, action: 'block', category: '契约检查' },
+    });
+    check(
+      'POST /admin/nickname-words 新增成功（block；aliases 恒为数组）',
+      nwBlock.word === W_N_BLOCK &&
+        nwBlock.action === 'block' &&
+        Array.isArray(nwBlock.aliases) &&
+        nwBlock.aliases.length === 0 &&
+        nwBlock.hitCount === 0,
+    );
+    check(
+      '新增留痕（nicknameWord.create）',
+      (
+        await request(`/admin/audit?target=${encodeURIComponent(W_N_BLOCK)}&limit=100`, { token })
+      ).list.some((a) => a.action === 'nicknameWord.create' && a.id > baseCreateAudit),
+    );
+
+    let dupNick = '';
+    try {
+      await request('/admin/nickname-words', {
+        method: 'POST',
+        token,
+        body: { word: W_N_BLOCK, action: 'review' },
+      });
+    } catch (e) {
+      dupNick = e.message;
+    }
+    check('重复昵称词被拒（40906）', dupNick === '该昵称敏感词已存在', dupNick);
+
+    let shortNick = '';
+    try {
+      await request('/admin/nickname-words', { method: 'POST', token, body: { word: '契' } });
+    } catch (e) {
+      shortNick = e.message;
+    }
+    check(
+      '主词归一化后不足 2 字被拒（42204，文案说明"空格与标点不计"）',
+      shortNick === '昵称敏感词至少需 2 个有效字符（空格与标点不计）',
+      shortNick,
+    );
+
+    let shortAlias = '';
+    try {
+      await request('/admin/nickname-words', {
+        method: 'POST',
+        token,
+        body: { word: W_N_ALIAS, action: 'review', aliases: ['x'] },
+      });
+    } catch (e) {
+      shortAlias = e.message;
+    }
+    check(
+      '别名逐个查长度：过短别名被拒（42204）且指出是哪条',
+      shortAlias === '别名「x」至少需 2 个有效字符（空格与标点不计）',
+      shortAlias,
+    );
+    check(
+      '别名过短时整条词都不入库（"配了却没生效"比报错难发现）',
+      (
+        await request(`/admin/nickname-words?keyword=${encodeURIComponent(W_N_ALIAS)}&limit=500`, {
+          token,
+        })
+      ).list.length === 0,
+    );
+
+    const nwReview = await request('/admin/nickname-words', {
+      method: 'POST',
+      token,
+      body: { word: W_N_REVIEW, action: 'review', category: '契约检查' },
+    });
+    const nwAlias = await request('/admin/nickname-words', {
+      method: 'POST',
+      token,
+      body: { word: W_N_ALIAS, action: 'review', category: '契约检查', aliases: [ALIAS_PY] },
+    });
+    check(
+      'review 词与带别名词均可入库（aliases 原样回显）',
+      nwReview.action === 'review' &&
+        nwAlias.action === 'review' &&
+        nwAlias.aliases.length === 1 &&
+        nwAlias.aliases[0] === ALIAS_PY,
+    );
+    check(
+      '新增后总数 +3',
+      (await request('/admin/nickname-words?limit=500', { token })).total === beforeAdd + 3,
+    );
+
+    // 17.3 命中日志基线：只数**本次运行新增**（持久库跨运行累积，绝对计数必挂）
+    const baseNickHitId =
+      (await request('/admin/nickname-hits?limit=1', { token })).list?.[0]?.id ?? 0;
+
+    // 17.4 block：命中即拒绝，且**不改昵称**；提示不回显命中词
+    let nickBlocked = false;
+    let nickBlockMsg = '';
+    try {
+      await request('/me/nickname', { method: 'PUT', token, body: { name: `${W_N_BLOCK}来了` } });
+    } catch (e) {
+      nickBlocked = true;
+      nickBlockMsg = e.message;
+    }
+    check('block 词命中 → 改名被拒（40006）', nickBlocked, nickBlockMsg);
+    check(
+      'block 提示不回显命中词（回显=给绕过者一份对照表）',
+      nickBlocked && !nickBlockMsg.includes(W_N_BLOCK),
+      nickBlockMsg,
+    );
+    const afterBlock = await request('/auth/login', { method: 'POST', body: { phone, password } });
+    check(
+      '被拦后昵称不被改写（拒绝是拒绝，不是"帮你换一个"）',
+      afterBlock.user.name === originalName,
+      afterBlock.user.name,
+    );
+
+    // 17.5 review：放行 + 置待复核（机器的判断是概率性的，先放行再让人看）
+    const reviewName = `${W_N_REVIEW}来了`;
+    const reviewed = await request('/me/nickname', {
+      method: 'PUT',
+      token,
+      body: { name: reviewName },
+    });
+    check(
+      'review 词命中 → 放行但置待复核',
+      reviewed.result === 'review' &&
+        reviewed.pendingReview === true &&
+        reviewed.name === reviewName,
+      `result=${reviewed.result}`,
+    );
+    const afterReview = await request('/auth/login', { method: 'POST', body: { phone, password } });
+    check(
+      '登录下发 namePendingReview（刷新不失忆，否则只有管理员看得见）',
+      afterReview.user.name === reviewName && afterReview.user.namePendingReview === true,
+    );
+    const spaced = await request('/me/nickname', {
+      method: 'PUT',
+      token,
+      body: { name: `${W_N_REVIEW.slice(0, 2)}-${W_N_REVIEW.slice(2)}来了` },
+    });
+    check(
+      '符号隔断照样命中（归一化吃掉标点：契约昵-称待核 ≡ 契约昵称待核）',
+      spaced.result === 'review' && spaced.pendingReview === true,
+      `result=${spaced.result}`,
+    );
+
+    // 17.6 别名：拼音全拼是昵称绕过的主力——同音字替换没有字符级算法可解，
+    //      由运营补别名（命中日志的 matched 就是"该补哪个别名"的依据）
+    const aliasName = 'QiyueBingMing来了';
+    const viaAlias = await request('/me/nickname', {
+      method: 'PUT',
+      token,
+      body: { name: aliasName },
+    });
+    check(
+      '别名命中 → 按主词分级（review 放行待复核）',
+      viaAlias.result === 'review' && viaAlias.pendingReview === true,
+      `result=${viaAlias.result}`,
+    );
+
+    // 17.7 命中日志：形状、四维筛选、游标（只读；回答误杀与受理申诉）
+    const nickHits = await request('/admin/nickname-hits?limit=20', { token });
+    check(
+      'GET /admin/nickname-hits 返回 {list,total,hasMore,nextCursor}',
+      Array.isArray(nickHits.list) &&
+        typeof nickHits.total === 'number' &&
+        typeof nickHits.hasMore === 'boolean' &&
+        'nextCursor' in nickHits,
+      `${nickHits.total} 条`,
+    );
+    check(
+      '命中行含 word/matched/action/source/userId/snippet/createdAt',
+      (nickHits.list ?? []).every(
+        (h) =>
+          typeof h.word === 'string' &&
+          typeof h.matched === 'string' &&
+          ['block', 'review'].includes(h.action) &&
+          ['register', 'update'].includes(h.source) &&
+          'userId' in h &&
+          typeof h.snippet === 'string' &&
+          typeof h.createdAt === 'string',
+      ),
+    );
+    const newHits = (nickHits.list ?? []).filter((h) => h.id > baseNickHitId);
+    check(
+      '四次提交全部留痕（block 也留：拦了多少次不能是黑箱）',
+      newHits.length === 4,
+      newHits.map((h) => `${h.word}/${h.matched}/${h.action}`).join(','),
+    );
+    const aliasHit = newHits.find((h) => h.word === W_N_ALIAS);
+    check(
+      'matched 记实际命中的模式（回答"是哪条别名拦的"）',
+      aliasHit?.matched === ALIAS_PY &&
+        aliasHit?.action === 'review' &&
+        aliasHit?.source === 'update',
+      aliasHit?.matched,
+    );
+    const blockHit = newHits.find((h) => h.word === W_N_BLOCK);
+    check(
+      'block 命中 source=update、snippet 是当次提交的昵称原文',
+      blockHit?.source === 'update' && blockHit?.snippet === `${W_N_BLOCK}来了`,
+      blockHit?.snippet,
+    );
+    const byWord = await request(
+      `/admin/nickname-hits?word=${encodeURIComponent(W_N_BLOCK)}&limit=100`,
+      { token },
+    );
+    check(
+      'word 筛选只返回该词命中',
+      (byWord.list ?? []).length > 0 && (byWord.list ?? []).every((h) => h.word === W_N_BLOCK),
+    );
+    const byAction = await request('/admin/nickname-hits?action=review&limit=100', { token });
+    check(
+      'action=review 只返回待复核命中',
+      (byAction.list ?? []).every((h) => h.action === 'review'),
+    );
+    const bySource = await request('/admin/nickname-hits?source=update&limit=100', { token });
+    check(
+      'source=update 只返回改名入口',
+      (bySource.list ?? []).every((h) => h.source === 'update'),
+    );
+    const byUser = await request(`/admin/nickname-hits?userId=${demoUserId}&limit=100`, { token });
+    check(
+      'userId 筛选只看某个用户（队列与日志互相印证）',
+      (byUser.list ?? []).length > 0 && (byUser.list ?? []).every((h) => h.userId === demoUserId),
+    );
+    let badNickAction = false;
+    try {
+      await request('/admin/nickname-hits?action=bogus', { token });
+    } catch {
+      badNickAction = true;
+    }
+    check('非法 action 筛选被拒（422）', badNickAction);
+
+    const nh1 = await request('/admin/nickname-hits?limit=2', { token });
+    if (nh1.nextCursor) {
+      const nh2 = await request(`/admin/nickname-hits?limit=2&cursor=${nh1.nextCursor}`, { token });
+      const ids1 = (nh1.list ?? []).map((h) => h.id);
+      check(
+        '命中日志游标翻页不重复',
+        (nh2.list ?? []).every((h) => !ids1.includes(h.id)),
+      );
+    }
+
+    // 17.8 复核队列：按人定位；通过只清标志、不改昵称本身
+    const queue = await request('/admin/nickname-reviews?limit=100', { token });
+    check(
+      'GET /admin/nickname-reviews 返回 {list,total}',
+      Array.isArray(queue.list) && typeof queue.total === 'number',
+      `${queue.total} 条`,
+    );
+    check(
+      '队列行含 userId/name/phone/flaggedAt/flaggedName/flaggedMatched',
+      (queue.list ?? []).every(
+        (r) =>
+          'userId' in r &&
+          typeof r.name === 'string' &&
+          typeof r.phone === 'string' &&
+          'flaggedAt' in r &&
+          'flaggedName' in r &&
+          'flaggedMatched' in r,
+      ),
+    );
+    const myRow = (queue.list ?? []).find((r) => r.userId === demoUserId);
+    check(
+      '待复核用户进队（mock 另有 2 个种子账号，故用"包含"而非绝对总数）',
+      !!myRow,
+      (queue.list ?? []).map((r) => r.userId).join(','),
+    );
+    check(
+      'flaggedName/flaggedMatched 取**最近一条** review 命中（队列回答"哪个提交要人看"）',
+      myRow?.flaggedName === aliasName && myRow?.flaggedMatched === ALIAS_PY,
+      `${myRow?.flaggedName} / ${myRow?.flaggedMatched}`,
+    );
+    const flaggedAts = (queue.list ?? []).map((r) => String(r.flaggedAt ?? ''));
+    check(
+      '队列按 flaggedAt 降序（新提交的浮在上面）',
+      flaggedAts.every((v, i) => i === 0 || flaggedAts[i - 1] >= v),
+      flaggedAts.join(','),
+    );
+    const byKw = await request(
+      `/admin/nickname-reviews?keyword=${encodeURIComponent(aliasName)}&limit=100`,
+      { token },
+    );
+    check(
+      'keyword 按当前昵称筛出该用户',
+      (byKw.list ?? []).some((r) => r.userId === demoUserId),
+    );
+
+    const baseReviewAudit =
+      (await request(`/admin/audit?target=${demoUserId}&limit=100`, { token })).list?.[0]?.id ?? 0;
+    const nickReviewed = await request(`/admin/nickname-reviews/${demoUserId}`, {
+      method: 'POST',
+      token,
+    });
+    check(
+      '复核通过：pendingReview=false 且写 reviewedAt',
+      nickReviewed.pendingReview === false && !!nickReviewed.reviewedAt,
+      String(nickReviewed.reviewedAt),
+    );
+    check(
+      '复核不改昵称本身（复核是"人看过了"，不是运营替他改名）',
+      nickReviewed.name === aliasName,
+      nickReviewed.name,
+    );
+    const afterNickReview = await request('/auth/login', {
+      method: 'POST',
+      body: { phone, password },
+    });
+    check(
+      '复核后登录下发 namePendingReview=false',
+      afterNickReview.user.namePendingReview === false,
+    );
+    const queueAfter = await request('/admin/nickname-reviews?limit=100', { token });
+    check('复核后出队', !(queueAfter.list ?? []).some((r) => r.userId === demoUserId));
+    const nickReviewedAgain = await request(`/admin/nickname-reviews/${demoUserId}`, {
+      method: 'POST',
+      token,
+    });
+    check('复核幂等（重复调用不报错）', nickReviewedAgain.pendingReview === false);
+    const reviewAudits =
+      (await request(`/admin/audit?target=${demoUserId}&limit=100`, { token })).list ?? [];
+    check(
+      '复核留痕（nickname.review，target=用户 id）',
+      reviewAudits.some((a) => a.action === 'nickname.review' && a.id > baseReviewAudit),
+    );
+    check(
+      '重复复核不重复审计（没有新事实就不留新痕）',
+      reviewAudits.filter((a) => a.id > baseReviewAudit && a.action === 'nickname.review')
+        .length === 1,
+    );
+    let reviewMissingUser = false;
+    try {
+      await request('/admin/nickname-reviews/999999999', { method: 'POST', token });
+    } catch (e) {
+      reviewMissingUser = e.message === '用户不存在';
+    }
+    check('复核未知用户 40408', reviewMissingUser);
+
+    // 17.9 allow 白名单：命中区间被 allow 词**完全包裹**才豁免（降误杀的逃生门）
+    const nwAllow = await request('/admin/nickname-words', {
+      method: 'POST',
+      token,
+      body: { word: W_N_ALLOW, action: 'allow', category: '契约检查' },
+    });
+    check('allow 词可入库', nwAllow.action === 'allow');
+    const allowed = await request('/me/nickname', {
+      method: 'PUT',
+      token,
+      body: { name: W_N_ALLOW },
+    });
+    check(
+      'allow 词整段命中 → 豁免其中的 review 词（pass 且清待复核）',
+      allowed.result === 'pass' && allowed.pendingReview === false,
+      `result=${allowed.result}`,
+    );
+    const stillReview = await request('/me/nickname', {
+      method: 'PUT',
+      token,
+      body: { name: `${W_N_REVIEW}之外` },
+    });
+    check(
+      '白名单外的同词片段仍命中（白名单只豁免指定片段）',
+      stillReview.result === 'review',
+      `result=${stillReview.result}`,
+    );
+
+    // 17.10 命中计数与排序：hitCount 随留痕累加（高频词要么是热点，要么是误杀大户）
+    const wordsAfterHits = (await request('/admin/nickname-words?limit=500', { token })).list;
+    const hitCountOf = (w) => wordsAfterHits.find((x) => x.word === w)?.hitCount ?? -1;
+    check(
+      'hitCount 按留痕累加（block 1 / review 3 / 别名 1）',
+      hitCountOf(W_N_BLOCK) === 1 && hitCountOf(W_N_REVIEW) === 3 && hitCountOf(W_N_ALIAS) === 1,
+      `${W_N_BLOCK}=${hitCountOf(W_N_BLOCK)} ${W_N_REVIEW}=${hitCountOf(W_N_REVIEW)} ${W_N_ALIAS}=${hitCountOf(W_N_ALIAS)}`,
+    );
+    check(
+      '列表按命中次数降序（运营先看最热的词）',
+      wordsAfterHits[0]?.word === W_N_REVIEW,
+      wordsAfterHits.map((w) => `${w.word}:${w.hitCount}`).join(','),
+    );
+
+    // 17.11 词库维护：改动作（不许改词本身）/ 删快照 / 删第二次 40407 / reload
+    const baseUpdateAudit =
+      (await request(`/admin/audit?target=${encodeURIComponent(W_N_ALIAS)}&limit=100`, { token }))
+        .list?.[0]?.id ?? 0;
+    const nwPatched = await request(`/admin/nickname-words/${nwAlias.id}`, {
+      method: 'PATCH',
+      token,
+      body: { action: 'block', category: '契约检查改' },
+    });
+    check(
+      'PATCH 改动作与分组（不许改词本身：改词=删一条加一条）',
+      nwPatched.action === 'block' &&
+        nwPatched.category === '契约检查改' &&
+        nwPatched.word === W_N_ALIAS &&
+        nwPatched.aliases[0] === ALIAS_PY,
+    );
+    check(
+      '改动作留痕（nicknameWord.update）',
+      (
+        await request(`/admin/audit?target=${encodeURIComponent(W_N_ALIAS)}&limit=100`, { token })
+      ).list.some((a) => a.action === 'nicknameWord.update' && a.id > baseUpdateAudit),
+    );
+    // 保存即生效：别名写法从"待复核"变成"拦截"（改词即失效本进程缓存）
+    let aliasNowBlocked = false;
+    try {
+      await request('/me/nickname', { method: 'PUT', token, body: { name: 'QiyueBingMing再来' } });
+    } catch {
+      aliasNowBlocked = true;
+    }
+    check('改动作保存即生效（热更新，无需重启）', aliasNowBlocked);
+
+    const baseDeleteAudit =
+      (await request(`/admin/audit?target=${encodeURIComponent(W_N_BLOCK)}&limit=100`, { token }))
+        .list?.[0]?.id ?? 0;
+    const nwDeleted = await request(`/admin/nickname-words/${nwBlock.id}`, {
+      method: 'DELETE',
+      token,
+    });
+    check(
+      'DELETE 返回删除前的快照（审计用）',
+      nwDeleted.word === W_N_BLOCK && nwDeleted.action === 'block',
+    );
+    check(
+      '删除留痕（nicknameWord.delete，含快照）',
+      (
+        await request(`/admin/audit?target=${encodeURIComponent(W_N_BLOCK)}&limit=100`, { token })
+      ).list.some((a) => a.action === 'nicknameWord.delete' && a.id > baseDeleteAudit),
+    );
+    let deleteAgain = '';
+    try {
+      await request(`/admin/nickname-words/${nwBlock.id}`, { method: 'DELETE', token });
+    } catch (e) {
+      deleteAgain = e.message;
+    }
+    check('删第二次 40407', deleteAgain === '昵称敏感词不存在', deleteAgain);
+
+    const baseReloadAudit = (await request('/admin/audit?limit=100', { token })).list?.[0]?.id ?? 0;
+    const reloaded = await request('/admin/nickname-words/reload', { method: 'POST', token });
+    check(
+      'POST /admin/nickname-words/reload 返回生效条数',
+      typeof reloaded.count === 'number' && reloaded.count >= 3,
+      String(reloaded.count),
+    );
+    check(
+      'reload 留痕（nicknameWord.reload）',
+      (await request('/admin/audit?limit=100', { token })).list.some(
+        (a) => a.action === 'nicknameWord.reload' && a.id > baseReloadAudit,
+      ),
+    );
+
+    // 17.12 收尾：删掉剩余临时词、恢复演示昵称，不污染开发库
+    for (const w of [nwBlock, nwReview, nwAlias, nwAllow]) {
+      try {
+        await request(`/admin/nickname-words/${w.id}`, { method: 'DELETE', token });
+      } catch {
+        /* 已删或不存在：收尾不影响结论 */
+      }
+    }
+    try {
+      // 先删词再恢复：原名若含本轮临时词，删掉后才过得了校验
+      await request('/me/nickname', { method: 'PUT', token, body: { name: originalName } });
+    } catch {
+      /* 原名若已被运营加的新词判违规，保留现状比反复报错好 */
+    }
+    const restored = await request('/auth/login', { method: 'POST', body: { phone, password } });
+    check(
+      '收尾后演示昵称与待复核状态回位',
+      restored.user.name === originalName &&
+        restored.user.namePendingReview === demoUser.namePendingReview,
+      `${restored.user.name} / pending=${restored.user.namePendingReview}`,
+    );
+    const wordsFinal = await request('/admin/nickname-words?limit=500', { token });
     check(
       '收尾后词库回到初始规模',
       wordsFinal.total === beforeAdd,

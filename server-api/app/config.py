@@ -179,3 +179,42 @@ MODERATION_DEFAULT_ACTION = _env("MODERATION_DEFAULT_ACTION", "mask").lower()
 # 词库规模上限（条）。防止误导入百万级词表把内存与构建时间拖垮；
 # 超出部分在加载时截断并告警——宁可少拦几个词，也不能让评论提交变慢。
 MODERATION_MAX_WORDS = max(100, int(_env("MODERATION_MAX_WORDS", "20000")))
+
+# ---- 昵称敏感词校验（P1-24）----
+# 总开关。关闭后词库仍在、管理端仍可维护，但注册/改昵称不再检测——
+# 出问题（大面积误杀）时的**一键止血**，不需要发版。
+NICKNAME_MODERATION_ENABLED = _env("NICKNAME_MODERATION_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# 昵称长度边界（按 Unicode **码点**计，Python len() 即码点数，emoji 记 1）。
+# 下限 2：单字名既没有识别度也极易撞车；上限 24：评论列表/通知里放得下，
+# 再长就会被截断得看不出原样。
+NICKNAME_MIN_LENGTH = max(1, int(_env("NICKNAME_MIN_LENGTH", "2")))
+NICKNAME_MAX_LENGTH = max(2, int(_env("NICKNAME_MAX_LENGTH", "24")))
+# 词库最短长度（按**每个归一化形态**的字符数计）。与评论同一理由：
+# 1 字词在正常表达里遍地都是。对每个形态都把关（而非只 base）是因为
+# 折叠形态天然更短（"约约"压缩成"约"），放任它会把任何含"约"的昵称
+# 都算成命中"约约"。
+NICKNAME_MIN_WORD_LEN = max(1, int(_env("NICKNAME_MIN_WORD_LEN", "2")))
+# 词库缓存有效期（秒）：与 MODERATION_CACHE_TTL_SECONDS 同一机制——
+# 到期才回库查一次指纹，**校验本身永不查库**。管理端改词主动失效本进程缓存
+# （保存即生效），TTL 只是集群下其他实例的兜底。
+NICKNAME_CACHE_TTL_SECONDS = max(0, int(_env("NICKNAME_CACHE_TTL_SECONDS", "30")))
+# 词库规模上限（条，含每条词的别名在各形态下的展开前的词条数）。
+NICKNAME_MAX_WORDS = max(100, int(_env("NICKNAME_MAX_WORDS", "20000")))
+# 是否启用「重复字符压缩」形态（"aabbcc" → "abc"）。昵称无语义、长度有限，
+# 压缩的误杀面远比评论正文小，故默认开；若出现误杀可关掉这一形态
+# （其余形态——大小写/全半角/符号/数字混淆/繁简——不受影响）。
+NICKNAME_COLLAPSE_REPEATS = _env("NICKNAME_COLLAPSE_REPEATS", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# 昵称允许的**符号**白名单（字母/数字/汉字另按 Unicode L*/N* 放行）。
+# 空格不在这里：`_env` 会 strip 整个值，尾随空格在环境变量里活不下来，
+# 故空格由代码额外允许（首尾空白一律 trim，只放行内部空格）。
+NICKNAME_ALLOWED_SYMBOLS = _env("NICKNAME_ALLOWED_SYMBOLS", "_-·.・")
