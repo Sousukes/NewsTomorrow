@@ -16,6 +16,7 @@ vi.mock('@/api/news', () => ({
   searchNews: vi.fn(),
 }));
 
+import { setToken } from '@/api/http';
 import { useMessagesStore } from '@/stores/messages';
 import { useNewsStore } from '@/stores/news';
 import * as msgApi from '@/api/messages';
@@ -64,6 +65,7 @@ describe('stores/messages', () => {
   });
 
   it('markRead 本地立即生效并回写服务端', async () => {
+    setToken('test-token'); // 已读要记在账号维度，游客不回写（见下一条用例）
     vi.mocked(msgApi.fetchMessages).mockResolvedValue(mockMessages());
     vi.mocked(msgApi.markMessageRead).mockResolvedValue(undefined);
     const s = useMessagesStore();
@@ -75,7 +77,19 @@ describe('stores/messages', () => {
     expect(msgApi.markMessageRead).toHaveBeenCalledWith('m1');
   });
 
+  it('游客 markRead 只落本地，不发起请求', async () => {
+    // 后端标记已读要求登录；游客发起只会拿到 401，进而触发全局跳登录页
+    vi.mocked(msgApi.fetchMessages).mockResolvedValue(mockMessages());
+    const s = useMessagesStore();
+    await s.fetch();
+
+    await s.markRead('m1');
+    expect(s.list.find((m) => m.id === 'm1')?.read).toBe(true);
+    expect(msgApi.markMessageRead).not.toHaveBeenCalled();
+  });
+
   it('重复 markRead 幂等（不重复调接口）', async () => {
+    setToken('test-token');
     vi.mocked(msgApi.fetchMessages).mockResolvedValue(mockMessages());
     vi.mocked(msgApi.markMessageRead).mockResolvedValue(undefined);
     const s = useMessagesStore();
@@ -86,6 +100,7 @@ describe('stores/messages', () => {
   });
 
   it('markAllRead 全部置为已读', async () => {
+    setToken('test-token');
     vi.mocked(msgApi.fetchMessages).mockResolvedValue(mockMessages());
     vi.mocked(msgApi.markAllMessagesRead).mockResolvedValue(undefined);
     const s = useMessagesStore();

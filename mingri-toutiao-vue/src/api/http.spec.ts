@@ -38,6 +38,19 @@ describe('api/http 加固（H6）', () => {
     window.removeEventListener(UNAUTHORIZED_EVENT, spy);
   });
 
+  it('游客遇到 401 不广播事件（不把未登录用户跳到登录页）', async () => {
+    // 游客请求需登录的接口同样拿到 401，但那不是会话过期：
+    // 广播事件会被 main.ts 监听并 router.push 到登录页，把游客强行踢走。
+    const spy = vi.fn();
+    window.addEventListener(UNAUTHORIZED_EVENT, spy);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ message: '未登录' }, 401)));
+    await expect(request('/t', { method: 'POST' })).rejects.toMatchObject({ status: 401 });
+
+    expect(spy).not.toHaveBeenCalled();
+    window.removeEventListener(UNAUTHORIZED_EVENT, spy);
+  });
+
   it('GET 网络错误按指数退避重试，最终成功', async () => {
     const f = vi
       .fn()

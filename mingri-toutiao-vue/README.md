@@ -452,7 +452,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 ## 状态管理 `src/stores/`
 
 - **`news.ts`（useNewsStore）**：`list` / `loading` / `error` / `detailCache` / `searching` / `searchError` / `page` / `total` / `hasMore` / `loadingMore` / `currentChannel` + `fetchNews(channel)` / `loadMore()`（**无限滚动追加，按 id 去重、并发幂等**）/ `resetPaging()` / `getById(id)` / `loadDetail(id)`（深链兜底）/ `search(keyword,page,pageSize)`（**服务端搜索**）/ `searchLocal(keyword)`（离线兜底）。数据来自 `api/news`，未配后端时自动 mock。
-- **`messages.ts`（useMessagesStore）**：`list` / `loading` / `error` / `unreadCount` + `fetch()` / `markRead(id)` / `markAllRead()` / `refreshUnread()`。已读状态**本地持久化 + 回写服务端**，未登录时仅本地生效。
+- **`messages.ts`（useMessagesStore）**：`list` / `loading` / `error` / `unreadCount` + `fetch()` / `markRead(id)` / `markAllRead()` / `refreshUnread()`。已读状态**本地持久化 + 回写服务端**，未登录时仅本地生效——**无登录态时不发起这两个写请求**（后端标记已读要求登录，401 会触发全局未授权跳转，不该因游客点开一条消息就把他踢到登录页）。
 - **`user.ts`（useUserStore）**：`token` / `isLoggedIn` / `userId` / `isAdmin` / `favorites` / `history` / `theme` / `syncing` / `syncError` + `login(phone,password)` / `logout()` / `syncMarks()` / `toggleFavorite` / `isFavorite` / `addHistory` / `clearHistory` / `setTheme`。
   - **`isAdmin` 由登录响应下发并落盘**（`prefs.isAdmin && isLoggedIn`，刷新不丢入口）；登出/401 归位。
     后端按 `ADMIN_PHONES` 白名单判定，**只下发布尔值**；白名单变动要等下次登录/续期才更新，
@@ -477,7 +477,7 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 - **`http.ts`**：统一 `fetch` 客户端——自动注入 `Authorization: Bearer <token>`、约定后端返回 `{ code, message?, data }`（`code` 0/200 为成功）、token 持久化（`getToken`/`setToken`）、`ApiError`。
 - **`news.ts`**：`fetchNewsPage` / `fetchNews` / `fetchNewsById` / `searchNews` / `fetchRelated`（`GET /news/search`、`GET /news/:id/related`）→ `NewsItem`，含后端字段归一化（`normalizeNewsItem` 对外导出，供 `api/me` 复用）。
 - **`comments.ts`**：`listCommentsPage` / `listComments` / `listRepliesPage` / `createComment`（`parentId` 非空时为回复）/ `setCommentLike` / `deleteComment` → `GET/POST/PATCH/DELETE /news/:id/comments` 与 `GET /news/:id/comments/:cid/replies`（回复列表，时间正序游标分页；root 已删返回空）。
-- **`messages.ts`**：`fetchMessagesPage` / `fetchMessages` / `fetchUnreadCount` / `markMessageRead` / `markAllMessagesRead` → `GET /messages`、`GET /messages/unread-count`、`PATCH /messages/{id}`、`POST /messages/read-all`。
+- **`messages.ts`**：`fetchMessagesPage` / `fetchMessages` / `fetchUnreadCount` / `markMessageRead` / `markAllMessagesRead` → `GET /messages`、`GET /messages/unread-count`、`PATCH /messages/{id}`（**需登录**，不可见/不存在同码 40400）、`POST /messages/read-all`。
 - **`me.ts`**：`fetchFavorites` / `addFavorite` / `removeFavorite` / `mergeFavorites` / `fetchHistory` / `recordHistory` / `clearHistoryRemote` / `mergeHistory` → `/me/favorites`、`/me/history`。所有写操作返回**完整集合** `{ ids, list }`（服务端即事实源）；导出 `MARKS_SYNC_SUPPORTED`，mock 模式下为 `false`，store 据此跳过同步请求。
 - **`auth.ts`**：`login({phone,password})` → `POST /auth/login`（成功写 token）；`logout()` → `POST /auth/logout`（清 token）。登录/注册/续期响应携带 `user.isAdmin`（布尔），store 据此决定管理入口显隐。
 - **`admin.ts`**：`fetchSources` / `createSource` / `updateSource` / `deleteSource` / `resetSources` → `/admin/sources` 五件套（**仅真实后端**，`ADMIN_SOURCES_SUPPORTED` 为门；mock 模式下不短路假数据——伪造一份可变的源列表会误导排障，入口由 `isAdmin` 隐藏即可）。行数据经 `toSource()` 归一化：丢弃缺 `key` 的脏行、`channel` 归一化、空 `lastError` 转 `null`、`respectRobots` 缺失时按更保守的一方兜底为 `true`。
@@ -642,7 +642,7 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **工程基建**：ESLint + Prettier + `npm run verify` + GitHub Actions CI
 - [x] 全局错误边界（`ErrorBoundary` + `app.config.errorHandler`），消除白屏
 - [x] **无限滚动**：`useInfiniteList` + store `loadMore`（去重/并发幂等/末页判定）+ 骨架屏与底部状态
-- [x] **单元测试**：Vitest 467 项（前端）+ pytest 586 项（后端），已接入 CI
+- [x] **单元测试**：Vitest 469 项（前端）+ pytest 591 项（后端），已接入 CI
 - [x] API 层：`api/`（news / comments / auth + http 客户端，token 注入、`{code,data}` 解包），未配后端自动走 mock
 - [x] store 全面接 API（news/comments 离线优先 + 后台同步；user 增 token 与 login/logout）
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放

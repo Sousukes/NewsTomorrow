@@ -163,7 +163,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | PATCH | `/api/news/{id}/comments/{cid}` | ✅ | 点赞 / 取消点赞（`comment_likes` 关系表按用户去重，幂等） |
 | GET | `/api/messages?limit=&cursor=` | —（可选带 token） | 消息中心列表（游标分页，返回 `{ list, hasMore, nextCursor }`） |
 | GET | `/api/messages/unread-count` | — | 未读数（给 TabBar 徽标；关联表索引计数，不全表遍历） |
-| PATCH | `/api/messages/{id}` | —（可选） | 标记单条已读（写入 `message_reads` 关联表，幂等） |
+| PATCH | `/api/messages/{id}` | ✅ | 标记单条已读（写入 `message_reads` 关联表，幂等）。**需登录**（40100）；「不存在」与「不可见」同码 **40400**（H11：不泄露他人定向消息） |
 | POST | `/api/messages/read-all` | —（可选） | 全部标记已读 |
 | GET | `/api/me/favorites` | ✅ | 我的收藏（按收藏时间倒序），返回 `{ ids, list }` |
 | POST | `/api/me/favorites` | ✅ | 收藏一条资讯（幂等；资讯不存在 404） |
@@ -779,8 +779,19 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 - **去重**：相同（收件人, 类型, 资讯, 摘要）只记一条——点赞可反复切换，不去重会刷屏
 - **旁路**：通知失败不影响评论/点赞主流程（记录 warning 后继续）
 
-接口 `GET /messages`、`GET /messages/unread-count`、`POST /messages/read-all`
-均只统计**可见范围**内的消息（定向给自己 + 广播）。
+接口 `GET /messages`、`GET /messages/unread-count`、`PATCH /messages/{id}`、
+`POST /messages/read-all` 均只统计**可见范围**内的消息（定向给自己 + 广播）。
+
+**`PATCH /messages/{id}` 要求登录，且「不存在」与「不可见」同码 40400**（H11 修复）：
+此前该端点用 `db.get(Message, id)` 直接取行并返回 `title` / `summary` / `newsId`，
+依赖还是 `get_current_user_optional`——任何登录用户（乃至未登录）只要拿到或猜到
+消息 id 就能读到他人定向消息的内容，而种子 id 形如 `m1..m4` 可直接枚举。
+现在先按 `visible_condition` 过滤再操作：不可见一律 40400，对外不暴露
+「它存在但你看不到」（与资讯软下架同码同一条口径）。
+
+> 前端配套：`stores/messages.ts` 在**无登录态时只落本地已读、不发起该请求**——
+> 否则后端 401 会经 `api/http.ts` 触发全局未授权跳转，把游客踢到登录页。
+> 同时 `http.ts` 的 401 处理改为**仅在原本持有 token 时**广播未授权事件。
 
 ## 收藏 / 浏览历史（云端同步）
 
@@ -1073,7 +1084,7 @@ emoji/符号（So）拒绝。**顺序刻意是「字符集先于长度」**—�
 ## 单元测试
 
 ```bash
-pytest -q          # 586 项
+pytest -q          # 591 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -1165,7 +1176,7 @@ pytest -q          # 586 项
   **库白名单（非 env）号码同样下发 true**；
   **入参校验**（4 项）——未知频道 422（`errors[0].loc[-1] == 'channel'`）、`key` 格式非法 422、
   更新时同样校验频道。
-- `tests/test_api.py`（88 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
+- `tests/test_api.py`（93 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
   `userId`、`mine` 仅作者为 true、历史评论 `userId` 为 null 且任何人都不是作者；
   **评论删除**（`TestCommentDelete`）——作者可删、他人 403、未登录 401、
   无归属评论不可删、幂等、删后不可点赞、跨文章 404；
@@ -1187,6 +1198,11 @@ pytest -q          # 586 项
 - `tests/test_api.py` 另含 `TestMessageEvents`（8 项）：**消息事件化**——广播对全员可见、
   定向消息仅收件人可见、评论通知其他评论者、**自身不通知自己**、点赞通知作者、
   **取消赞不打扰**、反复点赞去重、全部已读只标记可见消息。
+- `tests/test_api.py` 另含 `TestMarkReadAuthorization`（4 项，H11 修复）：**标记已读的越权防护**——
+  收件人标记自己的定向消息 200 并写入已读关系、他人标记返回 **40400** 且响应体
+  **不回显任何字段**也不写已读关系、广播消息任何登录用户可标记、越权尝试不影响他人未读数；
+  `TestMessages` 另有两项契约变更断言——消息不存在 **40400**（原为 200 静默）、
+  未登录标记 **40100**。
 - `tests/test_multi_instance.py`（4 项）：限流器工厂回退、非 PG 方言 advisory lock 行为、
   **抓取锁与热度锁键不同**（P1-21，防热度任务被抓取锁连带跳过）。
 - `tests/test_scheduler.py`（6 项）：**热度重算独立 cron**（P1-21）——核心回归
@@ -1253,7 +1269,7 @@ pytest -q          # 586 项
 | 401 | 40101 | 手机号或密码错误 |
 | 403 | 40301 | 无权限（非管理员调用 `/api/news/refresh`、`/api/admin/*`；白名单为空时该能力整体关闭） |
 | 403 | 40302 | 只能删除自己发表的评论 |
-| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 / 40406 / 40407 / 40408 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除）/ 敏感词不存在 / **昵称敏感词不存在** / **用户不存在**（昵称复核） |
+| 404 | 40400 / 40401 / 40402 / 40403 / 40404 / 40405 / 40406 / 40407 / 40408 | 资讯不存在（**已下架对外同码**）/ 评论不存在 / RSS 源不存在 / 管理员不存在 / 管理端资讯不存在 / 管理端评论不存在（含已软删除）/ 敏感词不存在 / **昵称敏感词不存在** / **用户不存在**（昵称复核）。**40400 亦用于消息「不存在或不可见」**——同码才不暴露存在性 |
 | 409 | 40901 | 手机号已注册 |
 | 409 | 40902 | RSS 源标识（`key`）已存在 |
 | 409 | 40903 | 该手机号已是管理员（含 env 与库两个来源） |

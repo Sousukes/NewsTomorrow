@@ -444,9 +444,102 @@ class TestMessages:
         assert client.post("/api/messages/read-all", headers=h).json()["code"] == 0
         assert client.get("/api/messages/unread-count", headers=h).json()["data"] == 0
 
-    def test_mark_missing_message_is_noop(self, client):
+    def test_mark_missing_message_is_404(self, client):
+        """消息不存在 → 40400（与「不可见」同码，不暴露存在性）。
+
+        此前返回 200 静默成功：那会让「标记了一条不属于你的消息」也表现为成功，
+        越权与否在响应上完全看不出来。
+        """
         h = auth_header(client)
-        assert client.patch("/api/messages/nope", headers=h).status_code == 200
+        r = client.patch("/api/messages/nope", headers=h)
+        assert r.status_code == 404
+        assert r.json()["code"] == 40400
+
+    def test_mark_read_requires_login(self, client):
+        """标记已读必须登录（此前依赖是 optional，匿名也能打）。"""
+        r = client.patch("/api/messages/m1")
+        assert r.status_code == 401
+        assert r.json()["code"] == 40100
+
+
+class TestMarkReadAuthorization:
+    """H11 越权防护：标记已读只能在**自己的可见范围内**进行。
+
+    修复前 `mark_read` 用 `db.get(Message, id)` 直接取行并返回 title/summary，
+    任何登录用户只要拿到消息 id 就能读到他人定向消息的内容；依赖还是
+    `get_current_user_optional`，连登录都不需要。
+    """
+
+    def _targeted(self, client, phone: str, name: str, msg_id: str) -> dict:
+        from app.database import SessionLocal
+        from app.models import Message, User
+
+        h = _register(client, phone, name)
+        with SessionLocal() as db:
+            uid = db.query(User).filter(User.phone == phone).first().id
+            db.add(
+                Message(
+                    id=msg_id,
+                    type="comment",
+                    title="只给收件人的私密标题",
+                    summary="定向消息正文",
+                    news_id=None,
+                    user_id=uid,
+                    time="刚刚",
+                )
+            )
+            db.commit()
+        return h
+
+    def _read_rows(self, user_id: int):
+        from app.database import SessionLocal
+        from app.models import MessageRead
+
+        with SessionLocal() as db:
+            return db.query(MessageRead).filter(MessageRead.user_id == user_id).all()
+
+    def test_recipient_can_mark_own_targeted_message(self, client):
+        """收件人自己标记：200，并产生一条已读关系。"""
+        a = self._targeted(client, "13900011111", "收件人甲", "msg_own")
+        r = client.patch("/api/messages/msg_own", headers=a)
+        assert r.status_code == 200
+        assert r.json()["data"]["read"] is True
+
+    def test_cannot_mark_others_targeted_message(self, client):
+        """他人标记 → 40400，且**不泄露任何内容**、不写已读关系。"""
+        self._targeted(client, "13900012222", "收件人乙", "msg_secret")
+        b = _register(client, "13900013333", "旁人丙")
+
+        r = client.patch("/api/messages/msg_secret", headers=b)
+        assert r.status_code == 404
+        assert r.json()["code"] == 40400
+        # 响应体不得回显消息的任何字段（越权的本质就是"看得见"）
+        body = r.text
+        assert "只给收件人的私密标题" not in body
+        assert "定向消息正文" not in body
+
+        from app.database import SessionLocal
+        from app.models import User
+
+        with SessionLocal() as db:
+            uid_b = db.query(User).filter(User.phone == "13900013333").first().id
+        assert self._read_rows(uid_b) == []
+
+    def test_broadcast_message_markable_by_any_logged_in_user(self, client):
+        """广播消息（user_id NULL）对任何登录用户可见且可标记。"""
+        h = _register(client, "13900014444", "广播读者")
+        r = client.patch("/api/messages/m1", headers=h)
+        assert r.status_code == 200
+        assert r.json()["data"]["read"] is True
+
+    def test_targeted_message_stays_out_of_others_unread_count(self, client):
+        """越权尝试不得影响他人的未读数（读不到，也就不该被计入）。"""
+        self._targeted(client, "13900015555", "收件人丁", "msg_count")
+        other = _register(client, "13900016666", "旁人戊")
+        before = client.get("/api/messages/unread-count", headers=other).json()["data"]
+        client.patch("/api/messages/msg_count", headers=other)
+        after = client.get("/api/messages/unread-count", headers=other).json()["data"]
+        assert after == before
 
 
 class TestCommentOwnership:

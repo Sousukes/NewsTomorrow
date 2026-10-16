@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
+import { getToken } from '@/api/http';
 import {
   fetchMessages,
   fetchUnreadCount,
@@ -7,6 +8,11 @@ import {
   markMessageRead,
 } from '@/api/messages';
 import type { Message } from '@/types';
+
+/** 是否有登录态：已读要记在账号维度，游客没有可记的地方 */
+function signedIn(): boolean {
+  return Boolean(getToken());
+}
 
 const LS_KEY = 'mingri-toutiao:messages-read';
 
@@ -65,6 +71,9 @@ export const useMessagesStore = defineStore('messages', () => {
     if (item?.read) return;
     if (item) item.read = true;
     if (!readIds.value.includes(id)) readIds.value = [...readIds.value, id];
+    // 游客只落本地：后端标记已读要求登录（401），而 http 层的 401 会触发全局
+    // 未授权处理——不该因为游客点开一条消息就把他踢到登录页。
+    if (!signedIn()) return;
     try {
       await markMessageRead(id);
     } catch {
@@ -77,6 +86,7 @@ export const useMessagesStore = defineStore('messages', () => {
     if (!ids.length) return;
     list.value = list.value.map((m) => ({ ...m, read: true }));
     readIds.value = Array.from(new Set([...readIds.value, ...ids]));
+    if (!signedIn()) return;
     try {
       await markAllMessagesRead();
     } catch {

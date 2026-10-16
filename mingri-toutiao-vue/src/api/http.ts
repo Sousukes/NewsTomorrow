@@ -70,8 +70,11 @@ function isRetriable(err: unknown): boolean {
 
 /** 401 统一处理：清除本地 token 并广播事件（不在此处跳转，避免耦合路由） */
 function handleUnauthorized() {
+  // 只有「原本已登录」才算登录态失效：游客请求需登录的接口同样会拿到 401，
+  // 那不是会话过期，广播事件会把游客强行跳到登录页（见 main.ts 的监听）。
+  const hadToken = Boolean(getToken());
   setToken('');
-  if (typeof window !== 'undefined') {
+  if (hadToken && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
   }
 }

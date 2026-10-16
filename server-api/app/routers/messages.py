@@ -7,12 +7,12 @@
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import get_current_user_optional
+from ..deps import get_current_user, get_current_user_optional
 from ..models import Message, MessageRead, User, now_str
 from ..response import ok
 
@@ -109,23 +109,36 @@ def unread_count(
 def mark_read(
     message_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user_optional),
+    user: User = Depends(get_current_user),
 ):
-    """标记单条已读（需登录，幂等）。"""
-    m = db.get(Message, message_id)
+    """标记单条已读（需登录，幂等）。
+
+    越权防护（H11）：**先按可见范围过滤，再操作**。
+    此前 `db.get(Message, message_id)` 直接取出任意一行并返回其
+    `title` / `summary` / `newsId`——任何登录用户（依赖甚至是 optional，
+    未登录也能打）只要拿到或猜到消息 id，就能读到他人定向消息的内容，
+    而种子 id 形如 `m1..m4` 可直接枚举。
+
+    「不存在」与「不可见」返回**同一个 40400**：对外不暴露「它存在但你看不到」，
+    与资讯软下架（`hidden` 与「不存在」同码）同一条口径。
+    """
+    m = (
+        db.query(Message)
+        .filter(Message.id == message_id, visible_condition(user))
+        .first()
+    )
     if m is None:
-        return ok(None, message="消息不存在")
-    if user is not None:
-        exists = (
-            db.query(MessageRead)
-            .filter(MessageRead.message_id == message_id, MessageRead.user_id == user.id)
-            .first()
-        )
-        if exists is None:
-            db.add(MessageRead(message_id=message_id, user_id=user.id, created_at=now_str()))
-            db.commit()
-    read_ids = _read_ids(db, user)
-    return ok(to_out(m, read_ids))
+        raise HTTPException(status_code=404, detail={"code": 40400, "message": "消息不存在"})
+
+    exists = (
+        db.query(MessageRead)
+        .filter(MessageRead.message_id == message_id, MessageRead.user_id == user.id)
+        .first()
+    )
+    if exists is None:
+        db.add(MessageRead(message_id=message_id, user_id=user.id, created_at=now_str()))
+        db.commit()
+    return ok(to_out(m, _read_ids(db, user)))
 
 
 @router.post("/read-all", response_model=None)
@@ -133,7 +146,12 @@ def mark_all_read(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_optional),
 ):
-    """全部标记已读（需登录）。只标记**可见范围**内的消息。"""
+    """全部标记已读。只标记**可见范围**内的消息。
+
+    与 `mark_read` 不同，这里**不强制登录**：未登录时没有可标记的对象，
+    返回 0 即可（只回计数、不回任何消息内容，无泄露面），没必要抛 401
+    去触发前端的全局未授权跳转。
+    """
     if user is None:
         return ok(0, message="未登录")
     already = _read_ids(db, user)
