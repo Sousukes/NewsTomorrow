@@ -36,6 +36,7 @@ from app.config import (
     LOG_LEVEL,
     LOGIN_RATE_LIMIT_PER_MINUTE,
     OPENAPI_URL,
+    OPS_TOKEN,
     RATE_LIMIT_ENABLED,
     RATE_LIMIT_PER_MINUTE,
     RATE_LIMIT_WINDOW_SECONDS,
@@ -43,8 +44,9 @@ from app.config import (
     REDOC_URL,
     TRUSTED_PROXIES,
 )
-from app.database import get_db, pool_status
-from app.deps import get_current_user
+from app.database import SessionLocal, get_db, pool_status
+from app.deps import get_current_user, require_ops_access
+from app.hit_logs import prune_hit_logs
 from app.models import User
 from app.ratelimit import build_limiter
 from app.routers import admin, auth, comments, me, messages, news
@@ -115,12 +117,32 @@ def break_glass_missing() -> bool:
 async def lifespan(_: FastAPI):
     """启动：建表 + 启动定时抓取；关停：停调度 + 释放连接池。"""
     init_db()
+    # C7：命中日志留存治理。**刻意不依赖任何 cron**——合规要求"过期即删"，
+    # 而抓取 cron 可以被关停（`FEED_CRON_ENABLED=false`）。启动时先扫一遍，
+    # 保证每次部署/重启都收敛；失败只告警，不阻断启动。
+    try:
+        with SessionLocal() as db:
+            hits = prune_hit_logs(db)
+        if hits["sensitive"] or hits["nickname"]:
+            logger.info(
+                "启动清理过期命中日志：敏感词 %d 条 / 昵称 %d 条",
+                hits["sensitive"],
+                hits["nickname"],
+            )
+    except Exception as e:
+        logger.warning("启动清理命中日志失败（不影响启动）：%s", e)
     await start_scheduler()
     if break_glass_missing():
         logger.warning(
             "[运维提醒] 生产环境未配置 ADMIN_PHONES，缺少应急通道："
             "一旦 admin_users 表不可用（DB 故障 / 行被误删 / 迁移回滚），"
             "管理后台将无人可进。建议至少保留一条 env 管理员。"
+        )
+    if IS_PRODUCTION and not OPS_TOKEN:
+        logger.warning(
+            "[运维提醒] 生产环境未配置 OPS_TOKEN：/api/health 与 /api/metrics 将返回 403（C5）。"
+            "若由内网监控 / 负载均衡探活，请配置 OPS_TOKEN 并在探针里携带 "
+            "Authorization: Bearer <token> 或 X-Ops-Token: <token>。"
         )
     logger.info(
         "启动完成 | env=%s | docs=%s | rate_limit=%s(%d/min, login %d/min) | "
@@ -301,7 +323,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # 启动/关停逻辑已统一收敛到 lifespan（见文件上方），避免 on_event 弃用告警
 
 
-@app.get("/api/health", response_model=None)
+@app.get("/api/health", response_model=None, dependencies=[Depends(require_ops_access)])
 def health():
     hot = hot_status()
     return JSONResponse(
@@ -329,7 +351,7 @@ def health():
     )
 
 
-@app.get("/api/metrics", response_model=None)
+@app.get("/api/metrics", response_model=None, dependencies=[Depends(require_ops_access)])
 def metrics():
     """Prometheus 文本格式指标（进程内；多实例请在网关侧聚合）。"""
     uptime = time.time() - _METRICS_STARTED_AT

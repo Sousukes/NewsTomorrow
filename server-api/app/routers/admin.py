@@ -83,7 +83,6 @@ from ..schemas import (
 # （既是错误结果，也是潜在的信息收集面），不允许两边各写一遍后悄悄漂移。
 from .news import _escape_like
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("toutiao.admin")
 
 ALLOWED_SCHEMES = ("http", "https")
@@ -138,9 +137,30 @@ def is_admin(phone: str | None, db: Session | None = None) -> bool:
     return db is not None and db.get(AdminUser, phone) is not None
 
 
-def _require_admin(user: User, db: Session) -> None:
+def require_admin(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> User:
+    """管理端鉴权**依赖**：未登录 401，已登录但非管理员 403。
+
+    挂在本模块 `APIRouter(dependencies=[...])` 上，**所有**管理端点自动受保护。
+    此前是每个端点函数体里各写一次 `_require_admin(user, db)`（34 个端点 35 次调用）：
+    新增端点忘写一次就是一个越权面，且 code review 很难逐条核对。
+    改为 router 级后，「漏写」在结构上不可能发生——端点不需要为此做任何事。
+
+    返回 `User` 供需要 actor 的端点（审计 `record_audit`、日志）直接注入：
+    `user: User = Depends(require_admin)`。同一请求内 FastAPI 会缓存依赖结果，
+    因此与 router 级的那次调用共用同一个实例，不会重复查库。
+    """
     if not is_admin(user.phone, db):
         raise HTTPException(status_code=403, detail={"code": 40301, "message": "无权限执行该操作"})
+    return user
+
+
+# 鉴权在 **router 级**统一施加：`dependencies` 对路由表里的每个端点都生效，
+# 包括未来新增、以及忘记声明 `user` 参数的端点。
+router = APIRouter(
+    prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
+)
 
 
 def record_audit(db: Session, actor: str, action: str, target: str = "", detail=None) -> None:
@@ -197,16 +217,13 @@ def _out(row: RssSource, health: dict | None = None) -> dict:
 
 
 @router.get("/sources", response_model=None)
-def list_sources(
-    db: Session = Depends(get_db), user: User = Depends(get_current_user),
-):
+def list_sources(db: Session = Depends(get_db)):
     """源列表（含抓取健康状态 + **近期成功率**）。
 
     成功率取自 P1-19 的健康历史（一次 GROUP BY 查全部源，避免 N+1）：
     「现在挂没挂」是 P1-16 就有的信息，列表上真正缺的是
     "**哪个源在悄悄退化**"——一个源可以一直绿着，但条数在持续下滑。
     """
-    _require_admin(user, db)
     ensure_seeded(db)
     rows = db.query(RssSource).order_by(RssSource.weight.desc(), RssSource.key).all()
     health = summarize_many(db, [r.key for r in rows], FEED_HEALTH_LIST_DAYS)
@@ -225,7 +242,6 @@ def source_health(
     key: str,
     days: int | None = Query(None, ge=1, le=365, description="回溯天数，默认取保留期"),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """单源健康趋势（P1-19）：汇总 + 按天序列 + 最近失败明细。
 
@@ -239,7 +255,6 @@ def source_health(
     `days` 会被收敛到保留期：请求 90 天而只留 30 天，只会得到 60 个空格子。
     响应里回传实际生效的 `days`，前端才能正确标注时间范围。
     """
-    _require_admin(user, db)
     ensure_seeded(db)
     if db.get(RssSource, key) is None:
         raise HTTPException(status_code=404, detail={"code": 40402, "message": "源不存在"})
@@ -261,10 +276,9 @@ def source_health(
 def create_source(
     body: SourceIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """新增源。key 冲突返回 409。"""
-    _require_admin(user, db)
     _validate_url(body.url)
     ensure_seeded(db)
     if db.get(RssSource, body.key) is not None:
@@ -302,10 +316,9 @@ def update_source(
     key: str,
     body: SourceUpdateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """局部更新源（改权重 / 启停 / 换地址）。"""
-    _require_admin(user, db)
     # 先确保内置源已入库：否则在尚未触发过抓取的新环境里，改一个"明明存在"的内置源会 404
     ensure_seeded(db)
     row = db.get(RssSource, key)
@@ -338,10 +351,9 @@ def update_source(
 
 @router.delete("/sources/{key}", response_model=None)
 def delete_source(
-    key: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    key: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """删除源。删除后若表空了，下次读取会重新播种内置源。"""
-    _require_admin(user, db)
     ensure_seeded(db)  # 同上：避免删除内置源时因尚未播种而 404
     row = db.get(RssSource, key)
     if row is None:
@@ -354,12 +366,11 @@ def delete_source(
 
 
 @router.post("/sources/reset", response_model=None)
-def reset_sources(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def reset_sources(db: Session = Depends(get_db), user: User = Depends(require_admin)):
     """重置为内置源：删除库中全部源并重新播种。
 
     用于把运营改坏的配置恢复出厂。会丢弃自定义源，故单独一个端点而非复用删除。
     """
-    _require_admin(user, db)
     db.query(RssSource).delete()
     db.commit()
     seeded = ensure_seeded(db)
@@ -429,7 +440,6 @@ def list_news_admin(
     limit: int = Query(20, ge=1, le=100),
     cursor: str | None = Query(None, description="上一页末条的游标"),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """管理端资讯列表（P1-20）：筛选 + 搜索 + 游标分页。
 
@@ -439,7 +449,6 @@ def list_news_admin(
     - 排序 `published_at DESC, id DESC`：管理端要的是时间线，不搞置顶优先；
     - `total` 始终返回：管理端低频，COUNT 的代价可接受，界面要显示"共 N 条"。
     """
-    _require_admin(user, db)
     if channel is not None and channel not in CHANNEL_KEYS:
         raise HTTPException(
             status_code=422, detail={"code": 42201, "message": f"频道不存在：{channel}"}
@@ -482,14 +491,13 @@ def list_news_admin(
 
 @router.get("/news/{news_id}", response_model=None)
 def get_news_admin(
-    news_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    news_id: str, db: Session = Depends(get_db)
 ):
     """管理端单条资讯（含下架状态）。
 
     40404 与公开端的 40400 刻意分开：管理端查的是"库里有没有这条"，
     不存在就是不存在；公开端才需要把"被下了"伪装成"不存在"。
     """
-    _require_admin(user, db)
     item = db.get(News, news_id)
     if item is None:
         raise HTTPException(status_code=404, detail={"code": 40404, "message": "资讯不存在"})
@@ -501,7 +509,7 @@ def hide_news(
     news_id: str,
     body: NewsHideIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """下架资讯（软下架，**幂等**）。
 
@@ -510,7 +518,6 @@ def hide_news(
     同思路），直接返回当前状态：重复下架要么是界面 Bug，要么是网络重试，
     都不该再造一条痕迹、抹掉第一次下架的原始理由。
     """
-    _require_admin(user, db)
     item = db.get(News, news_id)
     if item is None:
         raise HTTPException(status_code=404, detail={"code": 40404, "message": "资讯不存在"})
@@ -534,14 +541,13 @@ def hide_news(
 
 @router.post("/news/{news_id}/restore", response_model=None)
 def restore_news(
-    news_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    news_id: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """恢复已下架资讯（**幂等**）。
 
     恢复即重新出现在全部公开查询中——过滤条件是实时的，无需等下一轮抓取；
     聚合按 id 去重，恢复也不会造成重复入库。已可见时直接返回、不记审计。
     """
-    _require_admin(user, db)
     item = db.get(News, news_id)
     if item is None:
         raise HTTPException(status_code=404, detail={"code": 40404, "message": "资讯不存在"})
@@ -563,10 +569,9 @@ def update_news_admin(
     news_id: str,
     body: NewsTopIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """局部更新资讯（当前仅置顶开关）。字段级 diff 审计，对齐 `update_source`。"""
-    _require_admin(user, db)
     item = db.get(News, news_id)
     if item is None:
         raise HTTPException(status_code=404, detail={"code": 40404, "message": "资讯不存在"})
@@ -664,7 +669,6 @@ def list_comments_admin(
     limit: int = Query(20, ge=1, le=100),
     cursor: str | None = Query(None, description="上一页末条的 id"),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """管理端评论列表（P1-22）：筛选 + 搜索 + 游标分页。
 
@@ -676,7 +680,6 @@ def list_comments_admin(
     - 排序 `created_at DESC, id DESC`：与公开主列表同口径的时间线，
       游标为上一页末条 id（keyset，与公开评论分页同一套路）。
     """
-    _require_admin(user, db)
     q = db.query(Comment).filter(Comment.is_deleted.is_(False))
     if status == "visible":
         q = q.filter(Comment.hidden.is_(False))
@@ -731,10 +734,9 @@ def list_comments_admin(
 
 @router.get("/comments/{comment_id}", response_model=None)
 def get_comment_admin(
-    comment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    comment_id: str, db: Session = Depends(get_db)
 ):
     """管理端单条评论（含隐藏三件套与所属资讯标题）。"""
-    _require_admin(user, db)
     c = db.get(Comment, comment_id)
     if c is None or c.is_deleted:
         raise _comment_not_found()
@@ -748,7 +750,7 @@ def hide_comment(
     comment_id: str,
     body: CommentHideIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """隐藏评论（软隐藏，**幂等**）——对齐 hide_news。
 
@@ -757,7 +759,6 @@ def hide_comment(
     预览/计数）实时不可见，恢复即时回来——过滤条件是实时的，无需等
     任何定时任务。计数与热度分同步回退（恢复时加回）。
     """
-    _require_admin(user, db)
     c = db.get(Comment, comment_id)
     if c is None or c.is_deleted:
         raise _comment_not_found()
@@ -796,14 +797,13 @@ def hide_comment(
 
 @router.post("/comments/{comment_id}/restore", response_model=None)
 def restore_comment(
-    comment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    comment_id: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """恢复已隐藏评论（**幂等**）——对齐 restore_news。
 
     恢复清空理由/时间（理由只对隐藏状态有意义），计数与热度分同步加回。
     已可见时直接返回、不记审计。
     """
-    _require_admin(user, db)
     c = db.get(Comment, comment_id)
     if c is None or c.is_deleted:
         raise _comment_not_found()
@@ -884,14 +884,12 @@ def list_words(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """敏感词库列表。
 
     用 `limit + offset` 而非游标：运营要的是「一遍扫完 + 能跳页核对」，
     词库量级（百~千）也不支持 keyset 的那点性能收益。
     """
-    _require_admin(user, db)
     q = db.query(SensitiveWord)
     kw = keyword.strip()
     if kw:
@@ -910,7 +908,7 @@ def list_words(
 def create_word(
     body: WordIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """新增敏感词。
 
@@ -920,7 +918,6 @@ def create_word(
       同一个码挂三种场景会让前端文案错配；）
     - 重复词 → 40905（唯一约束在库里，但提前判一次才能给出可解释的错误）。
     """
-    _require_admin(user, db)
     word = body.word  # schema 已 strip
     norm, _ = normalize(word)
     if len(norm) < MODERATION_MIN_WORD_LEN:
@@ -965,10 +962,9 @@ def update_word(
     word_id: int,
     body: WordUpdateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """局部更新敏感词（**不允许改词本身**：改词等于删一条加一条）。"""
-    _require_admin(user, db)
     row = db.get(SensitiveWord, word_id)
     if row is None:
         raise _word_not_found()
@@ -994,14 +990,13 @@ def update_word(
 
 @router.delete("/words/{word_id}", response_model=None)
 def delete_word(
-    word_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    word_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """删除敏感词（审计留快照：删错了要能知道原来是什么）。
 
     停用（`enabled=false`）通常比删除更合适——删除后命中日志里那个词会失去
     对应配置，复盘时读不出它当年是 block 还是 mask。
     """
-    _require_admin(user, db)
     row = db.get(SensitiveWord, word_id)
     if row is None:
         raise _word_not_found()
@@ -1014,13 +1009,12 @@ def delete_word(
 
 
 @router.post("/words/reload", response_model=None)
-def reload_words(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def reload_words(db: Session = Depends(get_db), user: User = Depends(require_admin)):
     """强制重建本进程的词库索引。
 
     改词已经会自动失效本进程缓存，这个端点是给**其他实例**用的：
     集群下 B 实例要等 TTL 才感知到 A 实例的改动，需要即时生效时点一下它。
     """
-    _require_admin(user, db)
     engine.invalidate()
     engine.ensure(db)
     count = (
@@ -1039,14 +1033,12 @@ def list_hits(
     limit: int = Query(20, ge=1, le=100),
     cursor: int | None = Query(None, description="上一页末条的 id"),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """敏感词命中日志（只读）。
 
     它的价值不在"看出事了"，而在**回答误杀**：哪个人、哪句话、命中哪个词、
     上下文是什么。脱敏后正文不可复原，这是唯一的证据来源——故只读、不清理。
     """
-    _require_admin(user, db)
     q = db.query(SensitiveHit)
     if word.strip():
         q = q.filter(SensitiveHit.word == word.strip())
@@ -1072,7 +1064,7 @@ def list_hits(
 
 @router.post("/comments/{comment_id}/review", response_model=None)
 def review_comment(
-    comment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    comment_id: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """通过人工复核（**幂等**）：认定脱敏后的评论可以照常展示。
 
@@ -1080,7 +1072,6 @@ def review_comment(
     （只是被脱敏），复核是"人看过了"这个事实，不是"重新放行"。
     认为仍不合适时应当走**隐藏**（`POST .../hide`），而不是留着待复核标记。
     """
-    _require_admin(user, db)
     c = db.get(Comment, comment_id)
     if c is None or c.is_deleted:
         raise _comment_not_found()
@@ -1158,7 +1149,6 @@ def list_nickname_words(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """昵称敏感词库列表（P1-24）。
 
@@ -1167,7 +1157,6 @@ def list_nickname_words(
     `keyword` 只匹配主词不搜别名：别名在每行的 `aliases` 字段里可见，
     为搜别名把 JSON 列拖进 ILIKE 不值得（两边方言的 JSON→text 行为还不一样）。
     """
-    _require_admin(user, db)
     q = db.query(NicknameWord)
     kw = keyword.strip()
     if kw:
@@ -1191,7 +1180,7 @@ def list_nickname_words(
 def create_nickname_word(
     body: NicknameWordIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """新增昵称敏感词（P1-24）。
 
@@ -1203,7 +1192,6 @@ def create_nickname_word(
       「配了却没生效」比报错难发现得多；
     - 重复词 → 40906（唯一约束在库里，但提前判一次才能给出可解释的错误）。
     """
-    _require_admin(user, db)
     word = body.word  # schema 已 strip
     if _normalized_len(word) < NICKNAME_MIN_WORD_LEN:
         raise HTTPException(
@@ -1263,14 +1251,13 @@ def update_nickname_word(
     word_id: int,
     body: NicknameWordUpdateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """局部更新昵称敏感词（**不允许改词本身**：改词等于删一条加一条）。
 
     `aliases` 传空数组 = 清空全部别名；不传 = 不动（schema 用 `None` 区分）。
     改别名同样走 invalidate——别名是模式串的一部分，改了不重载等于没改。
     """
-    _require_admin(user, db)
     row = db.get(NicknameWord, word_id)
     if row is None:
         raise _nickname_word_not_found()
@@ -1301,14 +1288,13 @@ def update_nickname_word(
 
 @router.delete("/nickname-words/{word_id}", response_model=None)
 def delete_nickname_word(
-    word_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    word_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """删除昵称敏感词（审计留快照：删错了要能知道原来是什么）。
 
     停用（`enabled=false`）通常比删除更合适——删除后命中日志里那个词会失去
     对应配置，复盘时读不出它当年是 block 还是 review。
     """
-    _require_admin(user, db)
     row = db.get(NicknameWord, word_id)
     if row is None:
         raise _nickname_word_not_found()
@@ -1321,13 +1307,12 @@ def delete_nickname_word(
 
 
 @router.post("/nickname-words/reload", response_model=None)
-def reload_nickname_words(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def reload_nickname_words(db: Session = Depends(get_db), user: User = Depends(require_admin)):
     """强制重建本进程的昵称词库索引（与 P1-23 `reload` 同定位）。
 
     改词已经会自动失效本进程缓存，这个端点是给**其他实例**用的：
     集群下 B 实例要等 TTL 才感知到 A 实例的改动，需要即时生效时点一下它。
     """
-    _require_admin(user, db)
     nickname_engine.invalidate()
     nickname_engine.ensure(db)
     count = db.query(NicknameWord).filter(NicknameWord.enabled.is_(True)).count()
@@ -1345,7 +1330,6 @@ def list_nickname_hits(
     limit: int = Query(20, ge=1, le=100),
     cursor: int | None = Query(None, description="上一页末条的 id"),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """昵称敏感词命中日志（只读，P1-24）。
 
@@ -1355,7 +1339,6 @@ def list_nickname_hits(
     `userId` 筛选让复核队列与命中日志互相印证：队列里看到某个名字吃不准，
     按人一筛就能看到它历次被拦/待复核的完整记录。
     """
-    _require_admin(user, db)
     q = db.query(NicknameHit)
     if word.strip():
         q = q.filter(NicknameHit.word == word.strip())
@@ -1387,7 +1370,6 @@ def list_nickname_reviews(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """昵称待人工复核队列（P1-24）。
 
@@ -1401,7 +1383,6 @@ def list_nickname_reviews(
     **review 级**命中的 `created_at` / `snippet`（当初提交的昵称）/ `matched`
     （哪条别名拦的）。按最近被标记排序，新提交的坏名字浮在上面。
     """
-    _require_admin(user, db)
     latest = (
         select(func.max(NicknameHit.created_at))
         .where(NicknameHit.user_id == User.id, NicknameHit.action == ACTION_REVIEW)
@@ -1459,14 +1440,13 @@ def list_nickname_reviews(
 
 
 @router.post("/nickname-reviews/{user_id}", response_model=None)
-def review_nickname(user_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def review_nickname(user_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     """通过昵称人工复核（**幂等**，P1-24）。
 
     只清 `name_pending_review` 并写 `name_reviewed_at`，**不改昵称本身**——
     名字是用户自己起的，复核是「人看过了」这个事实，不是运营替他改名。
     重复调用不重复审计（与 P1-23 评论复核同处方：没有新事实就不留新痕）。
     """
-    _require_admin(user, db)
     u = db.get(User, user_id)
     if u is None:
         raise HTTPException(status_code=404, detail={"code": 40408, "message": "用户不存在"})
@@ -1514,13 +1494,12 @@ def _admin_out(row: AdminUser, db: Session) -> dict:
 
 
 @router.get("/users", response_model=None)
-def list_admin_users(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_admin_users(db: Session = Depends(get_db)):
     """管理员白名单列表（DB 源）。
 
     附 `envAdminCount`（环境变量来源的管理员**数量**，不下发号码）：
     界面据此解释「为什么移除最后一位库管理员仍被允许」——env 是 break-glass。
     """
-    _require_admin(user, db)
     rows = db.query(AdminUser).order_by(AdminUser.created_at, AdminUser.phone).all()
     return ok(
         {
@@ -1535,14 +1514,13 @@ def list_admin_users(db: Session = Depends(get_db), user: User = Depends(get_cur
 def add_admin_user(
     body: AdminIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """添加管理员。
 
     已在**任一来源**（env 或库）中的手机号返回 40903——重复入库只会让
     界面出现一行"管不了其实也无需管"的冗余记录。
     """
-    _require_admin(user, db)
     if db.get(AdminUser, body.phone) is not None or (
         ADMIN_PHONES and body.phone in ADMIN_PHONES
     ):
@@ -1563,7 +1541,7 @@ def add_admin_user(
 
 @router.delete("/users/{phone}", response_model=None)
 def remove_admin_user(
-    phone: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    phone: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """移除管理员。
 
@@ -1571,7 +1549,6 @@ def remove_admin_user(
     注意 env 管理员不受库操作影响——移除一位"同时也在 env 里"的管理员时，
     env 仍在授权，故只有 env 为空且这是库中最后一条时才拦截。
     """
-    _require_admin(user, db)
     row = db.get(AdminUser, phone)
     if row is None:
         raise HTTPException(status_code=404, detail={"code": 40403, "message": "管理员不存在"})
@@ -1613,14 +1590,12 @@ def list_audit(
     cursor: str | None = Query(None, description="上一页末条的 id"),
     target: str | None = Query(None, description="按对象筛选（源 key / 手机号）"),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
     """审计时间线（新的在前，游标分页）。
 
     游标用**自增 id** 而非时间戳：created_at 是秒级精度，同秒多条会让 keyset 比较
     出现重复/遗漏（评论分页踩过同一个坑）。
     """
-    _require_admin(user, db)
     q = db.query(AdminAuditLog)
     if target:
         q = q.filter(AdminAuditLog.target == target)

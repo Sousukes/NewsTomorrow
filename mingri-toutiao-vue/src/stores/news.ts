@@ -7,19 +7,78 @@ import {
   type SearchResult,
 } from '@/api/news';
 import { mockNews } from '@/data/mockNews';
-import { DEFAULT_SORT } from '@/constants/sort';
+import { CHANNELS, DEFAULT_CHANNEL } from '@/constants/channels';
+import { DEFAULT_SORT, SORT_MODES } from '@/constants/sort';
 import type { SortMode } from '@/constants/sort';
 import type { Channel, NewsItem } from '@/types';
 
 /**
+ * 单个「列表桶」：一个 (频道 × 排序) 组合的完整列表状态。
+ *
+ * 为什么要分桶（A4）：此前 store 只有一个 `list` + `currentChannel`，首页与视频页
+ * 共用同一份状态——视频页 `fetchNews('video')` 会把首页列表整体覆盖（KeepAlive 下
+ * 切回首页看到的是视频内容），且首页触底 `loadMore()` 会按 `video` 频道往首页追加。
+ * 分桶后每个视图各读各的桶，互不干扰。
+ */
+export interface NewsBucket {
+  channel: Channel;
+  sort: SortMode;
+  list: NewsItem[];
+  loading: boolean;
+  error: string;
+  page: number;
+  total: number | null;
+  hasMore: boolean;
+  loadingMore: boolean;
+  /** 游标：服务端返回的续接位置（null 表示改用 offset 分页） */
+  cursor: string | null;
+  /**
+   * 代次（A4 竞态守卫）：每次 `fetchNews` / `resetPaging` 递增。
+   * 异步响应回来时若代次已变，说明该请求已被更新的一次请求取代，**必须丢弃**，
+   * 否则旧频道/旧排序的数据会被追加进新列表并覆盖游标。
+   */
+  generation: number;
+}
+
+function bucketKey(channel: Channel, sort: SortMode): string {
+  return `${channel}:${sort}`;
+}
+
+/** 预建全部 (频道 × 排序) 桶：避免在渲染期按需创建（渲染期写入会触发额外更新） */
+function buildBuckets(): Record<string, NewsBucket> {
+  const out: Record<string, NewsBucket> = {};
+  for (const c of CHANNELS) {
+    for (const s of SORT_MODES) {
+      out[bucketKey(c.key, s.key)] = {
+        channel: c.key,
+        sort: s.key,
+        // 仅默认桶用 mock 数据占位（保持首屏行为不变）；其余频道首次进入为空
+        list: c.key === DEFAULT_CHANNEL && s.key === DEFAULT_SORT ? [...mockNews] : [],
+        loading: false,
+        error: '',
+        page: 0,
+        total: 0,
+        hasMore: true,
+        loadingMore: false,
+        cursor: null,
+        generation: 0,
+      };
+    }
+  }
+  return out;
+}
+
+/**
  * 资讯 store：数据来自 api/news（未配置后端时自动走 mock）。
- * 分页采用游标（H5）：首页请求拿 nextCursor，后续 loadMore 用游标续接，
- * 服务端未返回游标时回退 offset 分页。
+ *
+ * 列表状态按 **(频道 × 排序)** 分桶（A4）；分页采用游标（H5）：首页请求拿
+ * nextCursor，后续 loadMore 用游标续接，服务端未返回游标时回退 offset 分页。
+ *
+ * 调用约定：所有列表方法都必须显式传频道与排序——不再有「隐式当前频道」，
+ * 否则视图之间会再次互相污染。
  */
 export const useNewsStore = defineStore('news', () => {
-  const list = ref<NewsItem[]>(mockNews);
-  const loading = ref(false);
-  const error = ref('');
+  const buckets = ref<Record<string, NewsBucket>>(buildBuckets());
 
   // 详情缓存：深链直达时避免重复请求
   const detailCache = ref<Record<string, NewsItem>>({});
@@ -28,110 +87,146 @@ export const useNewsStore = defineStore('news', () => {
   const searching = ref(false);
   const searchError = ref('');
 
-  // 分页 / 无限滚动状态
   const PAGE_SIZE = 20;
-  const page = ref(0);
-  const total = ref<number | null>(0);
-  const hasMore = ref(true);
-  const loadingMore = ref(false);
-  /** 游标：服务端返回的续接位置（null 表示改用 offset 分页） */
-  const cursor = ref<string | null>(null);
-  /** 当前列表所属频道，供 loadMore 续接 */
-  const currentChannel = ref<Channel>('recommend');
-  /** 当前排序方式：loadMore 必须沿用，否则续接的游标与排序键不匹配 */
-  const currentSort = ref<SortMode>(DEFAULT_SORT);
 
+  /** 取桶（全部合法组合已预建；非法输入才按需补建） */
+  function bucketOf(channel: Channel, sort: SortMode = DEFAULT_SORT): NewsBucket {
+    const key = bucketKey(channel, sort);
+    let bucket = buckets.value[key];
+    if (!bucket) {
+      bucket = {
+        channel,
+        sort,
+        list: [],
+        loading: false,
+        error: '',
+        page: 0,
+        total: 0,
+        hasMore: true,
+        loadingMore: false,
+        cursor: null,
+        generation: 0,
+      };
+      buckets.value[key] = bucket;
+    }
+    return bucket;
+  }
+
+  /** 便捷读取某桶的列表（模板用） */
+  function listOf(channel: Channel, sort: SortMode = DEFAULT_SORT): NewsItem[] {
+    return bucketOf(channel, sort).list;
+  }
+
+  /** 拉取第一页（只影响该 (频道 × 排序) 桶） */
   async function fetchNews(
-    channel: Channel = 'recommend',
+    channel: Channel = DEFAULT_CHANNEL,
     sort: SortMode = DEFAULT_SORT,
   ): Promise<NewsItem[]> {
-    loading.value = true;
-    error.value = '';
-    currentChannel.value = channel;
-    currentSort.value = sort;
+    const bucket = bucketOf(channel, sort);
+    const gen = ++bucket.generation; // 新代次：使在途的旧 fetch / loadMore 全部失效
+    bucket.loading = true;
+    bucket.loadingMore = false; // 旧的 loadMore 已被本请求取代
+    bucket.error = '';
+    bucket.channel = channel;
+    bucket.sort = sort;
     try {
       const res = await apiFetchNewsPage({ channel, page: 1, pageSize: PAGE_SIZE, sort });
-      list.value = res.list;
-      page.value = 1;
-      cursor.value = res.nextCursor;
-      total.value = res.total ?? res.list.length;
-      hasMore.value = res.hasMore;
+      if (gen !== bucket.generation) return bucket.list; // 已被更新的一次请求取代
+      bucket.list = res.list;
+      bucket.page = 1;
+      bucket.cursor = res.nextCursor;
+      bucket.total = res.total ?? res.list.length;
+      bucket.hasMore = res.hasMore;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载失败';
-      hasMore.value = false;
+      if (gen !== bucket.generation) return bucket.list;
+      bucket.error = e instanceof Error ? e.message : '加载失败';
+      bucket.hasMore = false;
     } finally {
-      loading.value = false;
+      if (gen === bucket.generation) bucket.loading = false;
     }
-    return list.value;
+    return bucket.list;
   }
 
   /**
-   * 加载下一页并追加到 list（无限滚动）。
+   * 加载下一页并追加到该桶的 list（无限滚动）。
+   *
    * 幂等：并发调用时直接返回；按 id 去重避免重复插入。
+   * 竞态：捕获调用时的代次，响应回来若代次已变（用户切了频道/排序）则整体丢弃。
    * @returns 本次追加的条数
    */
-  async function loadMore(): Promise<number> {
-    if (loading.value || loadingMore.value || !hasMore.value) return 0;
+  async function loadMore(
+    channel: Channel = DEFAULT_CHANNEL,
+    sort: SortMode = DEFAULT_SORT,
+  ): Promise<number> {
+    const bucket = bucketOf(channel, sort);
+    if (bucket.loading || bucket.loadingMore || !bucket.hasMore) return 0;
 
-    loadingMore.value = true;
-    error.value = '';
+    const gen = bucket.generation;
+    bucket.loadingMore = true;
+    bucket.error = '';
     try {
-      const nextPage = page.value + 1;
+      const nextPage = bucket.page + 1;
       const res = await apiFetchNewsPage({
-        channel: currentChannel.value,
+        channel,
         pageSize: PAGE_SIZE,
         // 关键：排序必须与首请求一致。服务端游标自带 sort 并按该排序键做 keyset 比较，
         // 若续接时换了排序，比较基准就失效了（表现为重复或漏项）。
-        sort: currentSort.value,
+        sort,
         // 有游标优先走 keyset；否则回退 offset
-        cursor: cursor.value ?? undefined,
-        page: cursor.value ? undefined : nextPage,
+        cursor: bucket.cursor ?? undefined,
+        page: bucket.cursor ? undefined : nextPage,
       });
 
+      if (gen !== bucket.generation) return 0; // 过期响应：绝不写入新列表/覆盖游标
+
       if (!res.list.length) {
-        hasMore.value = false;
+        bucket.hasMore = false;
         return 0;
       }
 
-      const exist = new Set(list.value.map((i) => i.id));
+      const exist = new Set(bucket.list.map((i) => i.id));
       const fresh = res.list.filter((i) => !exist.has(i.id));
-      if (fresh.length) list.value = [...list.value, ...fresh];
+      if (fresh.length) bucket.list = [...bucket.list, ...fresh];
 
-      page.value = nextPage;
-      cursor.value = res.nextCursor;
+      bucket.page = nextPage;
+      bucket.cursor = res.nextCursor;
       // 服务端说没更多，或整页都是重复（无法推进）→ 停止翻页
-      hasMore.value = res.hasMore && fresh.length > 0;
+      bucket.hasMore = res.hasMore && fresh.length > 0;
       return fresh.length;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载失败';
-      hasMore.value = false;
+      if (gen !== bucket.generation) return 0;
+      bucket.error = e instanceof Error ? e.message : '加载失败';
+      bucket.hasMore = false;
       return 0;
     } finally {
-      loadingMore.value = false;
+      if (gen === bucket.generation) bucket.loadingMore = false;
     }
   }
 
-  /** 重新从第一页开始（切换频道/下拉刷新时调用） */
-  function resetPaging() {
-    page.value = 0;
-    hasMore.value = true;
-    loadingMore.value = false;
-    cursor.value = null;
+  /** 重新从第一页开始（切换频道/排序/下拉刷新时调用）；同时使在途请求失效 */
+  function resetPaging(channel: Channel = DEFAULT_CHANNEL, sort: SortMode = DEFAULT_SORT) {
+    const bucket = bucketOf(channel, sort);
+    bucket.generation += 1;
+    bucket.page = 0;
+    bucket.hasMore = true;
+    bucket.loadingMore = false;
+    bucket.cursor = null;
   }
 
   function getById(id: string): NewsItem | null {
-    return (
-      detailCache.value[id] ??
-      list.value.find((i) => i.id === id) ??
-      mockNews.find((i) => i.id === id) ??
-      null
-    );
+    const cached = detailCache.value[id];
+    if (cached) return cached;
+    for (const bucket of Object.values(buckets.value)) {
+      const hit = bucket.list.find((i) => i.id === id);
+      if (hit) return hit;
+    }
+    return mockNews.find((i) => i.id === id) ?? null;
   }
 
   /**
    * 批量写入详情缓存（供收藏 / 浏览历史云端同步复用）。
    *
-   * 云端返回的资讯可能不在当前列表中（如新设备登录后拉取收藏），
+   * 云端返回的资讯可能不在任何列表中（如新设备登录后拉取收藏），
    * 缓存后 `getById()` 即可直接命中，无需逐条再请求详情。
    */
   function cacheMany(items: NewsItem[]): void {
@@ -151,26 +246,23 @@ export const useNewsStore = defineStore('news', () => {
     const cached = getById(id);
     if (cached) return cached;
 
-    loading.value = true;
-    error.value = '';
     try {
       const item = await apiFetchNewsById(id);
       if (item) detailCache.value = { ...detailCache.value, [id]: item };
       return item;
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载失败';
+    } catch {
+      // 详情加载失败由调用方（useNewsDetail 的 failed）呈现，不污染列表的 error
       return null;
-    } finally {
-      loading.value = false;
     }
   }
 
-  /** 本地过滤（离线兜底 / 搜索接口不可用时降级） */
+  /** 本地过滤（离线兜底 / 搜索接口不可用时降级）：取默认桶作语料 */
   function searchLocal(keyword: string): NewsItem[] {
-    const pool = list.value.length ? list.value : mockNews;
+    const pool = listOf(DEFAULT_CHANNEL, DEFAULT_SORT);
+    const corpus = pool.length ? pool : mockNews;
     const k = keyword.trim();
     if (!k) return [];
-    return pool.filter((i) => i.title.includes(k) || (i.summary ?? '').includes(k));
+    return corpus.filter((i) => i.title.includes(k) || (i.summary ?? '').includes(k));
   }
 
   /** 服务端搜索；失败时降级为本地过滤，保证界面不空白 */
@@ -190,20 +282,13 @@ export const useNewsStore = defineStore('news', () => {
   }
 
   return {
-    list,
-    loading,
-    error,
+    buckets,
     detailCache,
     searching,
     searchError,
-    page,
-    total,
-    hasMore,
-    loadingMore,
-    cursor,
-    currentChannel,
-    currentSort,
     PAGE_SIZE,
+    bucketOf,
+    listOf,
     fetchNews,
     loadMore,
     resetPaging,

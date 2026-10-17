@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import ChannelTabs from '@/components/ChannelTabs.vue';
 import NewsCard from '@/components/NewsCard.vue';
 import { useNewsStore } from '@/stores/news';
-
-import type { Tab } from '@/types';
+import { useInfiniteList } from '@/composables/useInfiniteList';
+import { DEFAULT_SORT } from '@/constants/sort';
+import type { Channel, Tab } from '@/types';
 
 const router = useRouter();
 const news = useNewsStore();
@@ -26,7 +27,21 @@ const tabs: Tab[] = [
 
 const active = ref('video');
 
-onMounted(() => news.fetchNews('video'));
+/** 本视图固定使用 video 频道桶（A4）：与首页的列表状态完全隔离，互不覆盖 */
+const VIDEO_CHANNEL: Channel = 'video';
+const bucket = computed(() => news.bucketOf(VIDEO_CHANNEL, DEFAULT_SORT));
+
+/** 无限滚动：与首页同一套机制，但续接的是 video 桶自己的游标 */
+const { sentinel } = useInfiniteList({
+  onLoadMore: () => news.loadMore(VIDEO_CHANNEL, DEFAULT_SORT),
+  hasMore: () => bucket.value.hasMore,
+  loading: () => bucket.value.loading,
+});
+
+onMounted(() => {
+  news.resetPaging(VIDEO_CHANNEL, DEFAULT_SORT);
+  void news.fetchNews(VIDEO_CHANNEL, DEFAULT_SORT);
+});
 
 function onTab(key: string) {
   active.value = key;
@@ -48,7 +63,21 @@ function open(id: string) {
     />
     <ChannelTabs :tabs="tabs" :active="active" @update:active="onTab" />
     <div class="video__feed">
-      <NewsCard v-for="item in news.list" :key="item.id" :item="item" @click="open" />
+      <template v-if="bucket.loading && !bucket.list.length">
+        <div v-for="i in 3" :key="`sk-${i}`" class="video__skeleton" />
+      </template>
+
+      <NewsCard v-for="item in bucket.list" :key="item.id" :item="item" @click="open" />
+
+      <div ref="sentinel" class="video__sentinel">
+        <span v-if="bucket.loadingMore" class="video__hint">加载中…</span>
+        <span v-else-if="bucket.error" class="video__hint video__hint--error">
+          {{ bucket.error }}
+        </span>
+        <span v-else-if="!bucket.hasMore && bucket.list.length" class="video__hint">
+          没有更多了
+        </span>
+      </div>
     </div>
   </div>
 </template>
@@ -65,5 +94,26 @@ function open(id: string) {
   flex-direction: column;
   gap: 8px;
   padding: 8px 0;
+}
+
+.video__skeleton {
+  height: 120px;
+  margin: 0 16px;
+  border-radius: var(--radius-card);
+  background: var(--color-card-bg);
+}
+
+.video__sentinel {
+  padding: 12px 0 20px;
+  text-align: center;
+}
+
+.video__hint {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.video__hint--error {
+  color: var(--color-error);
 }
 </style>

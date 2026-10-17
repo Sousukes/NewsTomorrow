@@ -27,6 +27,12 @@ def _env(name: str, default: str = "") -> str:
 ENVIRONMENT = _env("ENVIRONMENT", "development").lower()
 IS_PRODUCTION = ENVIRONMENT == "production"
 
+# 运维接口令牌（C5）：`/api/health` 与 `/api/metrics` 会暴露连接池状态与 Top20 路径分布，
+# 不应公开可读。设置后必须携带 `Authorization: Bearer <token>` 或 `X-Ops-Token: <token>`。
+# 未设置时：**开发放行**（本地 / CI / 契约检查不受影响）、**生产拒绝**（fail-closed，
+# 避免忘记配置就把内部状态暴露在公网）。
+OPS_TOKEN = _env("OPS_TOKEN")
+
 # 数据库：默认 PostgreSQL；回退 SQLite 改 DATABASE_URL=sqlite:///./toutiao.db
 DATABASE_URL = _env("DATABASE_URL", f"sqlite:///{(BASE_DIR / 'toutiao.db').as_posix()}")
 
@@ -224,3 +230,10 @@ NICKNAME_COLLAPSE_REPEATS = _env("NICKNAME_COLLAPSE_REPEATS", "true").lower() in
 # 空格不在这里：`_env` 会 strip 整个值，尾随空格在环境变量里活不下来，
 # 故空格由代码额外允许（首尾空白一律 trim，只放行内部空格）。
 NICKNAME_ALLOWED_SYMBOLS = _env("NICKNAME_ALLOWED_SYMBOLS", "_-·.・")
+
+# ---- 命中日志留存（C7，合规）----
+# `sensitive_hits` / `nickname_hits` 的 `snippet` 存的是**用户原文**（脱敏不可逆，
+# 它是误杀复盘与申诉的唯一证据）。留存必须有期限：无限期保存用户原话是合规风险，
+# 而日志的价值只在"最近发生的误杀申诉"。到点即删，**不设保底条数**。
+# `0` = 不清理（仅取证期临时使用，不建议长期如此）。
+HIT_LOG_KEEP_DAYS = max(0, int(_env("HIT_LOG_KEEP_DAYS", "90")))

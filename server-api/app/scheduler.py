@@ -28,6 +28,7 @@ from .config import (
 from .database import SessionLocal, dispose
 from .feeds.health import prune as prune_health_events
 from .feeds.ingest import FetchReport, prune_old_news, run_ingest
+from .hit_logs import prune_hit_logs
 from .ranking import recompute_hot_scores
 from .search_stats import prune_search_logs
 
@@ -111,6 +112,14 @@ def _run_once(channel: str | None = None, keyword: str | None = None) -> FetchRe
                 events = prune_health_events(db)
                 if events:
                     logger.info("清理过期源健康事件：%d 条", events)
+                # C7：命中日志留存（snippet 是用户原文，到点即删）
+                hits = prune_hit_logs(db)
+                if hits["sensitive"] or hits["nickname"]:
+                    logger.info(
+                        "清理过期命中日志：敏感词 %d 条 / 昵称 %d 条",
+                        hits["sensitive"],
+                        hits["nickname"],
+                    )
             except Exception as e:
                 logger.warning("清理失败（不影响抓取结果）: %s", e)
                 db.rollback()

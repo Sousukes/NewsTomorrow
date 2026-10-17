@@ -154,8 +154,8 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/health` | — | 健康检查；返回 `{ status, pool, adminBreakGlass, hotRecompute }`——`adminBreakGlass` 是**应急通道是否配置**的布尔标记（只下发真假、不下发号码）；`hotRecompute` 是热度重算 cron 的进程内状态（`enabled`/`lastAt`/`lastCount`/`lastError`），抓取关停时据此判断衰减仍在推进 |
-| GET | `/api/metrics` | — | Prometheus 文本指标（uptime / 请求数 / 在途 / 状态码 / 路径 / 连接池） |
+| GET | `/api/health` | 🔑 运维 | 健康检查；返回 `{ status, pool, adminBreakGlass, hotRecompute }`——`adminBreakGlass` 是**应急通道是否配置**的布尔标记（只下发真假、不下发号码）；`hotRecompute` 是热度重算 cron 的进程内状态（`enabled`/`lastAt`/`lastCount`/`lastError`），抓取关停时据此判断衰减仍在推进。**访问控制见「运维接口鉴权」** |
+| GET | `/api/metrics` | 🔑 运维 | Prometheus 文本指标（uptime / 请求数 / 在途 / 状态码 / 路径 / 连接池）。**访问控制见「运维接口鉴权」** |
 | POST | `/api/news/refresh` | ✅ 管理员 | 手动触发抓取（`?channel=&keyword=`）。需管理能力（`ADMIN_PHONES` ∪ `admin_users` 表），**异步执行**返回 202 |
 | GET | `/api/news/search?q=` | — | 服务端搜索（标题/摘要匹配，**按相关度排序**见「搜索与热词」），返回 `{ list, total, page, hasMore }`；**旁路记录**搜索词供热词统计 |
 | GET | `/api/news/search/hot?limit=&days=` | — | 热搜词（近 `days` 天真实统计），返回 `{ list: [{ term, count }], days }`；无数据时为空数组 |
@@ -218,6 +218,58 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
+
+## 管理端鉴权（router 级，C6）
+
+管理端鉴权**不在端点函数体里**，而是挂在 router 上：
+
+```python
+router = APIRouter(
+    prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
+)
+```
+
+- `require_admin`（`app/routers/admin.py`）：未登录 → **401**，已登录但非管理员 → **403 / 40301**，
+  判定复用 `is_admin()`（`ADMIN_PHONES` 白名单 ∪ `admin_users` 表，双源并集）。
+- **为什么在 router 级**：此前 34 个端点各自在函数体首行写 `_require_admin(user, db)`。
+  每个都写了，但这是「靠人记住」的约束——新增端点忘写一行就直接成为越权面，
+  而 34 个端点的 review 很难逐条核对。`dependencies` 对路由表里**每个**端点生效，
+  包括未来新增、以及忘记声明 `user` 参数的端点，**漏写在结构上不再可能**。
+- **需要 actor 的端点**（写审计/日志，21 个）用 `user: User = Depends(require_admin)` 取到管理员；
+  FastAPI 在同一请求内缓存依赖结果，与 router 级那次共用实例，不会重复查库。
+  只读列表端点（13 个）不再声明 `user` 参数。
+- **结构性守卫**：`tests/test_admin_guard.py` 用 `app.openapi()["paths"]` 枚举全部
+  `/api/admin` 操作（26 路径 × 34 操作），逐个断言「未登录 401 / 非管理员 403+40301」，
+  并断言源码中不再存在逐端点守卫调用（防重构回退）。
+  > 取清单必须用 `app.openapi()["paths"]`：`app.routes` 里的 `include_router` 是
+  > `_IncludedRouter` 包装（`path=None`），直接遍历只能拿到少量直连路由。
+
+## 运维接口鉴权（C5）
+
+`/api/health` 与 `/api/metrics` 会暴露**连接池状态**与 **Top20 路径分布**，
+不应公开可读。两者统一走 `require_ops_access` 依赖（`app/deps.py`）。
+
+| 配置 | 行为 |
+| --- | --- |
+| 设置 `OPS_TOKEN` | 必须携带 `Authorization: Bearer <token>` **或** `X-Ops-Token: <token>`；缺失/错误 → **403 / 40303** |
+| 未设置 + `ENVIRONMENT=development` | **放行**（本地、CI、契约检查零改动） |
+| 未设置 + `ENVIRONMENT=production` | **拒绝（403 / 40303）**——fail-closed，避免忘记配置就把内部状态挂公网；启动时会打印告警 |
+
+- 令牌比较用 `secrets.compare_digest`（定时安全，不按字符泄露前缀）。
+- 刻意返回 **403 而非 401**：本项目里 401 代表「会话失效」，前端据此清登录态并跳登录页；
+  运维接口与用户会话无关，用 401 会误导客户端。用户 JWT **不能**当运维令牌用（不同信任域）。
+- 生产探活配置示例：
+
+```bash
+# 生成令牌
+python -c "import secrets;print(secrets.token_urlsafe(32))"
+# 负载均衡 / Prometheus 探针
+curl -H "X-Ops-Token: $OPS_TOKEN" http://127.0.0.1:8000/api/health
+```
+
+> 生产未配置 `OPS_TOKEN` 时 `/api/health` 也会 403 —— 这是刻意的：健康检查里带着池状态，
+> 与指标同属「内部可观测面」。若探针不便带令牌，请改由内网独占该路径，
+> 或改用不含内部状态的独立存活探针。
 
 ## 新闻抓取（RSS）
 
@@ -1141,6 +1193,25 @@ emoji/符号（So）拒绝。**顺序刻意是「字符集先于长度」**—�
 
 审计动作：`nicknameWord.create` / `nicknameWord.update` / `nicknameWord.delete` /
 `nicknameWord.reload` / `nickname.review`。
+
+## 命中日志留存（C7，合规）
+
+`sensitive_hits` / `nickname_hits` 的 `snippet` 存的是**用户原文**：脱敏不可逆，
+它是判断"是否误杀"与受理申诉的**唯一证据**。但证据价值随时间衰减——
+无限期保存用户原话本身就是合规风险（数据最小化原则）。
+
+| 项 | 取值 |
+| --- | --- |
+| 保留期 | `HIT_LOG_KEEP_DAYS`，默认 **90 天**；`0` = 不清理（仅取证期临时使用） |
+| 保底条数 | **无**（与 `prune_old_news` 的 `keep_min` 不同：保留期就是它的全部价值，保底反而留下一批最旧的用户原话） |
+| 清理时机 | **每次启动扫一遍**（不依赖 cron，`FEED_CRON_ENABLED=false` 也会执行）+ 抓取 cron 每轮顺带清理 |
+| 可见范围 | 仅 `GET /api/admin/moderation/hits`、`GET /api/admin/nickname-hits`，二者受 **router 级管理员鉴权**保护（C6）；公开接口不返回 `snippet` |
+
+- 实现：`app/hit_logs.py::prune_hit_logs()`，按 `created_at < now - keep_days` 删除
+  （A3 之后时间列同为 UTC aware，字典序即时间序）。
+- 累计计数 `nickname_words.hit_count` **不随日志删除而回退**：前者用于发现高频词/误杀大户，
+  后者是申诉材料，两个问题不同。
+- 启动清理失败只告警、不阻断启动（合规尽力而为，但不该让服务起不来）。
 
 ## 资讯正文（E1）
 

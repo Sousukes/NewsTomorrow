@@ -26,11 +26,15 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 - **类型安全**：`vue-tsc --noEmit` 全程零报错；组件 Props / Emits 全类型化。
 - **代码规范**：ESLint（flat config，`eslint.config.js`）+ Prettier。
-- **单元测试**：Vitest 共 **484** 项，覆盖：
+- **单元测试**：Vitest 共 **488** 项，覆盖：
   - `useCarousel`（19）：克隆帧回环 / transitionend 收尾 / 兜底定时器 / 手势阈值 / 数据变化重置
   - `BannerCarousel`（8）：**克隆帧无重复 key（回归）**、配图与标题按 id 对应、危险协议拦截、点击派发、卸载清定时器
   - `utils/image`（13）：CSS 注入防护（协议白名单 + 转义）
-  - `stores`（14）：消息已读幂等、无限滚动 loadMore 去重 / 并发 / 末页 / 失败
+  - `stores`（22）：消息已读幂等、无限滚动 loadMore 去重 / 并发 / 末页 / 失败；
+    **列表分桶隔离（A4）**——不同频道互不覆盖（首页与视频页不再串页）、同频道不同排序各自成桶、
+    `getById` 可命中任意桶；**竞态守卫（A4）**——`loadMore` 在途时重新 fetch 旧响应被丢弃
+    （不追加、不覆盖游标、不卡住 `loadingMore`）、先发的 fetch 后返回不覆盖后发结果、
+    `resetPaging` 使在途 `loadMore` 失效、`loadMore` 续接沿用桶的排序
   - `stores/user`（19）：**收藏/历史云端同步 + 账号命名空间隔离**——未登录不发请求、
     登录响应缺 id 时不发同步、登录后并集合并并以服务端为准、合并结果写入 news 缓存、
     同步失败不阻断登录、匿名作用域、登录采纳匿名数据并清空匿名键、**登出切回匿名且账号数据保留**、
@@ -468,7 +472,11 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 ## 状态管理 `src/stores/`
 
-- **`news.ts`（useNewsStore）**：`list` / `loading` / `error` / `detailCache` / `searching` / `searchError` / `page` / `total` / `hasMore` / `loadingMore` / `currentChannel` + `fetchNews(channel)` / `loadMore()`（**无限滚动追加，按 id 去重、并发幂等**）/ `resetPaging()` / `getById(id)` / `loadDetail(id)`（深链兜底）/ `search(keyword,page,pageSize)`（**服务端搜索**）/ `searchLocal(keyword)`（离线兜底）。数据来自 `api/news`，未配后端时自动 mock。
+- **`news.ts`（useNewsStore）**：列表状态按 **(频道 × 排序)** **分桶**（`NewsBucket`，7 频道 × 3 排序 = 21 个桶，初始化预建）。
+  - 读取：`bucketOf(channel, sort)`（含 `list/loading/error/page/total/hasMore/loadingMore/cursor/generation`）/ `listOf(channel, sort)`。
+  - 写入：`fetchNews(channel, sort)` / `loadMore(channel, sort)`（**无限滚动追加，按 id 去重、并发幂等、代次守卫**）/ `resetPaging(channel, sort)`——**频道与排序必传**，没有「隐式当前频道」。
+  - 其他：`getById(id)`（遍历全部桶 + 详情缓存 + mock）/ `cacheMany(items)` / `loadDetail(id)`（深链兜底）/ `search(keyword,page,pageSize)`（**服务端搜索**）/ `searchLocal(keyword)`（离线兜底）/ `detailCache` / `searching` / `searchError`。
+  - **为什么分桶（A4）**：此前单一 `list` + `currentChannel` 被首页与视频页共用，视频页请求会覆盖首页列表（KeepAlive 下切回首页看到视频内容）；且无竞态守卫，`loadMore` 在途时切频道会把旧频道条目追加进新列表。现在每个视图读自己的桶，异步响应带**代次校验**，过期响应整体丢弃。
 - **`messages.ts`（useMessagesStore）**：`list` / `loading` / `error` / `unreadCount` + `fetch()` / `markRead(id)` / `markAllRead()` / `refreshUnread()`。已读状态**本地持久化 + 回写服务端**，未登录时仅本地生效——**无登录态时不发起这两个写请求**（后端标记已读要求登录，401 会触发全局未授权跳转，不该因游客点开一条消息就把他踢到登录页）。
 - **`user.ts`（useUserStore）**：`token` / `isLoggedIn` / `userId` / `isAdmin` / `favorites` / `history` / `theme` / `syncing` / `syncError` + `login(phone,password)` / `logout()` / `syncMarks()` / `toggleFavorite` / `isFavorite` / `addHistory` / `clearHistory` / `setTheme`。
   - **`isAdmin` 由登录响应下发并落盘**（`prefs.isAdmin && isLoggedIn`，刷新不丢入口）；登出/401 归位。
