@@ -215,6 +215,15 @@ class Message(Base):
     # 真实互动事件（有人评论/点赞）必须定向，否则会出现"收到别人的私信"。
     # 用户被删除时其消息一并删除（定向消息对他人无意义）。
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # ---- A2 排序键（迁移 0026）----
+    # 绝对创建时间（ISO 字符串）。列表按它倒序 + id 倒序分页——此前按随机 id
+    # （`msg_{uuid4hex}`）排序，顺序与真实时间无关、keyset 游标语义失效。
+    # **可空**：存量行没有可信时间源（`time` 存的是「1小时前」相对文案，
+    # 不能反推绝对时间，回填等于编造数据）；排序用
+    # `coalesce(created_at, '')` 兜底，空串在 DESC 下排最后 → 存量行自然沉底
+    # （与 news.published_at 的 _PUB 同款处方，PG/SQLite 行为一致）。
+    # `default=now_str`：notify/alert/种子等所有新建路径自动写入，单一来源。
+    created_at = Column(String(30), default=now_str, index=True)
     time = Column(String(30), default=now_str)
 
     news = relationship("News")

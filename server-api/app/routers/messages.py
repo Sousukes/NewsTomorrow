@@ -58,6 +58,15 @@ def _read_ids(db: Session, current: Optional[User]) -> set[str]:
     return {r[0] for r in rows}
 
 
+# ---- A2 排序键 ----
+# 消息 id 是随机串（`msg_{uuid4hex}`），按 id 排序与真实时间无关。
+# 改为按绝对创建时间倒序；存量行没有 created_at（迁移 0026 前的数据），
+# coalesce 到空串兜底——空串小于任何 ISO 时间串，DESC 下自然排最后，
+# 且 PG 与 SQLite 行为一致（不依赖 NULLS LAST，两者语法支持度不同）。
+# 与 `news.published_at` 的 `_PUB` 同一款处方。
+_SORT_TS = func.coalesce(Message.created_at, "")
+
+
 @router.get("", response_model=None)
 def list_messages(
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=100),
@@ -65,11 +74,33 @@ def list_messages(
     db: Session = Depends(get_db),
     current: Optional[User] = Depends(get_current_user_optional),
 ):
-    """消息列表（定向给自己 + 广播；未登录只看广播且 read 恒为 False）。"""
+    """消息列表（定向给自己 + 广播；未登录只看广播且 read 恒为 False）。
+
+    排序与分页（A2）：`(created_at DESC, id DESC)`，同秒用 id 决胜保证稳定。
+    游标**格式不变**——仍是上一页末条的 id；服务端按该 id 回查排序键，
+    取「严格更早」的一页。这样做而不是把时间戳编进游标：
+    - 老格式游标（纯 id）继续可用，前端零改动；
+    - 键值以库中权威行为准，客户端改游标也翻不出可见范围
+      （锚点查询同样带 visible_condition）。
+    锚点行不存在（被删/不可见）时忽略游标返回第一页——消息没有清理任务，
+    这只在手工删数据后出现，此时「从头开始」比报错更不影响使用。
+    """
     q = db.query(Message).filter(visible_condition(current))
     if cursor:
-        q = q.filter(Message.id < cursor)
-    rows = q.order_by(Message.id.desc()).limit(limit + 1).all()
+        anchor = (
+            db.query(Message)
+            .filter(Message.id == cursor, visible_condition(current))
+            .first()
+        )
+        if anchor is not None:
+            anchor_key = anchor.created_at or ""
+            q = q.filter(
+                or_(
+                    _SORT_TS < anchor_key,
+                    (_SORT_TS == anchor_key) & (Message.id < cursor),
+                )
+            )
+    rows = q.order_by(_SORT_TS.desc(), Message.id.desc()).limit(limit + 1).all()
     has_more = len(rows) > limit
     items = rows[:limit]
     read_ids = _read_ids(db, current)

@@ -161,7 +161,7 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 | GET | `/api/news/{id}/comments/{cid}/replies?limit=&cursor=` | —（可选带token） | 某条主评论的**回复**列表（时间**正序**，游标分页；root 已软删除时返回空列表——主评论消失后失去语境的回复不再裸露） |
 | POST | `/api/news/{id}/comments` | ✅ | 发表评论；带 `parentId` 时为**回复**（被回复评论须存在且未删除，否则 40003；回复的回复拍平到同一 root，`parentId` 仅用于展示「回复 @谁」） |
 | PATCH | `/api/news/{id}/comments/{cid}` | ✅ | 点赞 / 取消点赞（`comment_likes` 关系表按用户去重，幂等） |
-| GET | `/api/messages?limit=&cursor=` | —（可选带 token） | 消息中心列表（游标分页，返回 `{ list, hasMore, nextCursor }`） |
+| GET | `/api/messages?limit=&cursor=` | —（可选带 token） | 消息中心列表（游标分页，返回 `{ list, hasMore, nextCursor }`）。按 `(created_at DESC, id DESC)` 排序——**游标是上一页末条的 id**，服务端回查其排序键取「严格更早」的一页（A2） |
 | GET | `/api/messages/unread-count` | — | 未读数（给 TabBar 徽标；关联表索引计数，不全表遍历） |
 | PATCH | `/api/messages/{id}` | ✅ | 标记单条已读（写入 `message_reads` 关联表，幂等）。**需登录**（40100）；「不存在」与「不可见」同码 **40400**（H11：不泄露他人定向消息） |
 | POST | `/api/messages/read-all` | —（可选） | 全部标记已读 |
@@ -654,6 +654,10 @@ alembic check                       # 检测 models 与迁移是否漂移
   `name_reviewed_at`）。
   `0025_news_content`（资讯正文 `news.content`，Text **可空**——NULL 即「暂无正文」，
   详情接口据此如实返回 null；**不建索引**：只按 id 点查，无按正文检索需求）。
+  `0026_message_created_at`（消息排序键 `messages.created_at`，**可空、不设 server_default**——
+  存量行无可信时间源（`time` 是「1小时前」相对文案，回填等于编造数据），排序用
+  `coalesce(created_at, '')` 兜底让存量行沉底；建 `ix_messages_created_at` 服务 ORDER BY，
+  **刻意不做 `(user_id, created_at)` 复合索引**——可见范围是 OR，走不了复合索引）。
 - **为何移除 `create_all()`**：此前 `init_db()` 在启动时就地建表，与 Alembic 形成双轨管理——
   create_all 补建的物件不写入 `alembic_version`，导致后续 `upgrade head` 因"对象已存在"失败，
   且各环境结构分叉（历史上曾出现"库停在 0003、代码已到 0006"，索引优化实际未生效）。
@@ -801,6 +805,32 @@ hot = (评论数 × 3 + 收藏数 × 2 + 播放数 ÷ 1000) × 时间衰减 × 1
 > 前端配套：`stores/messages.ts` 在**无登录态时只落本地已读、不发起该请求**——
 > 否则后端 401 会经 `api/http.ts` 触发全局未授权跳转，把游客踢到登录页。
 > 同时 `http.ts` 的 401 处理改为**仅在原本持有 token 时**广播未授权事件。
+
+### 列表排序：按真实时间，不按随机 id（A2）
+
+此前列表按 `Message.id DESC` 排序、游标用 `Message.id < cursor`，而互动消息的
+id 是 `msg_{uuid4hex}`——**随机串**。后果：排序与真实时间无关（最旧的消息
+可能排在最前，顺序与 `time` 文案脱节），keyset 游标语义失效（「末条之后」
+翻出来的可能比它更晚）。
+
+迁移 **0026** 增加 `messages.created_at`（可空 + `ix_messages_created_at`）：
+
+- **可空、不设 server_default**：存量行没有可信时间源——`time` 列存的是
+  「1小时前」这类相对文案，不能反推绝对时间，**回填等于编造数据**；
+- **排序键 `coalesce(created_at, '')`**：与 `news.published_at` 的 `_PUB`
+  同款处方——空串在 DESC 下排最后，存量行自然沉底，且 PG 与 SQLite 行为一致
+  （不依赖 `NULLS LAST`，两者语法支持度不同）；
+- **模型侧 `default=now_str`**：`notify.py` / `alert.py` / 种子等所有新建路径
+  无需逐个改动即自动写入时间戳，单一来源；
+- **单列索引而非 `(user_id, created_at)` 复合索引**：可见范围是
+  `user_id = X OR user_id IS NULL`（OR 走不了复合索引），该索引服务的是
+  「排序」而非「过滤」——避免每页全表排序。
+
+**游标格式不变**：仍是上一页末条的 id。服务端按该 id（同样带可见范围过滤）
+回查排序键，取「严格更早」的一页——老格式游标继续可用、前端零改动，
+且客户端改游标也翻不出可见范围。锚点行不存在（被删/不可见）时忽略游标
+返回第一页：消息没有清理任务，这只在手工删数据后出现，「从头开始」
+比报错更不影响使用。
 
 ## 收藏 / 浏览历史（云端同步）
 
@@ -1124,7 +1154,7 @@ emoji/符号（So）拒绝。**顺序刻意是「字符集先于长度」**—�
 ## 单元测试
 
 ```bash
-pytest -q          # 611 项
+pytest -q          # 618 项
 ```
 
 > **测试环境由根级 `conftest.py` 统一钉死**（`DATABASE_URL=sqlite:///:memory:` 等）：
@@ -1182,7 +1212,7 @@ pytest -q          # 611 项
   隐藏回复不进 `replyCount` 与预览、回复已隐藏 40003、点赞已隐藏 40401、
   公开输出无 hidden 字段）、审计（hide 带 reason/content 截断/newsTitle/userName
   且 target 可查、restore 留痕）。
-- `tests/test_migrations.py`（22 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
+- `tests/test_migrations.py`（23 项）：**迁移链守卫**。在临时 SQLite 库上跑 `upgrade head` →
   `downgrade base` → `upgrade head`，校验全部表（含 `search_logs` / `rss_sources` / `comment_likes` /
   `admin_users`）、`comments.user_id`、`ix_news_feed`、`users.token_version`、`news.hot_score`
   与 `ix_news_hot`、`rss_sources` 的列与主键（含 0017 的 `respect_robots` **非空**与
@@ -1219,7 +1249,7 @@ pytest -q          # 611 项
   **库白名单（非 env）号码同样下发 true**；
   **入参校验**（4 项）——未知频道 422（`errors[0].loc[-1] == 'channel'`）、`key` 格式非法 422、
   更新时同样校验频道。
-- `tests/test_api.py`（99 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
+- `tests/test_api.py`（105 项）：含**评论归属**（`TestCommentOwnership`）——新评论写入
   `userId`、`mine` 仅作者为 true、历史评论 `userId` 为 null 且任何人都不是作者；
   **评论删除**（`TestCommentDelete`）——作者可删、他人 403、未登录 401、
   无归属评论不可删、幂等、删后不可点赞、跨文章 404；

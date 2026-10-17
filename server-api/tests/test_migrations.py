@@ -307,6 +307,25 @@ class TestMigrationChain:
         names = {i["name"] for i in insp.get_indexes("news")}
         assert not any("content" in n for n in names)
 
+    def test_message_created_at_column(self, chain_db):
+        """0026（A2）：消息排序键——此前按随机 id 排序，顺序与真实时间无关。
+
+        钉住三件事：
+        - **可空**：存量行没有可信时间源（`time` 存的是「1小时前」相对文案，
+          不能反推绝对时间），回填等于编造数据；排序用
+          `coalesce(created_at, '')` 兜底让存量行沉底；
+        - **索引存在**：列表的 ORDER BY 键，避免每页全表排序；
+        - 可见范围是 `user_id = X OR user_id IS NULL`（OR 走不了复合索引），
+          所以刻意只建单列索引——它服务排序，不过滤。
+        """
+        insp = inspector_of(chain_db)
+        cols = {c["name"] for c in insp.get_columns("messages")}
+        assert "created_at" in cols
+        col = next(c for c in insp.get_columns("messages") if c["name"] == "created_at")
+        assert col["nullable"] is True
+        names = {i["name"] for i in insp.get_indexes("messages")}
+        assert "ix_messages_created_at" in names
+
     def test_downgrade_to_base_drops_tables(self, chain_db):
         """回滚到 base 后表应被清除（确保 downgrade 可用、非空操作）。"""
         run_alembic(chain_db, "downgrade", "base")

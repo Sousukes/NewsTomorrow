@@ -61,8 +61,8 @@ def client():
              "recommend", "text", 1, "2026-10-07T11:00:00+00:00"),
         )
         conn.exec_driver_sql(
-            "INSERT INTO messages (id,type,title,summary,news_id,time) VALUES (?,?,?,?,?,?)",
-            ("m1", "system", "欢迎使用", "欢迎", None, "刚刚"),
+            "INSERT INTO messages (id,type,title,summary,news_id,time,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("m1", "system", "欢迎使用", "欢迎", None, "刚刚", "2026-10-07T09:30:00+00:00"),
         )
 
     with TestClient(main.app) as c:
@@ -488,6 +488,125 @@ class TestMessages:
         r = client.patch("/api/messages/m1")
         assert r.status_code == 401
         assert r.json()["code"] == 40100
+
+
+class TestMessageOrdering:
+    """A2：消息列表按真实时间排序（此前按随机 id `msg_{uuid4hex}` 排）。
+
+    随机 id 排序的两个后果：顺序与 `time` 文案脱节、keyset 游标语义失效
+    （"末条之后"翻出来的可能比它更晚）。现在按
+    `(coalesce(created_at,'') DESC, id DESC)` 排，游标仍是上页末条 id
+    （服务端回查其排序键取「严格更早」的一页，格式不变）。
+    """
+
+    # 整点锚点：不依赖"现在"，凌晨/跨天跑都不抖
+    T_OLD = "2026-10-08T09:00:00+00:00"
+    T_MID = "2026-10-08T10:00:00+00:00"
+    T_NEW = "2026-10-08T11:00:00+00:00"
+
+    def _add(self, msg_id: str, created_at, user_id=None):
+        """插入消息。**用 raw SQL 而非 ORM**：ORM 构造器显式传
+        `created_at=None` 也会被模型 `default=now_str` 顶上（默认在值为
+        None 时触发），造不出真正的存量 NULL 行——而存量行恰恰是本类
+        要测的对象（迁移 0026 前的数据没有 created_at）。
+        """
+        from app.database import engine
+
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO messages (id,type,title,summary,news_id,user_id,time,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (msg_id, "system", f"消息{msg_id}", "排序测试用", None, user_id, "刚刚", created_at),
+            )
+
+    def _ids(self, client, **q) -> list[str]:
+        return [m["id"] for m in client.get("/api/messages", params=q).json()["data"]["list"]]
+
+    def test_orders_by_created_at_desc(self, client):
+        """新的在前——与插入顺序、id 字典序都无关。"""
+        self._add("ao_old", self.T_OLD)
+        self._add("ao_new", self.T_NEW)
+        self._add("ao_mid", self.T_MID)
+        ids = self._ids(client)
+        assert ids.index("ao_new") < ids.index("ao_mid") < ids.index("ao_old")
+
+    def test_legacy_rows_without_created_at_sink_last(self, client):
+        """存量行没有 created_at（迁移前数据）：coalesce 空串排最后，不编造时间。"""
+        self._add("ao_legacy", None)
+        self._add("ao_stamped", self.T_OLD)
+        ids = self._ids(client)
+        assert ids.index("ao_stamped") < ids.index("ao_legacy")
+
+    def test_same_timestamp_tiebreaks_by_id_desc(self, client):
+        """同秒两条：id 倒序决胜，保证分页稳定（否则同秒行会重复/遗漏）。"""
+        self._add("ao_tie_a", self.T_MID)
+        self._add("ao_tie_b", self.T_MID)
+        ids = self._ids(client)
+        assert ids.index("ao_tie_b") < ids.index("ao_tie_a")
+
+    def test_cursor_paginates_without_overlap_or_gap(self, client):
+        """游标翻页：严格更早、不重不漏，翻到底 hasMore=false 且游标收口。
+
+        从第一页翻到尾页走完整轮：中途只断言相对顺序，尾页断言终止条件
+        （库里还有更老的存量行，中途页 hasMore 必为 True——那正是分页的意义）。
+        """
+        for i, ts in enumerate(["2026-10-09T08:00:00+00:00", "2026-10-09T09:00:00+00:00",
+                                "2026-10-09T10:00:00+00:00", "2026-10-09T11:00:00+00:00"]):
+            self._add(f"ao_p{i}", ts)
+
+        seen: list[str] = []
+        cursor = None
+        pages = 0
+        while True:
+            params = {"limit": 2}
+            if cursor:
+                params["cursor"] = cursor
+            d = client.get("/api/messages", params=params).json()["data"]
+            seen.extend(m["id"] for m in d["list"])
+            pages += 1
+            assert pages < 20, "分页没有收敛——游标语义可能失效"
+            if not d["hasMore"]:
+                assert d["nextCursor"] is None
+                break
+            assert d["nextCursor"]
+            cursor = d["nextCursor"]
+
+        assert len(seen) == len(set(seen)), "翻页出现重复行"
+        idx = [seen.index(f"ao_p{i}") for i in (3, 2, 1, 0)]
+        assert idx[0] < idx[1] < idx[2] < idx[3], f"四行未按时间倒序连续出现：{seen}"
+
+    def test_cursor_from_another_users_message_falls_back_to_first_page(self, client):
+        """拿不到/不可见的锚点：忽略游标回第一页（不报错、不泄露他人消息）。"""
+        from app.database import SessionLocal
+        from app.models import User
+
+        with SessionLocal() as db:
+            other_id = (
+                db.query(User).filter(User.phone == "13900017777").first()
+            )
+        if other_id is None:
+            _register(client, "13900017777", "锚点主人")
+            with SessionLocal() as db:
+                other_id = db.query(User).filter(User.phone == "13900017777").first().id
+        self._add("ao_secret", self.T_NEW, user_id=other_id)
+
+        self._add("ao_visible", self.T_OLD)
+        plain = self._ids(client)
+        with_bad_cursor = self._ids(client, cursor="ao_secret")
+        assert with_bad_cursor == plain
+        assert "ao_secret" not in with_bad_cursor
+
+    def test_model_default_fills_created_at(self, client):
+        """模型 `default=now_str`：notify/alert 等新建路径无需逐个改动即有时间戳。"""
+        from app.database import SessionLocal
+        from app.models import Message
+
+        with SessionLocal() as db:
+            db.add(Message(id="ao_default", type="system", title="默认值", summary="s", time="刚刚"))
+            db.commit()
+            db.expire_all()
+            row = db.get(Message, "ao_default")
+            assert row.created_at  # ISO 字符串，非空
 
 
 class TestMarkReadAuthorization:

@@ -59,14 +59,19 @@ COMMENTS = [
 ]
 
 MESSAGES = [
+    # A2：`_offset_min` 生成绝对 created_at（列表按它倒序）——与 time 文案一致
     dict(id="m1", type="system", title="欢迎使用明日头条",
-         summary="关注你感兴趣的频道，第一时间获取重要资讯推送。", news_id=None, time="刚刚"),
+         summary="关注你感兴趣的频道，第一时间获取重要资讯推送。", news_id=None, time="刚刚",
+         _offset_min=0),
     dict(id="m2", type="comment", title="有人评论了你关注的资讯",
-         summary="观察者小张：国产航母编队训练报道角度很扎实，值得期待后续。", news_id="n4", time="1小时前"),
+         summary="观察者小张：国产航母编队训练报道角度很扎实，值得期待后续。", news_id="n4", time="1小时前",
+         _offset_min=60),
     dict(id="m3", type="recommend", title="今日热点速览",
-         summary="暴雨蓝色预警、楼市新政、国产大飞机新航线，点击查看详情。", news_id="n3", time="2小时前"),
+         summary="暴雨蓝色预警、楼市新政、国产大飞机新航线，点击查看详情。", news_id="n3", time="2小时前",
+         _offset_min=120),
     dict(id="m4", type="system", title="账号安全提醒",
-         summary="建议定期检查登录设备，异常登录将及时通知你。", news_id=None, time="1天前"),
+         summary="建议定期检查登录设备，异常登录将及时通知你。", news_id=None, time="1天前",
+         _offset_min=1440),
 ]
 
 
@@ -156,10 +161,12 @@ def init_db() -> None:
 
         have_msgs = {row[0] for row in db.execute(select(Message.id)).all()}
         for row in MESSAGES:
+            row = dict(row)
+            offset = _pop_offset(row)
             if row["id"] not in have_msgs and (
                 row["news_id"] is None or db.get(News, row["news_id"]) is not None
             ):
-                db.add(Message(**row))
+                db.add(Message(created_at=_ago(offset), **row))
 
         db.commit()
         if restored:
