@@ -7,7 +7,7 @@ on:
 
 jobs:
   frontend:
-    name: 前端校验（类型 + Lint + 格式 + 构建）
+    name: 前端校验（依赖审计 + 类型 + Lint + 格式 + 构建）
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -20,6 +20,11 @@ jobs:
           cache: npm
           cache-dependency-path: mingri-toutiao-vue/package-lock.json
       - run: npm ci
+      # C8：依赖漏洞审计。放在类型检查之前——漏洞与代码质量无关，
+      # 先失败在便宜的地方。--audit-level=high：只拦高危及以上，
+      # 低危噪音交给 dependabot/人工，不让 CI 变成「天天红的狼来了」。
+      - name: 依赖漏洞审计（npm audit）
+        run: npm audit --audit-level=high
       - name: 类型检查
         run: npm run type-check
       - name: Lint
@@ -34,7 +39,7 @@ jobs:
         run: npm run build-storybook
 
   backend:
-    name: 后端校验（依赖 + 迁移 + 启动 + 契约检查）
+    name: 后端校验（依赖审计 + 迁移 + 启动 + 契约检查）
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -68,6 +73,15 @@ jobs:
           cache: pip
           cache-dependency-path: server-api/requirements.txt
       - run: pip install -r requirements.txt
+      # C8：依赖漏洞审计（pip-audit 审计的是**整个已安装环境**）。
+      # 先升级 pip：venv 自带的 pip 同样在审计范围内，旧版 pip 自身
+      # 就有通告（PYSEC-2026-3721，26.2 修复）——不升级的话，CI 会红在
+      # 一个与项目无关的包上，而这种「狼来了」最伤审计的可信度。
+      - name: 依赖漏洞审计（pip-audit）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+          python -m pip_audit
       - name: 导入自检（配置可加载）
         run: python -c "import main; print('backend import OK')"
       # F1：迁移链与漂移检查。P1-24 曾因「新迁移未 upgrade」导致 uvicorn

@@ -21,10 +21,12 @@
 > - **A6** 图标配色去硬编码、**F1** CI 迁移校验 → P1-27 已处置
 > - **C2** 登录失败锁定 → P1-30 已处置（账号维度失败计数 5 次/15 分钟，
 >   42902 + Retry-After；无迁移，计数走限流器）
+> - **C8** CI 依赖漏洞审计 → P1-31 已处置（pip-audit + npm audit
+>   --audit-level=high；pip-audit 前置升级 pip，npmmirror 无审计端点）
 > - **E1** 资讯正文落地 → P1-28 已处置（迁移 0025；详情接口返回 `content`，
 >   无正文显示「暂无正文」而非占位文案）
 > - 待排期：A3（时间基准）、A4（前端列表分桶）、
->   C8（依赖审计）、F5（债务 backlog 机制）
+>   F5（债务 backlog 机制）
 
 ## 1. 资产快照（实测）
 
@@ -36,7 +38,7 @@
 | 迁移 | 26 个版本（0001 ~ 0026） | `alembic check` 当前无漂移 |
 | mock 后端 | `server.mjs` 3,007 行 | **后端逻辑的第二实现**（含昵称引擎副本） |
 | 文档 | README 102KB / 优化落地记录 139KB | 单文件体积已影响可检索性 |
-| CI | 前端 type+lint+format+test+build+storybook；后端 import+pytest+启动+契约 | **不含 `alembic check`、依赖审计、覆盖率** |
+| CI | 前端 依赖审计+type+lint+format+test+build+storybook；后端 import+pytest+启动+契约+迁移校验 | **不含覆盖率**（F2 待排期） |
 
 ---
 
@@ -75,7 +77,7 @@
 | C2 | 登录失败仅按 IP 限流，无账号维度锁定 | `main.py:228`（`login:<ip>`） | 增账号维度失败计数 + 指数退避/临时锁定（可用现有 Redis 限流器） | S · ✅ **P1-30 已处置**（账号维度 5 次/15 分钟锁定；预检不计次防续期、不存在账号同计防空枚举、成功清零；无迁移） |
 | C1 | access token 有效期 7 天且存 localStorage | `.env.example:30`（`JWT_EXPIRE_MINUTES=10080`）、`http.ts:24` | 拆 access（短）/ refresh（长、可吊销）；加 CSP；高敏操作二次校验 | M |
 | C4 | 无密码找回/重置通道 | `auth.py` 仅注册/登录/登出/续期 | 至少提供「管理员代重置 + 强制改密」或接入短信验证码 | M |
-| C8 | CI 无依赖漏洞审计 | `ci.yml` | 加 `pip-audit` / `npm audit --audit-level=high` | S |
+| C8 | CI 无依赖漏洞审计 | `ci.yml` | 加 `pip-audit` / `npm audit --audit-level=high` | S · ✅ **P1-31 已处置**（两 job 各加一道；pip-audit 前置升级 pip 防「红在与项目无关的包上」；本地干净 venv 复验零发现） |
 | C6 | 管理端鉴权为逐端点调用（34 端点 / 35 次调用） | `admin.py:141` `_require_admin` | 改 router 级 `dependencies=[Depends(require_admin)]`，杜绝新增端点漏判 | S |
 | C5 | `/api/health`、`/api/metrics` 无鉴权 | `main.py:301,329`（暴露池状态、Top20 路径分布） | 内网暴露或加 Basic Auth | S |
 | C7 | 命中日志留存用户原文片段，无保留期限 | `models.py:491` `snippet` | 定保留期（如 90 天）+ 清理任务 + 最小可见范围（合规） | S |
@@ -119,7 +121,7 @@
 **批次 A（止血 · 约 1 周）** — 目标是消灭「用户/攻击者可观测的错误」：
 A1 消息越权 → A2 消息排序 → A5 搜索追加 → A6 色值 → B1 回复预览 → C2 账号锁定 → C8 依赖审计 → F1 CI 加 `alembic check` → F5 建债务 backlog。
 验收：契约全绿 + 上述 9 项各有对应测试用例。
-（A1 / A2 / A5 / A6 / B1 / C2 / F1 已处置；余 C8 / F5。）
+（A1 / A2 / A5 / A6 / B1 / C2 / C8 / F1 已处置；余 F5。）
 
 **批次 B（契约与结构 · 2~3 周）** — 目标是让下一个功能批次更便宜：
 A3 时间基准统一 → A4 前端列表分桶与竞态守卫 → C1 token 拆分 → C4 找回通道 → C6 管理端鉴权收敛 → D2 admin 路由拆分 → D3 前端 Admin 抽象 → E5 举报。

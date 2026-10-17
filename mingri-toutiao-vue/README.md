@@ -188,7 +188,10 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
   - `constants/theme`（5）与 `composables/useTheme`（6）：三态解析、`data-theme` 写入与
     `color-scheme` 同步、切换即生效、持久化、非法值归一化、停止监听后不再跟随
   - `api/http`（6）、`api/validate`（11）、`constants/channels`（9）、`NewsCard`（7）
-- **CI**：见 `../.github/workflows/ci.yml`（前端 类型/Lint/格式/单测/构建/Storybook + 后端 导入自检/单测/契约检查）。
+- **CI**：见 `../.github/workflows/ci.yml`（前端 依赖审计/类型/Lint/格式/单测/构建/Storybook + 后端 导入自检/单测/契约检查）。
+  **依赖漏洞审计（C8）**：前端 job 在 `npm ci` 后跑 `npm audit --audit-level=high`——
+  本机用 npmmirror 的同学跑不了（镜像不实现审计端点，报 `NOT_IMPLEMENTED`），
+  本地自查临时加 `--registry=https://registry.npmjs.org`。
 - **状态管理**：Pinia（`src/stores`）。收藏、浏览历史、登录态持久化到 `localStorage`，刷新不丢。
 - **路由**：vue-router 4（history 模式），全部页面懒加载。
 - **演示约定**：登录演示密码为 `123456`（非此值触发 S16 错误红态）；配图/头像统一用渐变占位，未引外部图床。
@@ -656,7 +659,7 @@ npm run build-storybook# 产出静态站 storybook-static/
 - [x] **工程基建**：ESLint + Prettier + `npm run verify` + GitHub Actions CI
 - [x] 全局错误边界（`ErrorBoundary` + `app.config.errorHandler`），消除白屏
 - [x] **无限滚动**：`useInfiniteList` + store `loadMore`（去重/并发幂等/末页判定）+ 骨架屏与底部状态
-- [x] **单元测试**：Vitest 484 项（前端）+ pytest 611 项（后端），已接入 CI
+- [x] **单元测试**：Vitest 484 项（前端）+ pytest 626 项（后端），已接入 CI
 - [x] API 层：`api/`（news / comments / auth + http 客户端，token 注入、`{code,data}` 解包），未配后端自动走 mock
 - [x] store 全面接 API（news/comments 离线优先 + 后台同步；user 增 token 与 login/logout）
 - [x] 真实图片渲染（`utils/image.ts` 真实 URL 优先 / 渐变兜底）+ 视频变体 `<video>` 播放

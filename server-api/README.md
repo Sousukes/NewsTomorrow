@@ -629,6 +629,17 @@ alembic check                       # 检测 models 与迁移是否漂移
 > 另：CI 的「启动后端」步骤在探活失败时**显式失败并打印日志**——此前探活失败也会被
 > 当成成功，契约检查可能跑在一个根本没起来的后端上。
 
+> **CI 已内置依赖漏洞审计**（C8）：后端 job 在装完依赖后跑 `pip-audit`，
+> 前端 job 在 `npm ci` 后跑 `npm audit --audit-level=high`。两个实现细节：
+> ① `pip-audit` 审计的是**整个已安装环境**，venv 自带的 pip 也在范围内——
+> 所以步骤里先 `pip install --upgrade pip`，否则 CI 会红在与项目无关的
+> 旧版 pip 上（PYSEC-2026-3721），这种「狼来了」最伤审计可信度；
+> ② `npm audit` 走 npmjs 官方 registry 的审计端点，CI 默认 registry 即可，
+> **本机用 npmmirror 的同学跑不了**（镜像不实现 `/-/npm/v1/security/*`，
+> 报 `NOT_IMPLEMENTED`）——需要本地自查时临时加
+> `--registry=https://registry.npmjs.org`。阈值取 high：低危噪音交给
+> dependabot / 人工，不让 CI 变成天天红的狼来了。
+
 - `migrations/env.py` 复用 `app.config.DATABASE_URL` 与 `Base.metadata`（**单一配置源**）。
 - 已含迁移：`0001_init`（基线全量建表）、`0002_news_published_at`、`0003_msg_fk_set_null`、
   `0004_feed_order_reads`（复合索引 `ix_news_feed` + `comments.created_at` + `message_reads`）、
