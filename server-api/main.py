@@ -256,6 +256,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": code, "message": message, "data": None},
+        # 透传 exc.headers：429 锁定（C2）靠 Retry-After 告诉客户端等多久，
+        # 丢了它就只剩一句"请稍后再试"，客户端无法合理安排重试
+        headers=exc.headers,
     )
 
 

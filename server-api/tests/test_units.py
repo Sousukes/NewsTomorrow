@@ -69,6 +69,29 @@ class TestFixedWindowLimiter:
         assert rl.allow("ip:/api/auth/login", 2)[0] is False
         assert rl.allow("ip:/api/news", 2)[0] is True
 
+    def test_blocked_peeks_without_consuming(self):
+        """C2：blocked 只窥探不计次——锁定预检不能给计数器续期。"""
+        rl = FixedWindowLimiter(window_seconds=60)
+        for _ in range(4):
+            rl.allow("k", 5)
+        assert rl.blocked("k", 5) is False
+        # 反复窥探不改变计数（若用 allow 做预检，被拒请求会把窗口无限续期）
+        for _ in range(10):
+            assert rl.blocked("k", 5) is False
+        rl.allow("k", 5)  # 第 5 次：达到上限
+        assert rl.blocked("k", 5) is True
+        assert rl.blocked("k", 5) is True  # 窥探本身不加数
+
+    def test_reset_clears_count(self):
+        """C2：成功登录即清零（reset），失败计数只反映连续失败。"""
+        rl = FixedWindowLimiter(window_seconds=60)
+        for _ in range(5):
+            rl.allow("k", 5)
+        assert rl.blocked("k", 5) is True
+        rl.reset("k")
+        assert rl.blocked("k", 5) is False
+        assert rl.allow("k", 5)[0] is True  # 清零后重新计数
+
 
 # ----------------------------- 密码与JWT -----------------------------
 

@@ -64,6 +64,12 @@ RATE_LIMIT_ENABLED = _env("RATE_LIMIT_ENABLED", "true").lower() in ("1", "true",
 RATE_LIMIT_PER_MINUTE = int(_env("RATE_LIMIT_PER_MINUTE", "120"))
 LOGIN_RATE_LIMIT_PER_MINUTE = int(_env("LOGIN_RATE_LIMIT_PER_MINUTE", "10"))
 RATE_LIMIT_WINDOW_SECONDS = int(_env("RATE_LIMIT_WINDOW_SECONDS", "60"))
+# 登录失败锁定（C2，账号维度）：与 IP 限流互补——IP 维度防不住
+# 「换 IP 打同一个账号」。同一账号连续失败达上限即临时锁定整个窗口，
+# 锁定期间连密码验证都不做（否则继续尝试会无限续期）。
+# 默认 5 次 / 15 分钟：给真人足够的手滑空间，又把爆破压到 5 次/15 分钟。
+LOGIN_FAIL_LIMIT = int(_env("LOGIN_FAIL_LIMIT", "5"))
+LOGIN_FAIL_WINDOW_SECONDS = int(_env("LOGIN_FAIL_WINDOW_SECONDS", "900"))
 # Redis 连接串：设置后限流改用 Redis 共享计数（多实例/多 worker 正确）；留空用进程内实现
 REDIS_URL = _env("REDIS_URL")
 

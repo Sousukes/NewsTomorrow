@@ -4,6 +4,7 @@
 两套规则必然漂移，而用户分不清自己的名字是从哪个入口设的——漂移的方向
 永远是「注册放过、改名拦住」，用户侧表现为「同一个名字有时能设有时不能」。
 """
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user
+from ..login_guard import lock_detail, record_failure, record_success
 from ..models import User, now_str
 from ..nickname_moderation import (
     RESULT_BLOCK,
@@ -25,6 +27,8 @@ from ..security import create_token, hash_password, verify_password
 from .admin import is_admin
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+logger = logging.getLogger("toutiao.auth")
 
 
 def _token_payload(user: User, db: Session) -> dict:
@@ -97,12 +101,28 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
 def login(body: LoginIn, db: Session = Depends(get_db)):
     if not re.fullmatch(r"1\d{10}", body.phone):
         raise HTTPException(status_code=400, detail={"code": 40001, "message": "请输入正确的 11 位手机号"})
+    # 账号维度锁定（C2）：IP 限流防不住「换 IP 打同一个账号」。锁定判定
+    # 先于查库与验密——已锁账号连哈希都不算（成本趋零），且继续尝试
+    # 不会给锁定期续期。不存在的账号同样计数：否则「同号有时 429
+    # 有时 401」就是账号枚举 oracle。
+    locked = lock_detail(body.phone)
+    if locked is not None:
+        logger.warning("登录锁定生效 phone=%s", body.phone)
+        raise HTTPException(
+            status_code=429,
+            detail={"code": 42902, "message": locked["message"]},
+            headers={"Retry-After": str(locked["retry_after"])},
+        )
     user = db.query(User).filter(User.phone == body.phone).first()
     # 账号不存在与密码错误返回同一提示，避免账号枚举
     if user is None or not verify_password(body.password, user.password_hash):
+        if record_failure(body.phone):
+            logger.warning("登录失败达上限，账号进入锁定 phone=%s", body.phone)
         raise HTTPException(
             status_code=401, detail={"code": 40101, "message": "手机号或密码错误，请重新输入"}
         )
+    # 成功即清零：失败计数只反映「连续」失败，不让历史手滑累积成锁定
+    record_success(body.phone)
     return ok(_token_payload(user, db), message="登录成功")
 
 

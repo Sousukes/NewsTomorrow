@@ -32,6 +32,26 @@ class FixedWindowLimiter:
             self._maybe_sweep(now)
             return True, remaining
 
+    def blocked(self, key: str, limit: int) -> bool:
+        """计数是否已达上限——**只窥探、不计次**。
+
+        与 `allow` 的分工：`allow` 既计数又判定，用于「记一次」；
+        本方法只判定，用于「已满额的预检」——若预检也用 `allow`，
+        每个被拒的请求都会给计数器 +1，把窗口期无限续期
+        （登录失败锁定的锁定判定就属于这类预检，见 `login_guard`）。
+        """
+        now = time.time()
+        with self._lock:
+            q = self._hits[key]
+            while q and now - q[0] >= self.window:
+                q.popleft()
+            return len(q) >= limit
+
+    def reset(self, key: str) -> None:
+        """清除计数（用于「成功即清零」类语义：失败计数只反映连续失败）。"""
+        with self._lock:
+            self._hits.pop(key, None)
+
     def _maybe_sweep(self, now: float) -> None:
         """定期清理过期 key，避免内存无限增长。"""
         if now - self._last_sweep < self.window:
@@ -69,6 +89,24 @@ class RedisFixedWindowLimiter:
             logger.warning("Redis 限流异常，本次放行：%s", e)
             return True, limit
         return count <= limit, max(limit - count, 0)
+
+    def blocked(self, key: str, limit: int) -> bool:
+        """计数是否已达上限——只读当前窗口切片，**不计数**（与内存实现同语义）。"""
+        bucket = int(time.time() // self.window)
+        try:
+            count = int(self._client.get(f"rl:{key}:{bucket}") or 0)
+        except Exception as e:
+            logger.warning("Redis 限流异常，本次按未锁定放行：%s", e)
+            return False
+        return count >= limit
+
+    def reset(self, key: str) -> None:
+        """清除当前窗口切片的计数（成功即清零；上一切片靠 EXPIRE 自然过期）。"""
+        bucket = int(time.time() // self.window)
+        try:
+            self._client.delete(f"rl:{key}:{bucket}")
+        except Exception as e:
+            logger.warning("Redis 限流异常，重置失败（不影响本次业务）：%s", e)
 
 
 def build_limiter(window_seconds: int = 60, redis_url: str = ""):
