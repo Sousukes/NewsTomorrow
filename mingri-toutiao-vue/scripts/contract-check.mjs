@@ -7,7 +7,7 @@
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
  * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）、
- * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）。
+ * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）、令牌双轨与续期（P1-38/C1）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -157,6 +157,35 @@ const run = async () => {
     const auth = await request('/auth/login', { method: 'POST', body: { phone, password } });
     token = auth.token;
     check('POST /auth/login 返回 token+user', !!token && !!auth.user?.name, auth.user?.name);
+
+    // C1 令牌双轨：access（短，业务接口）/ refresh（长，只能换 access）
+    const refreshToken = auth.refreshToken ?? '';
+    check(
+      '登录下发 refreshToken 与 expiresIn',
+      !!refreshToken && Number(auth.expiresIn) > 0,
+      `expiresIn=${auth.expiresIn}`,
+    );
+
+    // 类型隔离是双轨方案的前提：refresh 若能被业务接口接受，「短 access」形同虚设
+    let rtRejected = false;
+    try {
+      await request('/me/favorites', { token: refreshToken });
+    } catch (e) {
+      rtRejected = e.message === '未登录或登录已过期';
+    }
+    check('refreshToken 访问业务接口 → 401', rtRejected);
+
+    // 换发：access 过期后靠 refresh 静默续期，用户不掉线
+    const renewed = await request('/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken },
+    });
+    check('用 refreshToken 换发新 access', !!renewed.token && renewed.token !== token);
+    const renewedMe = await request('/me/favorites', { token: renewed.token });
+    check(
+      '换发后的 access 可用（是 access 而非 refresh）',
+      Array.isArray(renewedMe.ids) && Array.isArray(renewedMe.list),
+    );
   }
 
   // 5) 鉴权：无 token 发评论应被拒

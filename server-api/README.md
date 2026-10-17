@@ -219,6 +219,41 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 > ⚠️ `/api/news/search` 必须声明在 `/api/news/{news_id}` 之前，否则会被当成 id 匹配。
 > 📌 统一错误契约：所有错误（含 422 参数校验）均返回 `{ code, message, data }`；错误码见文末。
 
+## 令牌双轨（C1，access / refresh）
+
+此前全站只有一张 7 天令牌。风险不在「7 天」这个数字，而在**只有一张令牌、
+没有任何缩短手段**：一旦泄露（XSS / 日志 / 共享设备），攻击窗口就是整整 7 天。
+现拆为两类（`app/security.py`）：
+
+| | 类型 `typ` | 默认有效期 | 用途 | 配置 |
+| --- | --- | --- | --- | --- |
+| access | `access` | **30 分钟** | 访问业务接口 | `JWT_ACCESS_EXPIRE_MINUTES` |
+| refresh | `refresh` | **7 天** | **只能**调 `POST /api/auth/refresh` 换发 access | `JWT_REFRESH_EXPIRE_MINUTES` |
+
+- **类型校验是安全前提**：`decode_token_full(expect_type=...)` 按类型拒绝。
+  refresh 若能被业务接口接受，攻击者拿到它就能当永久 access 用，「短 access」形同虚设。
+  缺 `typ` 的历史令牌按 access 处理（迁移期兼容，它们最多再活到自身过期）。
+- **有效期按类型取默认**：`create_token(type=refresh)` 不传 `expires_minutes` 时
+  取 refresh 的时长，而不是一律 30 分钟——否则 refresh 被静默签成短命的，
+  会话 30 分钟即死，且从代码上看不出错（类型对、签名对，只是短）。
+- **兼容旧变量**：`JWT_EXPIRE_MINUTES` 的历史语义就是那张长令牌，故映射到 refresh。
+  老部署升级后 refresh 时长不变，access 自动收窄为 30 分钟。
+- **登录 / 注册 / 续期**均下发 `{ token, refreshToken, expiresIn, user }`。
+  新增两项**刻意可选**：已部署的旧客户端只认 `token`，设为必填等于宣布它们不合规。
+- **续期**：`POST /api/auth/refresh` 优先用 `body.refreshToken`；不带 body 时
+  回退到 `Authorization` 的 access 滑动续期（旧客户端 / 契约脚本）。
+  refresh 无效/过期/类型不符 → **401 / 40100，且不回退**——否则「长令牌已失效」
+  会被掩盖成「还能续」，用户能靠一张过期令牌无限滑下去。续期返回**新的一对**
+  令牌（滑动，活跃用户不会在 7 天时被硬登出）。
+- **吊销不分类型**：`/logout` 自增 `token_version`，两类令牌同时失效。
+- **已知取舍**：refresh **未做一次性重放检测**（无状态；换发后旧 refresh 在自身
+  过期前仍可用）。要做检测需引入令牌表或 jti 黑名单，当前依赖 `token_version`
+  提供「用户主动登出即全部失效」的能力。
+
+前端配套见 `mingri-toutiao-vue/src/api/http.ts`：三键同写同清
+（`token` / `refresh-token` / `token-exp`）、到期前 60 秒主动续期（并发单飞）、
+401 时先续期重试一次、仍失败才清登录态。
+
 ## 管理端鉴权（router 级，C6）
 
 管理端鉴权**不在端点函数体里**，而是挂在 router 上：

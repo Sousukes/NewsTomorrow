@@ -1169,8 +1169,25 @@ function commentOut(root, all) {
   return out;
 }
 
-/** token → { phone } */
+/** token（access）→ { phone } */
 const tokens = new Map();
+/**
+ * refresh 令牌 → { phone }（C1）。
+ *
+ * **刻意与 access 分表**：`auth()` 只查 `tokens`，因此 refresh 令牌**天然**
+ * 被所有业务接口拒绝——与后端 `decode_token_full(expect_type=access)` 同口径。
+ * 合成一张表就得在每个路由里再判类型，那正是漏判的温床。
+ */
+const refreshTokens = new Map();
+
+/** 签发一对令牌（access `tk_` / refresh `rt_`），与后端 30 分钟 / 7 天同形状 */
+function issueTokenPair(phone) {
+  const token = `tk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const refreshToken = `rt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  tokens.set(token, { phone });
+  refreshTokens.set(refreshToken, { phone });
+  return { token, refreshToken };
+}
 
 /**
  * 收藏 / 浏览历史（按手机号隔离，进程内存储）。
@@ -1670,8 +1687,7 @@ const server = createServer(async (req, res) => {
       return fail(res, 400, 40001, '请输入正确的 11 位手机号');
     if (String(password ?? '') !== '123456')
       return fail(res, 401, 40101, '手机号或密码错误，请重新输入');
-    const token = `tk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    tokens.set(token, { phone });
+    const { token, refreshToken } = issueTokenPair(phone);
     seenPhones.add(String(phone));
     // 账号昵称随登录下发（P1-24，与后端 _token_payload 同口径）：前端「我的」页
     // 据此展示，改名成功后同步；namePendingReview 让个人中心在下次打开时仍能
@@ -1679,6 +1695,37 @@ const server = createServer(async (req, res) => {
     const acc = accountOf(phone);
     return ok(res, {
       token,
+      // C1：与后端 `_token_payload` 同形状（refreshToken + access 剩余秒数）
+      refreshToken,
+      expiresIn: 1800,
+      user: {
+        id: acc.id,
+        name: acc.name,
+        phone,
+        isAdmin: isAdminPhone(phone),
+        namePendingReview: acc.pendingReview,
+      },
+    });
+  }
+
+  // POST /auth/refresh（C1）
+  if (head === 'auth' && a === 'refresh' && method === 'POST') {
+    // 与后端同序：优先 body 里的 refreshToken，缺省才回退到 Authorization 的 access
+    const body = (await readBody(req).catch(() => ({}))) ?? {};
+    const rt = String(body.refreshToken ?? '').trim();
+    let phone;
+    if (rt) {
+      phone = refreshTokens.get(rt)?.phone ?? null;
+    } else {
+      const t = auth(req);
+      phone = t ? (tokens.get(t)?.phone ?? null) : null;
+    }
+    if (!phone) return fail(res, 401, 40100, '未登录或登录已过期');
+    const pair = issueTokenPair(phone);
+    const acc = accountOf(phone);
+    return ok(res, {
+      ...pair,
+      expiresIn: 1800,
       user: {
         id: acc.id,
         name: acc.name,
@@ -1693,7 +1740,12 @@ const server = createServer(async (req, res) => {
   if (head === 'auth' && a === 'logout' && method === 'POST') {
     const t = requireAuth(req, res);
     if (!t) return;
+    const phone = tokens.get(t)?.phone;
     tokens.delete(t);
+    // 吊销必须**两类同时**：只删 access、留下 refresh，等于登出后仍能换发令牌
+    for (const [rt, rec] of refreshTokens) {
+      if (rec.phone === phone) refreshTokens.delete(rt);
+    }
     return ok(res, null);
   }
 

@@ -50,7 +50,18 @@ DEFAULT_JWT_SECRET = "dev-secret-change-me"
 JWT_SECRET = _env("JWT_SECRET", DEFAULT_JWT_SECRET)
 JWT_SECRET_IS_DEFAULT = JWT_SECRET == DEFAULT_JWT_SECRET
 JWT_ALG = "HS256"
-JWT_EXPIRE_MINUTES = int(_env("JWT_EXPIRE_MINUTES", str(60 * 24 * 7)))  # 默认 7 天
+# ---- 令牌双轨（C1）----
+# access：**短**（默认 30 分钟）。此前只有一张 7 天令牌，一旦泄露（XSS / 日志 /
+# 共享设备）攻击窗口就是整整 7 天，且没有任何缩短手段。
+JWT_ACCESS_EXPIRE_MINUTES = max(1, int(_env("JWT_ACCESS_EXPIRE_MINUTES", "30")))
+# refresh：**长**（默认 7 天），只能换 access，**不能直接访问业务接口**
+# （`get_current_user` 只认 typ=access，见 security.decode_token_full）。
+# 兼容旧变量 JWT_EXPIRE_MINUTES：它的历史语义就是「唯一那张长令牌」，故映射到 refresh，
+# 老部署升级后 refresh 时长不变、access 自动收窄为 30 分钟。
+JWT_REFRESH_EXPIRE_MINUTES = max(
+    1,
+    int(_env("JWT_REFRESH_EXPIRE_MINUTES", _env("JWT_EXPIRE_MINUTES", str(60 * 24 * 7)))),
+)
 
 # CORS：开发默认放开；生产默认同源（不跨域），需显式配置 CORS_ORIGINS
 CORS_ORIGINS: list[str] = [o.strip() for o in _env("CORS_ORIGINS").split(",") if o.strip()] or (

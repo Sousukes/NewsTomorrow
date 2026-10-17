@@ -499,7 +499,9 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 数据访问统一走 `api/`，**未配置后端时自动走内置 mock**（离线可运行）；配置 `VITE_API_BASE` 即切换为真实后端。
 
 - **开关**（`.env`）：`VITE_API_BASE=https://api.example.com` 指向真实后端；`VITE_USE_MOCK=true` 可强制 mock。
-- **`http.ts`**：统一 `fetch` 客户端——自动注入 `Authorization: Bearer <token>`、约定后端返回 `{ code, message?, data }`（`code` 0/200 为成功）、token 持久化（`getToken`/`setToken`）、`ApiError`。
+- **`http.ts`**：统一 `fetch` 客户端——自动注入 `Authorization: Bearer <token>`、约定后端返回 `{ code, message?, data }`（`code` 0/200 为成功）、token 持久化、`ApiError`。
+  - **令牌双轨（C1）**：`token`（access，30 分钟）/ `refresh-token`（refresh，7 天）/ `token-exp`（到期时刻）三键由 `setSession()` 同写、`clearSession()` 同清——只清 access 会留下一张仍能换发令牌的长令牌。
+  - **自动续期**：access 进入到期前 60 秒窗口即先换发再发请求（并发**单飞**，只打一次 `/auth/refresh`）；撞上 401 时先用 refresh 续期并**重试一次**，仍失败才清登录态并广播 `UNAUTHORIZED_EVENT`。限制「一次请求最多续一次」，否则「续期成功但服务端仍 401」会死循环。mock 模式跳过续期。
 - **`news.ts`**：`fetchNewsPage` / `fetchNews` / `fetchNewsById` / `searchNews` / `fetchRelated`（`GET /news/search`、`GET /news/:id/related`）→ `NewsItem`，含后端字段归一化（`normalizeNewsItem` 对外导出，供 `api/me` 复用）。**`content`（正文）只由 `GET /news/:id` 下发**（E1）：列表一页 20 条，每条几 KB 是纯浪费；归一化对该字段是可选字符串，详情页按 `\n` 切段渲染，缺省显示「暂无正文」。
 - **`comments.ts`**：`listCommentsPage` / `listComments` / `listRepliesPage` / `createComment`（`parentId` 非空时为回复）/ `setCommentLike` / `deleteComment` → `GET/POST/PATCH/DELETE /news/:id/comments` 与 `GET /news/:id/comments/:cid/replies`（回复列表，时间正序游标分页；root 已删返回空）。
 - **`messages.ts`**：`fetchMessagesPage` / `fetchMessages` / `fetchUnreadCount` / `markMessageRead` / `markAllMessagesRead` → `GET /messages`、`GET /messages/unread-count`、`PATCH /messages/{id}`（**需登录**，不可见/不存在同码 40400）、`POST /messages/read-all`。

@@ -10,8 +10,9 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..config import JWT_ACCESS_EXPIRE_MINUTES, JWT_REFRESH_EXPIRE_MINUTES
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, get_current_user_optional
 from ..login_guard import lock_detail, record_failure, record_success
 from ..models import User, now_str
 from ..nickname_moderation import (
@@ -22,8 +23,15 @@ from ..nickname_moderation import (
     validate_nickname_shape,
 )
 from ..response import ok
-from ..schemas import LoginIn, RegisterIn, TokenOut
-from ..security import create_token, hash_password, verify_password
+from ..schemas import LoginIn, RefreshIn, RegisterIn, TokenOut
+from ..security import (
+    TOKEN_TYPE_ACCESS,
+    TOKEN_TYPE_REFRESH,
+    create_token,
+    decode_token_full,
+    hash_password,
+    verify_password,
+)
 from .admin import is_admin
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -32,8 +40,31 @@ logger = logging.getLogger("toutiao.auth")
 
 
 def _token_payload(user: User, db: Session) -> dict:
+    """签发**双令牌**（C1）。
+
+    - `token`（access）：短（默认 30 分钟），用于业务接口。字段名沿用 `token`，
+      老客户端 / 契约脚本无需改动；
+    - `refreshToken`：长（默认 7 天），**只能**调 `/auth/refresh` 换新 access，
+      直接访问业务接口会被 `get_current_user` 拒绝（typ 校验）；
+    - `expiresIn`：access 剩余秒数，前端据此提前续期（而不是等 401）。
+
+    吊销：两者都带 `ver`，`/logout` 自增 `token_version` 会让**新旧两类令牌同时失效**。
+    """
+    ver = user.token_version or 0
     return {
-        "token": create_token(user.id, user.token_version or 0),
+        "token": create_token(
+            user.id,
+            ver,
+            token_type=TOKEN_TYPE_ACCESS,
+            expires_minutes=JWT_ACCESS_EXPIRE_MINUTES,
+        ),
+        "refreshToken": create_token(
+            user.id,
+            ver,
+            token_type=TOKEN_TYPE_REFRESH,
+            expires_minutes=JWT_REFRESH_EXPIRE_MINUTES,
+        ),
+        "expiresIn": JWT_ACCESS_EXPIRE_MINUTES * 60,
         # isAdmin 让前端直接决定是否展示管理入口，省掉一次探测请求；
         # 只下发布尔值，不下发白名单本身（避免把配置暴露给客户端）。
         # 双源判定（env ∪ admin_users 表）需要查库，故 db 必须透传到这里。
@@ -134,11 +165,48 @@ def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)
     return ok(None, message="已退出登录")
 
 
-@router.post("/refresh", response_model=None)
-def refresh(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """滑动续期：用当前有效 token 换取一张新 token。
+def _user_from_refresh_token(token: str, db: Session) -> User | None:
+    """用 refresh 令牌定位用户（C1）。
 
-    不改变 `token_version`，因此旧 token 在过期前仍可用（标准 access-token 续期语义）。
-    isAdmin 随续期重新判定（P1-14 起白名单可在应用内变动，不能把标志写死在 token 里）。
+    与 `deps._user_from_token` 同构，唯一差别是 `expect_type=TOKEN_TYPE_REFRESH`：
+    **类型不符一律拒绝**，否则 refresh 令牌就能当 access 用，「短 access」形同虚设。
     """
+    decoded = decode_token_full(token, expect_type=TOKEN_TYPE_REFRESH)
+    if decoded is None:
+        return None
+    user_id, token_version = decoded
+    user = db.get(User, user_id)
+    # 吊销校验与 access 完全一致：/logout 自增 token_version → 两类令牌同时失效
+    if user is None or (user.token_version or 0) != token_version:
+        return None
+    return user
+
+
+@router.post("/refresh", response_model=None)
+def refresh(
+    body: RefreshIn | None = None,
+    current: User | None = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """续期（C1）：换新 access。
+
+    两条入口，**优先 refresh 令牌**：
+
+    1. `body.refreshToken`（长令牌，7 天）：access 短（默认 30 分钟）之后，
+       用户不能靠已过期的 access 续期，必须走这条；
+    2. 缺省时回退到 `Authorization` 里的 access 滑动续期（旧客户端 / 契约脚本
+        / 既有测试的路径，升级期不打断）。
+
+    refresh 令牌无效时**不回退**到 access：那会把「refresh 已失效」掩盖成
+    「还能续」，用户在 7 天后被静默续期下去，与设定保留期相悖。
+
+    不改变 `token_version`，因此旧 access 在过期前仍可用（标准续期语义）。
+    isAdmin 随续期重新判定（P1-14 起白名单可在应用内变动，不能把标志写死在令牌里）。
+    """
+    refresh_token = ((body.refreshToken if body else "") or "").strip()
+    user = _user_from_refresh_token(refresh_token, db) if refresh_token else current
+    if user is None:
+        raise HTTPException(
+            status_code=401, detail={"code": 40100, "message": "未登录或登录已过期"}
+        )
     return ok(_token_payload(user, db), message="已续期")

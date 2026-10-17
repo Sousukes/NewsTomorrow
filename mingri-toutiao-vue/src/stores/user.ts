@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { login as apiLogin, logout as apiLogout } from '@/api/auth';
-import { UNAUTHORIZED_EVENT, getToken, setToken } from '@/api/http';
+import { UNAUTHORIZED_EVENT, clearSession, getToken, setSession } from '@/api/http';
 import {
   MARKS_SYNC_SUPPORTED,
   addFavorite,
@@ -297,7 +297,8 @@ export const useUserStore = defineStore('user', () => {
   async function login(phone: string, password: string) {
     const res = await apiLogin({ phone, password });
     token.value = res.token;
-    setToken(res.token);
+    // 写入整对令牌（access + refresh + 到期时刻）：登录是唯一一次拿到长令牌的时机
+    setSession(res);
 
     const nextUserId = typeof res.user?.id === 'number' ? res.user.id : null;
     persistMarks(); // 先把当前（匿名）作用域落盘，再切换
@@ -332,7 +333,8 @@ export const useUserStore = defineStore('user', () => {
       /* 网络异常也保证本地退出 */
     }
     token.value = '';
-    setToken('');
+    // 一并清掉 refreshToken：只清 access 会留下一张仍可换发令牌的长令牌（C1）
+    clearSession();
     isLoggedIn.value = false;
     isAdmin.value = false;
     name.value = '';

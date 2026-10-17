@@ -32,6 +32,18 @@ class LoginIn(BaseModel):
     password: str
 
 
+class RefreshIn(BaseModel):
+    """刷新令牌入参（C1）。
+
+    - `refreshToken`：长令牌，**只能**用来换 access；走 body 而不是
+      `Authorization` 头——头里放的是 access，两者不能互相覆盖；
+    - 允许缺省：老客户端只带 `Authorization`（用当前 access 滑动续期），
+      契约脚本与既有测试同样走这条路径。缺省时后端回退到 access 续期。
+    """
+
+    refreshToken: str = ""
+
+
 class CommentCreateIn(BaseModel):
     content: str = Field(min_length=1, max_length=500)
     # 回复某条评论时传其 id；不传表示发表主评论。
@@ -66,6 +78,11 @@ class UserOut(BaseModel):
 
 class TokenOut(BaseModel):
     token: str
+    # C1 新增两项：**刻意可选**——已部署的旧客户端只认 `token`，
+    # 把它们设为必填等于在升级瞬间宣布所有旧客户端不合规。
+    refreshToken: str | None = None
+    """access 剩余秒数：前端据此**提前**续期，而不是等撞上 401 再补救。"""
+    expiresIn: int | None = None
     user: UserOut
 
 

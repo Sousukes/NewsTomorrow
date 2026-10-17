@@ -635,4 +635,30 @@ describe('stores/user 昵称（P1-24）', () => {
     expect(s.name).toBe('');
     expect(JSON.parse(localStorage.getItem(PREFS_KEY)!).name).toBe('');
   });
+
+  it('登录写入整对令牌，登出一并清空（C1）', async () => {
+    // 只清 access、留下 refresh，等于登出后仍握着一张能换发令牌的长令牌
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 'a',
+      refreshToken: 'r',
+      expiresIn: 1800,
+      user: { id: 1, name: '用户' },
+    });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+
+    expect(localStorage.getItem('mingri-toutiao:token')).toBe('a');
+    expect(localStorage.getItem('mingri-toutiao:refresh-token')).toBe('r');
+    expect(localStorage.getItem('mingri-toutiao:token-exp')).toBeTruthy();
+
+    vi.mocked(authApi.logout).mockResolvedValue(undefined);
+    await s.logout();
+
+    expect(localStorage.getItem('mingri-toutiao:token')).toBeNull();
+    expect(localStorage.getItem('mingri-toutiao:refresh-token')).toBeNull();
+    expect(localStorage.getItem('mingri-toutiao:token-exp')).toBeNull();
+  });
 });

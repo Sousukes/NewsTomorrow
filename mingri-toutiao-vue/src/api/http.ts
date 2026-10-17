@@ -1,6 +1,23 @@
-import { API_BASE } from './config';
+import { API_BASE, USE_MOCK } from './config';
 
 const TOKEN_KEY = 'mingri-toutiao:token';
+/**
+ * refresh 令牌**单独分键**（C1）。
+ * 与 access 混在一个键里会在登出/清理时漏删其一，留下"半登录态"。
+ */
+const REFRESH_TOKEN_KEY = 'mingri-toutiao:refresh-token';
+/** access 到期时刻（epoch ms）；`0` = 未知（不主动续期，交给 401 兜底） */
+const EXPIRES_KEY = 'mingri-toutiao:token-exp';
+/** 提前多久续期：宁可早一点，也别在请求途中撞上过期造成一次失败往返 */
+const REFRESH_MARGIN_MS = 60_000;
+
+/** 登录响应里与令牌相关的部分（`token` 必填，其余为 C1 新增且刻意可选） */
+export interface SessionPayload {
+  token?: string;
+  refreshToken?: string;
+  /** access 剩余秒数 */
+  expiresIn?: number;
+}
 
 /** 401 时广播的事件名：由 user store / 路由监听后清理登录态并跳转 */
 export const UNAUTHORIZED_EVENT = 'mingri:unauthorized';
@@ -36,6 +53,65 @@ export function setToken(token: string) {
   }
 }
 
+export function getRefreshToken(): string {
+  try {
+    return localStorage.getItem(REFRESH_TOKEN_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function setRefreshToken(token: string) {
+  try {
+    if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
+    else localStorage.removeItem(REFRESH_TOKEN_KEY);
+  } catch {
+    /* 隐私模式静默失败 */
+  }
+}
+
+/** 读取到期时刻；非法值一律按"未知"处理（不主动续期） */
+function getExpiresAt(): number {
+  try {
+    const raw = Number(localStorage.getItem(EXPIRES_KEY) ?? 0);
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function setExpiresAt(ms: number) {
+  try {
+    if (ms > 0) localStorage.setItem(EXPIRES_KEY, String(ms));
+    else localStorage.removeItem(EXPIRES_KEY);
+  } catch {
+    /* 隐私模式静默失败 */
+  }
+}
+
+/**
+ * 写入一次登录/续期下发的令牌对（C1）。
+ *
+ * 三个键**同写同清**：只更新 token 而留下旧 refreshToken，等于登出后仍留着
+ * 一张可换发令牌的长令牌——那正是双轨方案要消除的东西。
+ */
+export function setSession(payload: SessionPayload): void {
+  const data = payload ?? {};
+  setToken(data.token ?? '');
+  setRefreshToken(data.refreshToken ?? '');
+  // 没有 expiresIn 就不记到期时间：宁可不主动续期（401 时会兜底），
+  // 也别拿一个猜出来的时间反复打续期接口。
+  const seconds = typeof data.expiresIn === 'number' ? data.expiresIn : 0;
+  setExpiresAt(seconds > 0 ? Date.now() + seconds * 1000 : 0);
+}
+
+/** 清理登录态（登出 / 401 兜底）：三个键一并清空 */
+export function clearSession(): void {
+  setToken('');
+  setRefreshToken('');
+  setExpiresAt(0);
+}
+
 type QueryValue = string | number | undefined | null;
 
 interface RequestOptions {
@@ -68,15 +144,70 @@ function isRetriable(err: unknown): boolean {
   return err instanceof TypeError; // fetch 网络层失败
 }
 
-/** 401 统一处理：清除本地 token 并广播事件（不在此处跳转，避免耦合路由） */
+/** 401 统一处理：清除本地令牌对并广播事件（不在此处跳转，避免耦合路由） */
 function handleUnauthorized() {
   // 只有「原本已登录」才算登录态失效：游客请求需登录的接口同样会拿到 401，
   // 那不是会话过期，广播事件会把游客强行跳到登录页（见 main.ts 的监听）。
   const hadToken = Boolean(getToken());
-  setToken('');
+  clearSession();
   if (hadToken && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
   }
+}
+
+/** access 是否已进入"该续期"的窗口 */
+function isExpiringSoon(): boolean {
+  const exp = getExpiresAt();
+  if (!exp) return false;
+  return Date.now() >= exp - REFRESH_MARGIN_MS;
+}
+
+/**
+ * 真正去换一张 access（C1）。
+ *
+ * 刻意**不走** `request()`：`request` 里又会调 `ensureFreshToken`，形成递归。
+ */
+async function callRefresh(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+  try {
+    const res = await fetch(buildUrl('/auth/refresh'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json().catch(() => null)) as { data?: SessionPayload } | null;
+    const data = body?.data;
+    if (!data?.token) return false;
+    setSession(data);
+    return true;
+  } catch {
+    // 网络故障不在此处清登录态：可能是断网，交给上层按 401/网络错误分别处理
+    return false;
+  }
+}
+
+/** 并发合并：多个请求同时发现令牌将过期时，只打一次续期接口 */
+let refreshInFlight: Promise<boolean> | null = null;
+
+/**
+ * 保证 access 可用。
+ *
+ * @param force 已撞上 401 时强制换发（此时不再看到期时间）
+ * @returns 是否可以继续发请求
+ */
+function ensureFreshToken(force = false): Promise<boolean> {
+  // mock 模式没有真实令牌与续期接口，任何续期尝试都是噪声
+  if (USE_MOCK) return Promise.resolve(false);
+  if (!getToken()) return Promise.resolve(false);
+  if (!force && !isExpiringSoon()) return Promise.resolve(true);
+  if (!refreshInFlight) {
+    refreshInFlight = callRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
 }
 
 async function doFetch(path: string, options: RequestOptions): Promise<Response> {
@@ -107,8 +238,13 @@ async function doFetch(path: string, options: RequestOptions): Promise<Response>
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const maxRetries = options.retries ?? (method === 'GET' ? DEFAULT_RETRIES : 0);
+  /** 本次请求是否已因 401 续过期：**一次请求最多续一次**，否则会被服务端循环 401 */
+  let renewed = false;
 
   for (let attempt = 0; ; attempt++) {
+    // C1：access 短（默认 30 分钟），快到期就先换一张再发，避免无谓的 401 往返
+    await ensureFreshToken();
+
     let res: Response;
     try {
       res = await doFetch(path, options);
@@ -120,7 +256,15 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       throw e;
     }
 
-    if (res.status === 401) handleUnauthorized();
+    if (res.status === 401) {
+      // 过期是最常见的 401 原因：先换令牌重试一次，别一上来就清登录态把用户踢走。
+      // 续期失败（refresh 也过期 / 已登出）才按会话失效处理。
+      if (!renewed && (await ensureFreshToken(true))) {
+        renewed = true;
+        continue;
+      }
+      handleUnauthorized();
+    }
 
     // 非 2xx：优先透传后端返回的 message（如登录失败提示），兜底用状态码文案
     if (!res.ok) {
