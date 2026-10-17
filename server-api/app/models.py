@@ -1,5 +1,5 @@
 """ORM 模型：用户 / 资讯 / 评论 / 消息 / 消息已读。"""
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
@@ -24,7 +24,39 @@ JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 def now_str() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """当前 UTC 时间（ISO 秒精度，**带 +00:00 偏移**）——全库唯一时间口径（A3）。
+
+    统一前此处返回 `datetime.now()`（**本地 naive**），而抓取/种子写 UTC
+    aware、`ranking._iso_seconds` 写 naive-UTC——同一列混三种口径，
+    「同格式 ISO 的字典序即时间序」这条契约被破坏（字符串排序与真实时间
+    序脱节），读侧只能靠 `_to_naive_utc` 打补丁，而补丁对 naive 值
+    （实为本地时间）按 UTC 解释，`now` 参与衰减计算时有整小时 skew。
+
+    现在写入侧统一为 aware UTC；存量数据由迁移 0027 回填（只补偏移、
+    不改数字——顺序精确保留）。**不要再引入 `datetime.now()` 写库**：
+    新代码用本函数，或 `datetime.now(timezone.utc)`。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_dt(value: str | None) -> datetime | None:
+    """解析 ISO 时间串并归一成 **UTC aware** datetime（读取侧唯一入口）。
+
+    - aware 输入（迁移 0027 后的全部存量 + 所有新写入）：转成 UTC；
+    - naive 输入（只可能来自调用方锚点/测试）：**按 UTC 解释**——与
+      0027 的回填口径一致（回填也只补偏移、不改数字），两处对 naive
+      的解释必须相同，否则回填后的数据与读取侧各说各话；
+    - 不可解析返回 None（调用方按"未知"处理）。
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 class User(Base):

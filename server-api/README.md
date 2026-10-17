@@ -1383,6 +1383,32 @@ pytest -q          # 626 项
 
 > 注：`40901`–`40904` 刻意分开——同一错误码承载多种语义会让前端文案错配。
 
+## 时间口径（A3）
+
+**全库唯一口径：UTC aware ISO 串、秒精度**（`2026-10-18T06:30:00+00:00`）。
+迁移 `0027_time_basis_utc` 完成存量回填。
+
+统一前混着三种口径——`now_str()` 写**本地 naive**、`ranking._iso_seconds` 写
+**naive-UTC**、抓取/种子写 **aware-UTC**。后果是「同格式 ISO 的字典序即时间序」
+这条契约不成立：字符串排序与真实时间序脱节，读侧只能靠 `_to_naive_utc` 打补丁，
+而补丁把本地时间当 UTC 解释，衰减计算有整小时 skew。
+
+| 环节 | 唯一入口 | 说明 |
+| --- | --- | --- |
+| 写入 | `models.now_str()` / `datetime.now(timezone.utc)` | **禁止 `datetime.now()`**（本地 naive）写库 |
+| 读取 | `models.parse_dt(value)` | aware → UTC；naive **按 UTC 解释**（与回填口径一致）；不可解析返回 None |
+| 比较 | 字符串比较 | 同格式 ISO 的字典序即时间序，`hot_score_at < cutoff`、`created_at >= since` 都直接成立 |
+
+- **例外**：`news.time` / `messages.time` / `comments.time` 存「1小时前」这类
+  **相对展示文案**，不是时间戳——迁移白名单刻意排除，新增时间列别往这三列上靠。
+- **回填口径（只补偏移、不改数字）**：naive 原样补 `+00:00`，aware 归一到 UTC，
+  脏值保持原样并计数。为什么不按本地时区移位——存量 naive 的来源不可恢复
+  （`hot_score_at` 本就存 naive-UTC 数字，移位会**错**；其余列是写入机器的本地
+  时间，该时区无法从数据反推）。补偏移保住了唯一能验证的性质：**相对顺序精确
+  保留**；绝对值偏差有界（≤ 原时区偏移），对 48h 半衰期的衰减影响小且随时间自愈。
+- **不可逆**：0027 的 `downgrade` 是空操作——回填只改格式，无法区分某行原先是
+  naive 还是本就 aware，强行回退只会把真 UTC 值改成假 naive。
+
 ## 技术说明
 
 - **鉴权**：JWT（HS256，`PyJWT`），`Authorization: Bearer <token>`；密码用 **PBKDF2-SHA256**（标准库，12 万轮 + 随机盐）存储。

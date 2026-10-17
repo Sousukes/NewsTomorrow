@@ -17,7 +17,7 @@ P1-16~P1-18 把「当前状态」做到了位，但那只是**一个点**：
 代价是需要清理（见 `prune`）。
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
@@ -75,7 +75,10 @@ def prune(db: Session, keep_days: int | None = None) -> int:
     而"最近 N 天"才是它的全部价值——过期即无意义。
     """
     days = FEED_HEALTH_KEEP_DAYS if keep_days is None else keep_days
-    cutoff = (datetime.now() - timedelta(days=max(1, days))).isoformat(timespec="seconds")
+    # A3：cutoff 与 `at` 列同为 UTC aware 口径（写入侧 now_str / 存量经
+    # 迁移 0027 回填）。此前 cutoff 是 naive 本地串，与 aware 的 `at`
+    # 做字符串比较会整段错位——字典序只在同格式下才是时间序。
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat(timespec="seconds")
     try:
         n = (
             db.execute(
@@ -94,7 +97,8 @@ def prune(db: Session, keep_days: int | None = None) -> int:
 
 
 def _since(days: int) -> str:
-    return (datetime.now() - timedelta(days=max(1, days))).isoformat(timespec="seconds")
+    """N 天前的 UTC aware 锚点串（与 `at` 列同口径，供字符串比较）。"""
+    return (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat(timespec="seconds")
 
 
 def _rate(ok: int, total: int) -> float | None:

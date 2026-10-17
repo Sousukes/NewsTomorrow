@@ -57,25 +57,31 @@ def _parse_dt(value: str | None) -> datetime | None:
         return None
 
 
-def _to_naive_utc(dt: datetime) -> datetime:
-    """统一成"UTC 的 naive datetime"。
+def _to_utc(dt: datetime) -> datetime:
+    """归一成 **UTC aware** datetime（A3：全库时间基准唯一）。
 
-    `published_at` 存的是 ISO 字符串，实际数据中既有带时区偏移的（RSS/`now_str()`
-    在部分环境带 offset），也有纯 naive 的（种子数据）。两者直接相减会抛
-    `can't subtract offset-naive and offset-aware datetimes`，故先归一。
+    - aware 输入（迁移 0027 后的全部存量 + 所有新写入）转 UTC；
+    - naive 输入（只可能来自调用方传的 `now` 锚点）**按 UTC 解释**——
+      与 0027 回填口径一致（只补偏移、不改数字），且既有测试锚点
+      一直是这个口径，不必改一行用例。
+
+    取代此前的 `_to_naive_utc`：那个函数把 aware 值剥成 naive-UTC，
+    输出串不带偏移，与 `now_str()` 的 aware 格式不可比——正是 A3 要
+    消灭的「两种口径」。现在输出侧（`_iso_seconds`）与写入侧
+    （`now_str`）同为 aware UTC，字典序比较不再需要任何补丁。
     """
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _iso_seconds(dt: datetime) -> str:
-    """锚点时间串：与 `now_str()` 同格式（naive、秒精度）。
+    """锚点时间串：与 `now_str()` 同格式（**UTC aware**、秒精度）。
 
-    同格式 ISO 的字典序即时间序，`hot_score_at` 可直接与 cutoff 字符串比较。
-    传入 tz-aware 也先归一，避免拼出带偏移的串破坏比较。
+    同格式 ISO 的字典序即时间序，`hot_score_at` 可直接与 cutoff 字符串比较
+    （`recompute_hot_scores` 的增量判定就是字符串比较，不是 datetime 比较）。
     """
-    return _to_naive_utc(dt).isoformat(timespec="seconds")
+    return _to_utc(dt).isoformat(timespec="seconds")
 
 
 def time_decay(published_at: str | None, now: datetime) -> float:
@@ -83,7 +89,7 @@ def time_decay(published_at: str | None, now: datetime) -> float:
     dt = _parse_dt(published_at)
     if dt is None:
         return DECAY_UNKNOWN
-    age_hours = (_to_naive_utc(now) - _to_naive_utc(dt)).total_seconds() / 3600.0
+    age_hours = (_to_utc(now) - _to_utc(dt)).total_seconds() / 3600.0
     # 未来时间（时钟偏移/数据错误）视作最新，避免出现负衰减放大分数
     if age_hours <= 0:
         return 1.0
@@ -118,7 +124,7 @@ def score_for(db: Session, news: News, fav_counts: dict[str, int] | None = None,
     """计算单条资讯的热度分（供重算与增量 bump 共用）。"""
     if fav_counts is None:
         fav_counts = _favorite_counts(db)
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     return compute_hot_score(
         news.comment_count or 0,
         fav_counts.get(news.id, 0),
@@ -159,7 +165,7 @@ def recompute_hot_scores(
     周期任务只需负责时间衰减的缓慢推进——无变动也全表重写是纯写入放大
     （dead tuple / WAL），而衰减半衰期 48h，分钟级的分数陈旧对排序无感。
     """
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     fav_counts = _favorite_counts(db)
     q = db.query(News.id, News.comment_count, News.play_count, News.published_at)
     if only_stale:

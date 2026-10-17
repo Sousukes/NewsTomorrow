@@ -14,7 +14,7 @@ P1-21：热度重算从抓取任务中**拆出**为独立 cron。此前后果是
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 
@@ -136,7 +136,7 @@ async def _hot_job() -> None:
     loop = asyncio.get_running_loop()
     try:
         n = await loop.run_in_executor(None, _run_hot_once)
-        _hot_status["last_at"] = datetime.now().isoformat(timespec="seconds")
+        _hot_status["last_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         _hot_status["last_count"] = n
         _hot_status["last_error"] = None
         if n:

@@ -302,3 +302,53 @@ class TestHelpers:
         assert _to_relative_time(now - timedelta(hours=3)) == "3小时前"
         assert _to_relative_time(now - timedelta(days=2)) == "2天前"
         assert _to_relative_time(None) == ""
+
+
+# ----------------------------- 时间基准（A3） -----------------------------
+
+
+class TestTimeBasis:
+    """A3：全库时间口径统一为 UTC aware。
+
+    统一前三种口径并存（本地 naive / naive-UTC / aware），「同格式 ISO 的
+    字典序即时间序」这条契约不成立，读侧靠 `_to_naive_utc` 打补丁，
+    且补丁把本地时间按 UTC 解释，衰减计算有整小时 skew。
+    """
+
+    def test_now_str_is_utc_aware(self):
+        from datetime import datetime, timezone
+
+        from app.models import now_str
+
+        s = now_str()
+        dt = datetime.fromisoformat(s)
+        assert dt.tzinfo is not None, "必须是 aware——naive 会让按日相减抛 TypeError"
+        assert dt.utcoffset() == timezone.utc.utcoffset(None)
+        assert s.endswith("+00:00")
+        # 秒精度：19 位日期时间 + 6 位偏移
+        assert len(s) == 25
+
+    def test_parse_dt_interprets_naive_as_utc(self):
+        """naive 按 UTC 解释——与迁移 0027 的回填口径一致（只补偏移不改数字）。"""
+        from datetime import datetime, timezone
+
+        from app.models import parse_dt
+
+        assert parse_dt("2026-10-18T14:30:00") == datetime(2026, 10, 18, 14, 30, tzinfo=timezone.utc)
+
+    def test_parse_dt_converts_aware_to_utc(self):
+        from datetime import datetime, timezone
+
+        from app.models import parse_dt
+
+        # +08:00 的 14:00 = UTC 06:00
+        assert parse_dt("2026-10-18T14:00:00+08:00") == datetime(
+            2026, 10, 18, 6, 0, tzinfo=timezone.utc
+        )
+
+    def test_parse_dt_handles_garbage(self):
+        from app.models import parse_dt
+
+        assert parse_dt("not-a-time") is None
+        assert parse_dt("") is None
+        assert parse_dt(None) is None

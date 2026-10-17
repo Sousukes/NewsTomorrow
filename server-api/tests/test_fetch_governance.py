@@ -18,7 +18,7 @@ os.environ["SEED_SAMPLE_DATA"] = "false"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["FEED_CRON_ENABLED"] = "false"
 
-from datetime import datetime, timedelta  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 import pytest  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
@@ -127,10 +127,10 @@ class TestGrouping:
         assert len(_group_by_host(srcs)) == 2
 
     def test_too_soon_uses_last_fetched_at(self):
-        recent = {"last_fetched_at": (datetime.now() - timedelta(minutes=2)).isoformat()}
+        recent = {"last_fetched_at": (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()}
         assert _too_soon(recent, 10) is True
         assert _too_soon({"last_fetched_at": None}, 10) is False
-        old = {"last_fetched_at": (datetime.now() - timedelta(minutes=30)).isoformat()}
+        old = {"last_fetched_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()}
         assert _too_soon(old, 10) is False
 
 
@@ -251,7 +251,7 @@ class TestPoliteness:
     def test_min_interval_skips_without_any_request(self):
         client = ScriptedClient({})
         src = _src("recent", "https://recent.com/f.xml",
-                   last_fetched_at=datetime.now().isoformat(timespec="seconds"))
+                   last_fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         out = _fetch_one(client, src, 10, 10)
         assert out.skipped is True
         assert out.skip_reason == SKIP_INTERVAL  # 与熔断跳过区分，便于日志解释
@@ -276,7 +276,7 @@ def _source(db, key, *, status="ok", fetched_minutes_ago=1.0, enabled=True,
             alerted_minutes_ago=None, name=None, weight=5,
             fail_kind=None, failures=0):
     last = (
-        (datetime.now() - timedelta(minutes=fetched_minutes_ago)).isoformat(timespec="seconds")
+        (datetime.now(timezone.utc) - timedelta(minutes=fetched_minutes_ago)).isoformat(timespec="seconds")
         if fetched_minutes_ago is not None else None
     )
     row = RssSource(
@@ -288,7 +288,7 @@ def _source(db, key, *, status="ok", fetched_minutes_ago=1.0, enabled=True,
     )
     if alerted_minutes_ago is not None:
         row.last_alerted_at = (
-            datetime.now() - timedelta(minutes=alerted_minutes_ago)
+            datetime.now(timezone.utc) - timedelta(minutes=alerted_minutes_ago)
         ).isoformat(timespec="seconds")
     db.add(row)
     db.commit()
@@ -343,7 +343,7 @@ class TestSourceAlerts:
         _admin(db)
         row = _source(db, "bad", status="error", alerted_minutes_ago=10)
         assert alert_mod.notify_unhealthy_sources(db) == 0
-        row.last_alerted_at = (datetime.now() - timedelta(hours=8)).isoformat(timespec="seconds")
+        row.last_alerted_at = (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat(timespec="seconds")
         db.commit()
         assert alert_mod.notify_unhealthy_sources(db) == 1
 
@@ -604,7 +604,7 @@ class TestFailureGrading:
         src = _src(
             "cooling", "https://cooling.com/f.xml",
             consecutive_failures=5,
-            next_retry_at=(datetime.now() + timedelta(minutes=10)).isoformat(timespec="seconds"),
+            next_retry_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(timespec="seconds"),
         )
         client = ScriptedClient({"f.xml": Resp(200, RSS_ONE.format(title="t", link="l"))})
         out = _fetch_one(client, src, 10, 0)
@@ -617,7 +617,7 @@ class TestFailureGrading:
         src = _src(
             "thawed", "https://thawed.com/f.xml",
             consecutive_failures=5,
-            next_retry_at=(datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds"),
+            next_retry_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="seconds"),
         )
         assert _circuit_open(src) is False
         client = ScriptedClient({"f.xml": Resp(200, RSS_ONE.format(title="t", link="l"))})

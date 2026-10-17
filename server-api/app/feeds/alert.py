@@ -31,7 +31,7 @@
     未注册（预授权）的管理员收不到消息不报错——他们还没账号可收。
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -67,12 +67,16 @@ _SUMMARY_LIMIT = 300
 
 
 def _parse(iso: str | None) -> datetime | None:
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(str(iso))
-    except (TypeError, ValueError):
-        return None
+    """解析并归一成 UTC aware（A3：读取口径唯一，见 `models.parse_dt`）。
+
+    此前返回裸 `fromisoformat` 结果：存量 `last_alerted_at` 是 naive 本地、
+    新写入是 aware UTC，与 `now` 相减会抛
+    `can't subtract offset-naive and offset-aware datetimes`——
+    告警任务整个崩掉（虽被调度器吞掉，但告警静默失效）。
+    """
+    from ..models import parse_dt
+
+    return parse_dt(iso)
 
 
 def unhealthy_sources(
@@ -85,7 +89,7 @@ def unhealthy_sources(
     按 `weight` 降序返回：汇总消息会把靠前的源名列出来，位次即"谁更重要"，
     与抓取合并时的权重优先同一套语义。
     """
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=stale_hours)
     out: list[dict] = []
     rows = db.execute(
@@ -179,7 +183,7 @@ def notify_unhealthy_sources(db) -> int:
     """
     if not FEED_ALERT_ENABLED:
         return 0
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     due: list[dict] = []
     for item in unhealthy_sources(db, now=now):
         row = item["row"]

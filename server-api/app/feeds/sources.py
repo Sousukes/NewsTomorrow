@@ -11,7 +11,7 @@
 """
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -241,8 +241,11 @@ def record_fetch_result(
         row.consecutive_failures = (row.consecutive_failures or 0) + 1
         row.failure_kind = kind
         if FEED_CIRCUIT_THRESHOLD and row.consecutive_failures >= FEED_CIRCUIT_THRESHOLD:
+            # A3：与 now_str() 同口径（UTC aware）——`_circuit_open` 用
+            # fromisoformat 解析后与 aware now 比较，两种口径混用会抛
+            # TypeError 让熔断判定整个失效。
             row.next_retry_at = (
-                datetime.now() + timedelta(minutes=FEED_CIRCUIT_COOLDOWN_MINUTES)
+                datetime.now(timezone.utc) + timedelta(minutes=FEED_CIRCUIT_COOLDOWN_MINUTES)
             ).isoformat(timespec="seconds")
         _auto_disable_if_due(db, row)
     try:

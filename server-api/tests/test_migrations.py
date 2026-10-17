@@ -414,3 +414,96 @@ class TestCommentLikesBackfill:
         assert rows["c3"] is None  # 原 '[]' 无对应行，还原为 NULL（空数组 ≡ 无点赞）
         assert "comment_likes" not in tables
         assert "parent_id" not in cols and "root_id" not in cols
+
+
+@pytest.fixture(scope="class")
+def time_basis_db(tmp_path_factory) -> Path:
+    """0026 基线 + 三种时间口径的混合数据，用于验证 0027 的回填口径。"""
+    db = tmp_path_factory.mktemp("timebasis") / "time.db"
+    run_alembic(db, "upgrade", "0026_message_created_at")
+    engine = create_engine(f"sqlite:///{db.as_posix()}")
+    with engine.begin() as conn:
+        # naive 本地（now_str 的历史口径）
+        conn.execute(
+            sa_text(
+                "INSERT INTO users (phone, password_hash, name, created_at) "
+                "VALUES ('13800000001', 'h', '甲', '2026-10-18T14:30:00')"
+            )
+        )
+        # 已 aware（published_at 的历史口径）+ NULL 对照
+        conn.execute(
+            sa_text(
+                "INSERT INTO news (id, title, published_at, hot_score, hot_score_at) "
+                "VALUES ('n1', 't', '2026-10-18T06:30:00+00:00', 0, '2026-10-18T06:00:00')"
+            )
+        )
+        conn.execute(
+            sa_text(
+                "INSERT INTO news (id, title, published_at, hot_score, hot_score_at) "
+                "VALUES ('n2', 't', NULL, 0, NULL)"
+            )
+        )
+        # 评论四种值：naive / 带 +08:00 / 仅日期 / 脏值；time 是展示文案（不得触碰）
+        for cid, ts in (
+            ("c1", "2026-10-18T14:31:00"),
+            ("c2", "2026-10-18T14:00:00+08:00"),
+            ("c3", "2026-10-07"),
+            ("c4", "not-a-time"),
+        ):
+            conn.execute(
+                sa_text(
+                    "INSERT INTO comments (id, news_id, content, created_at, time) "
+                    "VALUES (:i, 'n1', 'x', :t, '刚刚')"
+                ),
+                {"i": cid, "t": ts},
+            )
+    engine.dispose()
+    yield db
+    run_alembic(db, "downgrade", "base")
+
+
+class TestTimeBasisBackfill:
+    """0027（A3）：存量时间列回填为 UTC aware。"""
+
+    def test_backfill_normalizes_all_formats(self, time_basis_db):
+        run_alembic(time_basis_db, "upgrade", "head")
+        engine = create_engine(f"sqlite:///{time_basis_db.as_posix()}")
+        with engine.connect() as conn:
+            user_at = conn.execute(sa_text("SELECT created_at FROM users")).scalar()
+            news = conn.execute(
+                sa_text("SELECT published_at, hot_score_at FROM news ORDER BY id")
+            ).fetchall()
+            comments = dict(
+                conn.execute(
+                    sa_text("SELECT id, created_at FROM comments ORDER BY id")
+                ).fetchall()
+            )
+            display = conn.execute(sa_text("SELECT DISTINCT time FROM comments")).scalars().all()
+        engine.dispose()
+
+        # naive：只补偏移、**数字不变**（顺序精确保留）
+        assert user_at == "2026-10-18T14:30:00+00:00"
+        # 已 aware：恒等；NULL 保持 NULL（不编造）
+        assert news == [("2026-10-18T06:30:00+00:00", "2026-10-18T06:00:00+00:00"), (None, None)]
+        # 四种评论值：+08:00 归一到 UTC（数字改）、仅日期扩展到零点、脏值原样保留
+        assert comments["c1"] == "2026-10-18T14:31:00+00:00"
+        assert comments["c2"] == "2026-10-18T06:00:00+00:00"
+        assert comments["c3"] == "2026-10-07T00:00:00+00:00"
+        assert comments["c4"] == "not-a-time"
+        # 展示文案列（time）不在白名单里，一个字符都不该动
+        assert display == ["刚刚"]
+
+    def test_ordering_preserved_after_backfill(self, time_basis_db):
+        """回填后同列内字典序 = 时间序（这是本批要恢复的契约）。"""
+        run_alembic(time_basis_db, "upgrade", "head")
+        engine = create_engine(f"sqlite:///{time_basis_db.as_posix()}")
+        with engine.connect() as conn:
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    sa_text("SELECT id FROM comments WHERE id != 'c4' ORDER BY created_at ASC")
+                ).fetchall()
+            ]
+        engine.dispose()
+        # c3(10-07) < c2(06:00Z) < c1(14:31Z)
+        assert ids == ["c3", "c2", "c1"]

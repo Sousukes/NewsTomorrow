@@ -10,7 +10,7 @@
 """
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -30,6 +30,10 @@ TERM_MAX = 50
 
 
 def _iso(dt: datetime) -> str:
+    """ISO 秒精度串。A3 后 cutoff 必须与 `created_at` 同为 UTC aware 格式——
+    这里的比较全是**字符串**比较（SQL 侧 `created_at >= cutoff`），
+    两种口径混用会整段错位（字典序只在同格式下才是时间序）。
+    """
     return dt.isoformat(timespec="seconds")
 
 
@@ -41,7 +45,7 @@ def record_search(db: Session, term: str, user_id: int | None = None, now=None) 
     clean = (term or "").strip()[:TERM_MAX]
     if not clean:
         return False
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
 
     if user_id is not None:
         cutoff = _iso(now - timedelta(seconds=DEDUP_WINDOW_SECONDS))
@@ -72,7 +76,7 @@ def record_search(db: Session, term: str, user_id: int | None = None, now=None) 
 
 def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=None) -> list[dict]:
     """近 `days` 天热词，按搜索次数倒序；同次数按词升序（保证顺序稳定）。"""
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     cutoff = _iso(now - timedelta(days=days))
     rows = (
         db.query(SearchLog.term, func.count(SearchLog.id).label("c"))
@@ -87,7 +91,7 @@ def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=Non
 
 def prune_search_logs(db: Session, keep_days: int = LOG_KEEP_DAYS, now=None) -> int:
     """清理超过保留期的搜索日志，返回删除条数。"""
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     cutoff = _iso(now - timedelta(days=keep_days))
     deleted = (
         db.query(SearchLog)

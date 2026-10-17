@@ -29,7 +29,9 @@
 > - **E1** 资讯正文落地 → P1-28 已处置（迁移 0025；详情接口返回 `content`，
 >   无正文显示「暂无正文」而非占位文案）
 > - **F5** 债务 backlog 机制 → P1-32 已处置（`backlog.md` + 每批偿还规则；
->   开放项 31 项的跟踪入口）
+>   开放项 30 项的跟踪入口）
+> - **A3** 时间基准统一 → P1-33 已处置（迁移 0027；`now_str`+`parse_dt`
+>   双入口，比较侧全量排查；回填只补偏移不改数字）
 
 ## 1. 资产快照（实测）
 
@@ -37,8 +39,8 @@
 | --- | --- | --- |
 | 后端 Python | 16,252 行（app 约 5,000 + tests 约 7,300） | `admin.py` 1,640 行 / 34 端点为最大单文件 |
 | 前端 src | 22,006 行（含 spec 约 7,000） | 8 个 `Admin*.vue` 合计约 6,010 行 |
-| 测试 | pytest 626 / vitest 484 / 契约 253（双端 253-0） | 计数以运行期实测为准 |
-| 迁移 | 26 个版本（0001 ~ 0026） | `alembic check` 当前无漂移 |
+| 测试 | pytest 632 / vitest 484 / 契约 253（双端 253-0） | 计数以运行期实测为准 |
+| 迁移 | 27 个版本（0001 ~ 0027） | `alembic check` 当前无漂移 |
 | mock 后端 | `server.mjs` 3,007 行 | **后端逻辑的第二实现**（含昵称引擎副本） |
 | 文档 | README 102KB / 优化落地记录 139KB | 单文件体积已影响可检索性 |
 | CI | 前端 依赖审计+type+lint+format+test+build+storybook；后端 import+pytest+启动+契约+迁移校验 | **不含覆盖率**（F2 待排期） |
@@ -51,7 +53,7 @@
 | --- | --- | --- | --- | --- | --- |
 | A1 | **消息越权读取（IDOR）**：`mark_read` 未校验可见性即返回消息全文 | `messages.py:108-128`（`db.get` 后直接 `to_out`，用的是 `get_current_user_optional`，与 docstring「需登录」不符） | 任意用户凭消息 id 可读他人定向消息；种子 id 形如 `m1..m4` 可直接枚举 | 改用 `get_current_user`；取出后先按 `visible_condition(user)` 校验，不可见一律 404 | **S** · ✅ **P1-25 已处置** |
 | A2 | **消息列表排序与游标按随机 id** | `messages.py:71-72`（`Message.id < cursor`、`order_by(Message.id.desc())`），id 为 `msg_{uuid4hex}` | 排序与真实时间无关，keyset 游标语义失效，最旧的消息可能排在最前 | 增 `created_at` 列（迁移），改按 `(created_at DESC, id DESC)` 排序与分页 | **S** · ✅ **P1-29 已处置**（游标格式不变，服务端回查锚点键；存量行不编造时间，coalesce 兜底沉底） |
-| A3 | **时间基准不统一**：运行时用本地 naive 时间，抓取/种子写 UTC aware | `models.py:26`（`datetime.now().isoformat()`）、`feeds/ingest.py`、`seed.py` | 同一列混存两种口径，字符串排序即时间序的契约被破坏；`ranking._to_naive_utc` 只是在读侧打补丁 | 短期：`now_str()` 统一为 UTC aware 并回填存量；长期见 D1 | **M** |
+| A3 | **时间基准不统一**：运行时用本地 naive 时间，抓取/种子写 UTC aware | `models.py:26`（`datetime.now().isoformat()`）、`feeds/ingest.py`、`seed.py` | 同一列混存两种口径，字符串排序即时间序的契约被破坏；`ranking._to_naive_utc` 只是在读侧打补丁 | 短期：`now_str()` 统一为 UTC aware 并回填存量；长期见 D1 | **M** · ✅ **P1-33 已处置**（实为三种口径；`now_str`+`parse_dt` 双入口、比较侧全量排查、迁移 0027 只补偏移不改数字） |
 | A4 | **前端列表状态跨视图共享且无竞态守卫** | `stores/news.ts:20,40`（单一 `list` + `currentChannel`）、`Videos.vue:29` | 切频道与 `loadMore` 并发时旧频道数据被追加进新列表；视频页与首页串页 | 引入递增 `seq` / `AbortController`；按频道分桶 `listByChannel` | **M** |
 | A5 | **搜索「加载更多」整段替换结果** | `SearchResults.vue:41`（`results.value = res.list`） | 用户永远只能看到最后一页；按钮文案与实际行为不符 | `page === 1` 时赋值、否则追加并按 id 去重；改用 `hasMore` 判断终止 | **S** · ✅ **P1-26 已处置** |
 | B1 | **回复预览把全部回复捞进内存** | `comments.py:144-160`：窗口函数算出 `rn` 但 `WHERE` 不能引用窗口列，Python 侧才 `if rn <= 2` 过滤 | 单页 20 条主评论若各带数百条回复 → 一次拉数千行，是评论页最陡的性能悬崖 | 改为 `LATERAL` / 子查询在 SQL 侧每组 `LIMIT 2`，或按 root 分批 `UNION ALL` | **S** · ✅ **P1-26 已处置**（子查询 + `aliased`） |

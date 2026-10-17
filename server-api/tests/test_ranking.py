@@ -354,7 +354,7 @@ class TestIncrementalRecompute:
             assert recompute_hot_scores(db, now=NOW) == 3  # 全量：一并补锚点
             fresh = {x.id: (x.hot_score, x.hot_score_at) for x in db.query(News).all()}
         # s2 锚点过期（90 分钟前 > 60 分钟窗口）、s3 锚点缺失、s1 刚算过
-        _set_anchor("s2", (NOW - timedelta(minutes=90)).isoformat(timespec="seconds"))
+        _set_anchor("s2", (NOW.replace(tzinfo=timezone.utc) - timedelta(minutes=90)).isoformat(timespec="seconds"))
         _set_anchor("s3", None)
         with SessionLocal() as db:
             n = recompute_hot_scores(db, now=NOW, only_stale=True, stale_minutes=60)
@@ -362,15 +362,15 @@ class TestIncrementalRecompute:
             after = {x.id: (x.hot_score, x.hot_score_at) for x in db.query(News).all()}
         # 未过期的行：分数和锚点都没被动过（否则就是全表重写）
         assert after["s1"] == fresh["s1"]
-        # 过期 / 缺失的行：锚点刷新为本次重算时间（naive、秒精度，与 now_str 同格式）
-        assert after["s2"][1] == NOW.isoformat(timespec="seconds")
-        assert after["s3"][1] == NOW.isoformat(timespec="seconds")
+        # 过期 / 缺失的行：锚点刷新为本次重算时间（UTC aware、秒精度，与 now_str 同格式）
+        assert after["s2"][1] == NOW.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
+        assert after["s3"][1] == NOW.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
         assert after["s2"][0] > 0 and after["s3"][0] > 0
 
     def test_row_inside_window_is_skipped(self, client):
         """ staleness 窗口内的行不重算——这是「每行每窗口最多写一次」的另一半。"""
         _mk_news("w1", comments=5, published_at="2026-10-13T11:00:00")
-        _set_anchor("w1", (NOW - timedelta(minutes=30)).isoformat(timespec="seconds"))
+        _set_anchor("w1", (NOW.replace(tzinfo=timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds"))
         with SessionLocal() as db:
             assert recompute_hot_scores(db, now=NOW, only_stale=True, stale_minutes=60) == 0
 
@@ -402,7 +402,8 @@ class TestIncrementalRecompute:
             n = db.query(News).filter(News.id == "b1").first()
             assert n.hot_score > 0
             assert n.hot_score_at is not None
-            # 锚点就是「刚刚」：秒级 naive ISO 串，且距当前时间在分钟级以内
+            # 锚点就是「刚刚」：UTC aware 秒级 ISO 串（A3 后唯一口径），
+            # 且距当前时间在分钟级以内
             at = datetime.fromisoformat(n.hot_score_at)
-            assert at.tzinfo is None
-            assert abs((datetime.now() - at).total_seconds()) < 60
+            assert at.tzinfo is not None and at.utcoffset() == timedelta(0)
+            assert abs((datetime.now(timezone.utc) - at).total_seconds()) < 60
