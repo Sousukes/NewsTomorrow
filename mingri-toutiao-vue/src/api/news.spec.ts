@@ -268,3 +268,11 @@ describe('fetchNewsById', () => {
     await expect(fetchNewsById('n1')).resolves.toBeNull();
   });
 });
+
+// E6b：关注流是独立参数，**不能**退化成 channel=following
+it('关注流传 feed=following 且不带 channel（服务端会忽略 channel，带着只会误导）', async () => {
+  await fetchNewsPage({ feed: 'following', channel: 'tech' });
+  const url = vi.mocked(fetch).mock.calls[0][0] as string;
+  expect(url).toContain('feed=following');
+  expect(url).not.toContain('channel=');
+});

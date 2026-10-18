@@ -7,6 +7,7 @@ import ErrorBoundary from '@/components/ErrorBoundary.vue';
 import StepUpDialog from '@/components/StepUpDialog.vue';
 import Showcase from '@/views/Showcase.vue';
 import { useMessagesStore } from '@/stores/messages';
+import { useFollowsStore } from '@/stores/follows';
 import { useUserStore } from '@/stores/user';
 import type { TabItem } from '@/types';
 
@@ -50,6 +51,15 @@ watch(() => route.path, refreshBadges);
 onMounted(() => {
   void user.syncMarks();
 });
+
+// E6b：关注集合是账号数据——启动拉一次，登录态变化（登录/登出/切账号）再拉一次。
+// 不拉的话首页「关注」与详情页的关注按钮会停留在上一次账号的状态（串号的老坑）。
+const follows = useFollowsStore();
+onMounted(() => void follows.refresh());
+watch(
+  () => user.isLoggedIn,
+  () => void follows.refresh(),
+);
 
 function onTab(key: string) {
   const path = tabRoutes[key];

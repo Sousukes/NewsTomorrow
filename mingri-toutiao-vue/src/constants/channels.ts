@@ -24,6 +24,24 @@ export type Channel = (typeof CHANNELS)[number]['key'];
 /** 全部频道 key（顺序与 CHANNELS 一致） */
 export const CHANNEL_KEYS: Channel[] = CHANNELS.map((c) => c.key);
 
+/**
+ * 关注流标识（E6b）。**刻意不是 Channel**：
+ *
+ * `CHANNELS` 同时被后端用于校验运营填的频道（`feeds/sources.py::CHANNEL_KEYS`），
+ * 把「关注」混进去会让管理端的源配置多出一个非法选项；且关注流是**跨频道**的，
+ * 与频道是正交概念（后端用 `?feed=following` 表达，不是 `?channel=following`）。
+ */
+export const FOLLOWING_FEED = 'following';
+
+/** 列表键 = 真实频道 + 关注流（news store 的分桶键用这个类型） */
+export type ListKey = Channel | typeof FOLLOWING_FEED;
+
+/** 首页标签栏：关注在最左，其余是真实频道（UI 级组合，不影响 CHANNELS） */
+export const HOME_TABS: ReadonlyArray<{ key: ListKey; label: string }> = [
+  { key: FOLLOWING_FEED, label: '关注' },
+  ...CHANNELS,
+];
+
 /** 默认频道：抓取排序与信息流的兜底取值 */
 export const DEFAULT_CHANNEL: Channel = 'recommend';
 

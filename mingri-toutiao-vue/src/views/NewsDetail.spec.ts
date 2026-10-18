@@ -14,15 +14,37 @@ vi.mock('@/composables/useNewsDetail', () => ({
 const addHistory = vi.fn();
 const isFavorite = vi.fn(() => false);
 const toggleFavorite = vi.fn();
+// 登录态做成可变对象：E5（举报）与 E6b（关注）的未登录分支都要在这里切换
+const userState = { isLoggedIn: true };
 vi.mock('@/stores/user', () => ({
-  // isLoggedIn 供举报弹窗判断登录态（E5）：本文件按「已登录」跑，
-  // 未登录分支由 components/ReportDialog.spec.ts 单独覆盖
-  useUserStore: () => ({ addHistory, isFavorite, toggleFavorite, isLoggedIn: true }),
+  useUserStore: () => ({
+    addHistory,
+    isFavorite,
+    toggleFavorite,
+    isLoggedIn: userState.isLoggedIn,
+  }),
 }));
 
 const countOf = vi.fn(() => 0);
 vi.mock('@/stores/comments', () => ({
   useCommentsStore: () => ({ countOf }),
+}));
+
+// E6b：关注来源。目录默认按「已加载」打桩，避免 onMounted 的 loadDirectory 干扰用例
+const follow = vi.fn(async (_key?: string) => true);
+const unfollow = vi.fn(async (_key?: string) => true);
+const followsState = {
+  keys: [] as string[],
+  loaded: true,
+  loading: false,
+  error: '',
+  isFollowing: vi.fn((key?: string) => followsState.keys.includes(key ?? '')),
+  loadDirectory: vi.fn(async () => undefined),
+  follow: (key: string) => follow(key),
+  unfollow: (key: string) => unfollow(key),
+};
+vi.mock('@/stores/follows', () => ({
+  useFollowsStore: () => followsState,
 }));
 
 const fetchRelated = vi.fn(async (_id: string, _limit?: number) => []);
@@ -64,6 +86,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   item.value = null;
   resolving.value = false;
+  userState.isLoggedIn = true;
+  followsState.keys = [];
 });
 
 describe('views/NewsDetail 正文渲染（E1）', () => {
@@ -127,5 +151,65 @@ describe('views/NewsDetail 举报入口（E5）', () => {
     expect(w.text()).toContain('举报该资讯');
     // 弹窗内理由列表就绪 → 目标 id 已透传（未传会被后端 40409）
     expect(w.findAll('.reason').length).toBeGreaterThan(0);
+  });
+});
+
+describe('views/NewsDetail 关注来源（E6b）', () => {
+  it('有 sourceKey 时才渲染关注按钮（缺 key 不能放一个点不了的死按钮）', async () => {
+    item.value = detailItem({ sourceKey: 'src_1' });
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.mt-nav__follow').exists()).toBe(true);
+
+    item.value = detailItem();
+    const w2 = mountPage();
+    await settle(w2);
+    expect(w2.find('.mt-nav__follow').exists()).toBe(false);
+  });
+
+  it('点击关注：已关注态取关，未关注态关注', async () => {
+    item.value = detailItem({ sourceKey: 'src_1' });
+    const w = mountPage();
+    await settle(w);
+
+    await w.find('.mt-nav__follow').trigger('click');
+    await settle(w);
+    expect(follow).toHaveBeenCalledWith('src_1');
+
+    followsState.keys = ['src_1'];
+    const w2 = mountPage();
+    await settle(w2);
+    await w2.find('.mt-nav__follow').trigger('click');
+    await settle(w2);
+    expect(unfollow).toHaveBeenCalledWith('src_1');
+  });
+
+  it('未登录时不调接口，先弹登录门禁（别把失败留到最后一步）', async () => {
+    item.value = detailItem({ sourceKey: 'src_1' });
+    userState.isLoggedIn = false;
+    const w = mountPage();
+    await settle(w);
+
+    await w.find('.mt-nav__follow').trigger('click');
+    await settle(w);
+
+    expect(follow).not.toHaveBeenCalled();
+    expect(unfollow).not.toHaveBeenCalled();
+    expect(w.text()).toContain('关注来源');
+    expect(w.text()).toContain('登录后即可关注该来源');
+  });
+
+  it('关注失败时把原因显示出来（不默默吞掉，用户会以为点了没反应）', async () => {
+    follow.mockResolvedValueOnce(false);
+    item.value = detailItem({ sourceKey: 'src_1' });
+    userState.isLoggedIn = true;
+    const w = mountPage();
+    await settle(w);
+
+    await w.find('.mt-nav__follow').trigger('click');
+    await settle(w);
+
+    expect(w.find('.detail__hint').exists()).toBe(true);
+    expect(w.find('.detail__hint').text()).toContain('操作失败');
   });
 });

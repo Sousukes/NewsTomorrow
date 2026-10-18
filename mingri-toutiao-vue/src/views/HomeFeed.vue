@@ -4,31 +4,44 @@ import { useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import ChannelTabs from '@/components/ChannelTabs.vue';
 import NewsCard from '@/components/NewsCard.vue';
+import Button from '@/components/Button.vue';
 import BannerCarousel from '@/components/BannerCarousel.vue';
+import EmptyState from '@/components/EmptyState.vue';
 import { useNewsStore } from '@/stores/news';
+import { useFollowsStore } from '@/stores/follows';
+import { useUserStore } from '@/stores/user';
 import { useInfiniteList } from '@/composables/useInfiniteList';
-import { CHANNELS, DEFAULT_CHANNEL, toChannel, type Channel } from '@/constants/channels';
+import { HOME_TABS, FOLLOWING_FEED, toChannel, type ListKey } from '@/constants/channels';
+import { DEFAULT_CHANNEL } from '@/constants/channels';
 import { SORT_MODES, DEFAULT_SORT, toSort, type SortMode } from '@/constants/sort';
 import type { ChannelTab } from '@/types';
 
 const router = useRouter();
 const news = useNewsStore();
-
-/** 频道标签由单一来源派生，新增频道只需改 `constants/channels.ts` */
-const channels: ChannelTab[] = CHANNELS.map((c) => ({ ...c }));
-
-const activeChannel = ref<Channel>(DEFAULT_CHANNEL);
-const activeSort = ref<SortMode>(DEFAULT_SORT);
+const follows = useFollowsStore();
+const user = useUserStore();
 
 /**
- * 本视图只读「自己的桶」（A4）：列表状态按 (频道 × 排序) 隔离，
- * 视频页等其他视图的请求不会覆盖这里的列表。
+ * 首页标签（E6b）：**关注在最左**，其余是真实频道。
+ * 它来自 UI 级组合 `HOME_TABS`——刻意不进 `CHANNELS`，否则后端校验运营频道时
+ * 会多出一个非法选项，且「关注」与频道本就是正交概念。
  */
-const bucket = computed(() => news.bucketOf(activeChannel.value, activeSort.value));
+const channels: ChannelTab[] = HOME_TABS.map((t) => ({ ...t }));
+
+const activeTab = ref<ListKey>(DEFAULT_CHANNEL);
+const activeSort = ref<SortMode>(DEFAULT_SORT);
+
+const isFollowing = computed(() => activeTab.value === FOLLOWING_FEED);
+
+/**
+ * 本视图只读「自己的桶」（A4）：列表状态按 (列表键 × 排序) 隔离，
+ * 视频页等其他视图的请求不会覆盖这里的列表。关注流与频道共用同一张桶表。
+ */
+const bucket = computed(() => news.bucketOf(activeTab.value, activeSort.value));
 
 /** 无限滚动：哨兵进入视口即加载下一页（续接本视图的桶） */
 const { sentinel } = useInfiniteList({
-  onLoadMore: () => news.loadMore(activeChannel.value, activeSort.value),
+  onLoadMore: () => news.loadMore(activeTab.value, activeSort.value),
   hasMore: () => bucket.value.hasMore,
   loading: () => bucket.value.loading,
 });
@@ -36,15 +49,34 @@ const { sentinel } = useInfiniteList({
 onMounted(() => {
   news.resetPaging(DEFAULT_CHANNEL, DEFAULT_SORT);
   void news.fetchNews(DEFAULT_CHANNEL, DEFAULT_SORT);
+  // 目录是公开静态数据：已加载过就不再打接口（关注按钮只在详情页用得到）
+  if (!follows.loaded) void follows.loadDirectory();
 });
 
-/** 标签栏 emit 的是 string，经 toChannel 归一化后再请求（不可信输入兜底） */
-function onChannel(key: string) {
-  const channel = toChannel(key);
-  activeChannel.value = channel;
-  news.resetPaging(channel, activeSort.value);
-  // 保持当前排序：切换频道不应把用户选的排序重置掉
-  void news.fetchNews(channel, activeSort.value);
+/** 标签栏 emit 的是 string，归一化后再请求（不可信输入兜底） */
+function onTab(key: string) {
+  const next: ListKey = key === FOLLOWING_FEED ? FOLLOWING_FEED : toChannel(key);
+  if (next === activeTab.value) return;
+  activeTab.value = next;
+  news.resetPaging(next, activeSort.value);
+  // 保持当前排序：切换标签不应把用户选的排序重置掉
+  void news.fetchNews(next, activeSort.value);
+}
+
+/** 关注流的三种空态必须分开说：混成一句"暂无内容"会让人以为功能坏了 */
+const followEmpty = computed(() => {
+  if (!isFollowing.value) return false;
+  if (bucket.value.loading || bucket.value.list.length || bucket.value.error) return false;
+  if (!user.isLoggedIn) return 'guest' as const;
+  return follows.keys.length ? 'empty' : ('none' as const);
+});
+
+function goLogin() {
+  void router.push('/login');
+}
+
+function goSources() {
+  void router.push('/sources');
 }
 
 /** 切换排序：必须 resetPaging —— 排序键变了，旧游标失效 */
@@ -52,8 +84,8 @@ function onSort(key: string) {
   const sort = toSort(key);
   if (sort === activeSort.value) return;
   activeSort.value = sort;
-  news.resetPaging(activeChannel.value, sort);
-  void news.fetchNews(activeChannel.value, sort);
+  news.resetPaging(activeTab.value, sort);
+  void news.fetchNews(activeTab.value, sort);
 }
 
 function open(id: string) {
@@ -70,7 +102,7 @@ function open(id: string) {
       @search="router.push('/search')"
       @message="router.push('/messages')"
     />
-    <ChannelTabs :tabs="channels" :active="activeChannel" @update:active="onChannel" />
+    <ChannelTabs :tabs="channels" :active="activeTab" @update:active="onTab" />
 
     <div class="home__sort">
       <button
@@ -94,6 +126,30 @@ function open(id: string) {
       </template>
 
       <NewsCard v-for="item in bucket.list" :key="item.id" :item="item" @click="open" />
+
+      <!-- E6b：关注流的三种空态分开说（未登录 / 未关注 / 已关注暂无内容） -->
+      <EmptyState
+        v-if="followEmpty === 'guest'"
+        icon="message"
+        title="登录后查看关注的内容"
+        description="关注来源后，它们发布的内容会集中到这里"
+      >
+        <Button variant="primary" label="去登录" @click="goLogin" />
+      </EmptyState>
+      <EmptyState
+        v-else-if="followEmpty === 'none'"
+        icon="search"
+        title="还没有关注任何来源"
+        description="去来源列表看看，关注后这里就有内容了"
+      >
+        <Button variant="primary" label="去发现来源" @click="goSources" />
+      </EmptyState>
+      <EmptyState
+        v-else-if="followEmpty === 'empty'"
+        icon="network"
+        title="关注的来源暂时没有新内容"
+        description="换到「推荐」看看，或稍后再来"
+      />
 
       <!-- 触底哨兵 + 状态提示 -->
       <div ref="sentinel" class="home__sentinel">

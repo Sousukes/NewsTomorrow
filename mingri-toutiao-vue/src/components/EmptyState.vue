@@ -38,7 +38,18 @@ const paths: Record<string, string> = {
     </div>
     <p class="mt-empty__title">{{ title }}</p>
     <p v-if="description" class="mt-empty__desc">{{ description }}</p>
-    <slot name="action" />
+    <!--
+      操作区同时接受具名插槽与默认内容。
+
+      默认插槽兜底不是"兼容脏写法"：仓库里有 ~10 处视图把按钮直接放在默认插槽，
+      而这里原先只渲染 `#action`——那些按钮被静默丢弃，界面上只剩一句
+      「去发现内容」却没有可点的入口。空态的核心作用就是给用户一个下一步，
+      按钮丢了，空态就只剩一句解释。
+    -->
+    <template v-if="$slots.action">
+      <slot name="action" />
+    </template>
+    <slot v-else />
   </div>
 </template>
 

@@ -1,6 +1,9 @@
 import { mockNews } from '@/data/mockNews';
 import { DEFAULT_SORT, toSort } from '@/constants/sort';
 import type { SortMode } from '@/constants/sort';
+import { FOLLOWING_FEED } from '@/constants/channels';
+import { mockSourceKey } from '@/utils/source';
+import { mockFollowedKeys } from './follows';
 import type { Channel, NewsItem } from '@/types';
 import { mockDelay, request } from './http';
 import { USE_MOCK } from './config';
@@ -16,6 +19,8 @@ export function normalizeNewsItem(raw: Record<string, unknown>): NewsItem {
     // E1：正文只由详情接口下发；列表响应没有该字段即 undefined
     content: (r.content ?? undefined) as string | undefined,
     source: String(r.source ?? r.mediaName ?? ''),
+    // E6b：来源稳定标识（可空）。缺省时前端按「不可关注」处理
+    sourceKey: r.sourceKey === null || r.sourceKey === undefined ? null : String(r.sourceKey),
     commentCount: Number(r.commentCount ?? r.comment_count ?? 0),
     time: String(r.time ?? r.publishTime ?? ''),
     images: (r.images ?? r.imageList) as string[] | undefined,
@@ -42,6 +47,11 @@ export interface FetchNewsParams {
   cursor?: string;
   /** 排序：latest（时间）/ hot（热度）/ for-you（热度 + 频道偏好） */
   sort?: SortMode;
+  /**
+   * 关注流（E6b）：传 `'following'` 时**忽略 `channel`**（服务端同口径）。
+   * 与 channel 是正交概念——关注流跨频道，所以不是 channel 的一个取值。
+   */
+  feed?: typeof FOLLOWING_FEED;
 }
 
 /** 一页资讯（游标分页契约，H5） */
@@ -68,11 +78,24 @@ const MOCK_MAX_PAGE = 5;
 
 /** GET /news —— 拉取资讯列表（游标分页） */
 export async function fetchNewsPage(params: FetchNewsParams = {}): Promise<NewsPage> {
-  const { channel = 'recommend', page = 1, pageSize = 20, cursor, sort = DEFAULT_SORT } = params;
+  const {
+    channel = 'recommend',
+    page = 1,
+    pageSize = 20,
+    cursor,
+    sort = DEFAULT_SORT,
+    feed,
+  } = params;
 
   if (USE_MOCK) {
     // mock 模式模拟服务端分页：种子数据循环铺满，使无限滚动在离线模式下可完整演示。
-    let base = channel === 'recommend' ? mockNews : mockNews.filter((i) => i.channel === channel);
+    // sourceKey 由名称哈希派生（utils/source.ts）：离线演示没有源表，
+    // 但「关注」要在默认模式下可用，就必须有稳定的 key。
+    let base = [...mockNews].map((i) => ({ ...i, sourceKey: mockSourceKey(i.source) }));
+    base = channel === 'recommend' ? base : base.filter((i) => i.channel === channel);
+    // 关注流：按本地关注关系过滤（离线模式下"服务端"就是 localStorage）
+    if (feed === FOLLOWING_FEED)
+      base = base.filter((i) => mockFollowedKeys().includes(i.sourceKey ?? ''));
     // 离线演示也要体现排序差异：无服务端时评论数是最接近"热度"的可用信号
     if (sort !== 'latest') {
       base = [...base].sort((a, b) => (b.commentCount ?? 0) - (a.commentCount ?? 0));
@@ -111,7 +134,15 @@ export async function fetchNewsPage(params: FetchNewsParams = {}): Promise<NewsP
     // B2：**不传 `page`**——服务端据此走 keyset 游标分页，首页不再做全表 count。
     // `page` 仍保留在参数类型里（mock 模式与调试需要），真后端调用一律不传：
     // 一旦传了，服务端会切回 offset 分支并顺手 count 一次。
-    query: { channel, pageSize, cursor, sort: toSort(sort) },
+    // E6b：关注流传 `feed=following` 且**不传 channel**——服务端会忽略 channel，
+    // 但带着它会在调试时误以为能组合（"关注 + 科技"其实没有这个语义）。
+    query: {
+      channel: feed === FOLLOWING_FEED ? undefined : channel,
+      feed,
+      pageSize,
+      cursor,
+      sort: toSort(sort),
+    },
   });
 
   const arr = Array.isArray(data) ? data : (data?.list ?? []);

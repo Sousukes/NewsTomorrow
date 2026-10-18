@@ -7,10 +7,10 @@ import {
   type SearchResult,
 } from '@/api/news';
 import { mockNews } from '@/data/mockNews';
-import { CHANNELS, DEFAULT_CHANNEL } from '@/constants/channels';
+import { CHANNELS, DEFAULT_CHANNEL, FOLLOWING_FEED, type ListKey } from '@/constants/channels';
 import { DEFAULT_SORT, SORT_MODES } from '@/constants/sort';
 import type { SortMode } from '@/constants/sort';
-import type { Channel, NewsItem } from '@/types';
+import type { NewsItem } from '@/types';
 
 /**
  * 单个「列表桶」：一个 (频道 × 排序) 组合的完整列表状态。
@@ -21,7 +21,7 @@ import type { Channel, NewsItem } from '@/types';
  * 分桶后每个视图各读各的桶，互不干扰。
  */
 export interface NewsBucket {
-  channel: Channel;
+  channel: ListKey;
   sort: SortMode;
   list: NewsItem[];
   loading: boolean;
@@ -40,20 +40,23 @@ export interface NewsBucket {
   generation: number;
 }
 
-function bucketKey(channel: Channel, sort: SortMode): string {
+function bucketKey(channel: ListKey, sort: SortMode): string {
   return `${channel}:${sort}`;
 }
 
 /** 预建全部 (频道 × 排序) 桶：避免在渲染期按需创建（渲染期写入会触发额外更新） */
 function buildBuckets(): Record<string, NewsBucket> {
   const out: Record<string, NewsBucket> = {};
-  for (const c of CHANNELS) {
+  // E6b：关注流与频道共用同一张桶表——它是"另一种列表键"，不是频道。
+  // 放进来后 store 的调用方无需为它单开一套 API。
+  const keys: ListKey[] = [...CHANNELS.map((c) => c.key), FOLLOWING_FEED];
+  for (const c of keys) {
     for (const s of SORT_MODES) {
-      out[bucketKey(c.key, s.key)] = {
-        channel: c.key,
+      out[bucketKey(c, s.key)] = {
+        channel: c,
         sort: s.key,
         // 仅默认桶用 mock 数据占位（保持首屏行为不变）；其余频道首次进入为空
-        list: c.key === DEFAULT_CHANNEL && s.key === DEFAULT_SORT ? [...mockNews] : [],
+        list: c === DEFAULT_CHANNEL && s.key === DEFAULT_SORT ? [...mockNews] : [],
         loading: false,
         error: '',
         page: 0,
@@ -90,7 +93,7 @@ export const useNewsStore = defineStore('news', () => {
   const PAGE_SIZE = 20;
 
   /** 取桶（全部合法组合已预建；非法输入才按需补建） */
-  function bucketOf(channel: Channel, sort: SortMode = DEFAULT_SORT): NewsBucket {
+  function bucketOf(channel: ListKey, sort: SortMode = DEFAULT_SORT): NewsBucket {
     const key = bucketKey(channel, sort);
     let bucket = buckets.value[key];
     if (!bucket) {
@@ -113,13 +116,13 @@ export const useNewsStore = defineStore('news', () => {
   }
 
   /** 便捷读取某桶的列表（模板用） */
-  function listOf(channel: Channel, sort: SortMode = DEFAULT_SORT): NewsItem[] {
+  function listOf(channel: ListKey, sort: SortMode = DEFAULT_SORT): NewsItem[] {
     return bucketOf(channel, sort).list;
   }
 
   /** 拉取第一页（只影响该 (频道 × 排序) 桶） */
   async function fetchNews(
-    channel: Channel = DEFAULT_CHANNEL,
+    channel: ListKey = DEFAULT_CHANNEL,
     sort: SortMode = DEFAULT_SORT,
   ): Promise<NewsItem[]> {
     const bucket = bucketOf(channel, sort);
@@ -130,7 +133,13 @@ export const useNewsStore = defineStore('news', () => {
     bucket.channel = channel;
     bucket.sort = sort;
     try {
-      const res = await apiFetchNewsPage({ channel, pageSize: PAGE_SIZE, sort });
+      const res = await apiFetchNewsPage({
+        // 关注流是独立参数而非 channel 取值（见 constants/channels.ts）
+        channel: channel === FOLLOWING_FEED ? undefined : channel,
+        feed: channel === FOLLOWING_FEED ? FOLLOWING_FEED : undefined,
+        pageSize: PAGE_SIZE,
+        sort,
+      });
       if (gen !== bucket.generation) return bucket.list; // 已被更新的一次请求取代
       bucket.list = res.list;
       bucket.page = 1;
@@ -155,7 +164,7 @@ export const useNewsStore = defineStore('news', () => {
    * @returns 本次追加的条数
    */
   async function loadMore(
-    channel: Channel = DEFAULT_CHANNEL,
+    channel: ListKey = DEFAULT_CHANNEL,
     sort: SortMode = DEFAULT_SORT,
   ): Promise<number> {
     const bucket = bucketOf(channel, sort);
@@ -167,7 +176,8 @@ export const useNewsStore = defineStore('news', () => {
     try {
       const nextPage = bucket.page + 1;
       const res = await apiFetchNewsPage({
-        channel,
+        channel: bucket.channel === FOLLOWING_FEED ? undefined : bucket.channel,
+        feed: bucket.channel === FOLLOWING_FEED ? FOLLOWING_FEED : undefined,
         pageSize: PAGE_SIZE,
         // 关键：排序必须与首请求一致。服务端游标自带 sort 并按该排序键做 keyset 比较，
         // 若续接时换了排序，比较基准就失效了（表现为重复或漏项）。
@@ -202,7 +212,7 @@ export const useNewsStore = defineStore('news', () => {
   }
 
   /** 重新从第一页开始（切换频道/排序/下拉刷新时调用）；同时使在途请求失效 */
-  function resetPaging(channel: Channel = DEFAULT_CHANNEL, sort: SortMode = DEFAULT_SORT) {
+  function resetPaging(channel: ListKey = DEFAULT_CHANNEL, sort: SortMode = DEFAULT_SORT) {
     const bucket = bucketOf(channel, sort);
     bucket.generation += 1;
     bucket.page = 0;

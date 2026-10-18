@@ -28,6 +28,20 @@ const newsState = {
 
 vi.mock('@/stores/news', () => ({ useNewsStore: () => newsState }));
 
+// E6b：关注流需要 user / follows 两个 store。目录是公开数据，这里按「已加载」打桩，
+// 避免每个用例都被 onMounted 的 loadDirectory 干扰。
+const userState = { isLoggedIn: false };
+vi.mock('@/stores/user', () => ({ useUserStore: () => userState }));
+const followsState = {
+  keys: [] as string[],
+  loaded: true,
+  loading: false,
+  error: '',
+  loadDirectory: vi.fn(async () => undefined),
+  isFollowing: vi.fn((_key?: string) => false),
+};
+vi.mock('@/stores/follows', () => ({ useFollowsStore: () => followsState }));
+
 const routerPush = vi.fn();
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: routerPush }) }));
 
@@ -70,7 +84,7 @@ describe('HomeFeed', () => {
 
     // 先选一个排序，再切频道
     (w.vm as unknown as { onSort: (k: string) => void }).onSort('hot');
-    (w.vm as unknown as { onChannel: (k: string) => void }).onChannel('tech');
+    (w.vm as unknown as { onTab: (k: string) => void }).onTab('tech');
 
     const last = newsState.fetchNews.mock.calls.at(-1)!;
     expect(last[0]).toBe('tech');
@@ -91,7 +105,10 @@ describe('HomeFeed', () => {
     const w = mountPage();
     await settle(w);
     vi.clearAllMocks();
-    (w.vm as unknown as { onChannel: (k: string) => void }).onChannel('不存在的频道');
+    const vm = w.vm as unknown as { onTab: (k: string) => void };
+    vm.onTab('tech');
+    await settle(w);
+    vm.onTab('不存在的频道');
     const last = newsState.fetchNews.mock.calls.at(-1) as [string, string];
     expect(last[0]).toBeTruthy(); // 归一化后的合法值，而不是原样透传
     expect(last[0]).not.toBe('不存在的频道');
@@ -126,5 +143,69 @@ describe('HomeFeed', () => {
       loading: false,
       hasMore: false,
     } as never);
+  });
+});
+
+describe('HomeFeed 关注流（E6b）', () => {
+  it('切到「关注」时按关注流取数，并沿用当前排序', async () => {
+    const w = mountPage();
+    await settle(w);
+    const tabs = w.findAll('.mt-channels__item');
+    expect(tabs[0].text()).toBe('关注');
+
+    await tabs[0].trigger('click');
+    await settle(w);
+
+    expect(newsState.resetPaging).toHaveBeenCalledWith('following', expect.any(String));
+    expect(newsState.fetchNews).toHaveBeenCalledWith('following', expect.anything());
+  });
+
+  it('关注流的三种空态分开：未登录 → 引导登录', async () => {
+    userState.isLoggedIn = false;
+    followsState.keys = [];
+    const w = mountPage();
+    await settle(w);
+    await w.findAll('.mt-channels__item')[0].trigger('click');
+    await settle(w);
+    expect(w.text()).toContain('登录后查看关注的内容');
+  });
+
+  it('已登录未关注 → 引导去发现来源', async () => {
+    userState.isLoggedIn = true;
+    followsState.keys = [];
+    const w = mountPage();
+    await settle(w);
+    await w.findAll('.mt-channels__item')[0].trigger('click');
+    await settle(w);
+    expect(w.text()).toContain('还没有关注任何来源');
+    expect(w.find('.mt-empty button.mt-btn').exists()).toBe(true);
+  });
+
+  it('已关注但无内容 → 不误导用户「功能坏了」', async () => {
+    userState.isLoggedIn = true;
+    followsState.keys = ['src_1'];
+    const w = mountPage();
+    await settle(w);
+    await w.findAll('.mt-channels__item')[0].trigger('click');
+    await settle(w);
+    expect(w.text()).toContain('关注的来源暂时没有新内容');
+    expect(w.text()).not.toContain('还没有关注任何来源');
+  });
+
+  it('有内容时不显示空态', async () => {
+    userState.isLoggedIn = true;
+    followsState.keys = ['src_1'];
+    const spy = vi.spyOn(newsState, 'bucketOf').mockReturnValue({
+      list: [{ id: 'n1' }],
+      loading: false,
+      hasMore: false,
+    } as never);
+    const w = mountPage();
+    await settle(w);
+    await w.findAll('.mt-channels__item')[0].trigger('click');
+    await settle(w);
+    expect(w.text()).not.toContain('登录后查看关注的内容');
+    expect(w.text()).not.toContain('还没有关注任何来源');
+    spy.mockRestore();
   });
 });

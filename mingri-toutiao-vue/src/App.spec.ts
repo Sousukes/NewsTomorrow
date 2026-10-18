@@ -30,6 +30,10 @@ vi.mock('@/stores/messages', () => ({ useMessagesStore: () => ({ refreshUnread }
 const syncMarks = vi.fn(async () => undefined);
 vi.mock('@/stores/user', () => ({ useUserStore: () => ({ syncMarks }) }));
 
+// E6b：关注集合同样在壳层启动时刷新（账号数据，登录态切换后要重取）
+const refreshFollows = vi.fn(async () => undefined);
+vi.mock('@/stores/follows', () => ({ useFollowsStore: () => ({ refresh: refreshFollows }) }));
+
 import App from '@/App.vue';
 
 /** 把壳层依赖全部打成占位组件，只留被测的接线逻辑 */
@@ -137,4 +141,10 @@ describe('App 壳层', () => {
     await flush();
     expect(w.find('.stepup').exists()).toBe(true);
   });
+});
+
+it('E6b：启动时拉一次关注集合，登录态变化后重拉（防切账号后显示上一个账号的关注）', async () => {
+  mountApp();
+  await flush();
+  expect(refreshFollows).toHaveBeenCalledTimes(1);
 });

@@ -26,6 +26,13 @@ const menu = computed(() => {
   const items = [
     { key: 'favorites', label: '我的收藏', desc: '查看你保存的内容', to: '/favorites' },
     { key: 'history', label: '浏览历史', desc: '回顾你看过的资讯', to: '/history' },
+    // E6b：关注入口（双入口的后半——前半在首页「关注」标签）
+    {
+      key: 'sources',
+      label: '我的关注',
+      desc: '管理关注的来源、发现新来源',
+      to: '/sources',
+    },
     // C4：主动改密入口。与「被强制改密」共用同一个页面。
     {
       key: 'password',

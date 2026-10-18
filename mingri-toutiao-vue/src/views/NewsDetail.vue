@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import NewsCard from '@/components/NewsCard.vue';
 import ReportDialog from '@/components/ReportDialog.vue';
+import LoginGateDialog from '@/components/LoginGateDialog.vue';
 import { useUserStore } from '@/stores/user';
 import { useCommentsStore } from '@/stores/comments';
+import { useFollowsStore } from '@/stores/follows';
 import { useNewsDetail } from '@/composables/useNewsDetail';
 import { bgFor } from '@/utils/image';
 import { fetchRelated } from '@/api/news';
@@ -17,13 +19,49 @@ const route = useRoute();
 const router = useRouter();
 const user = useUserStore();
 const comments = useCommentsStore();
+const follows = useFollowsStore();
 
 const { item, resolving, failed } = useNewsDetail(() => route.params.id as string);
 const commentCount = computed(() => (item.value ? comments.countOf(item.value.id) : 0));
 const thumbCount = computed(() => Math.min(item.value?.images?.length ?? 0, 3));
-const author = computed<Author | undefined>(() =>
-  item.value ? { name: item.value.source, time: item.value.time } : undefined,
-);
+const author = computed<Author | undefined>(() => {
+  if (!item.value) return undefined;
+  // 没有 sourceKey（历史数据 / 旧后端）时**不渲染作者区**：关注按钮依赖 key，
+  // 缺 key 就把按钮显示出来又不可点，等于制造一个死按钮（AppNav 的「更多」刚被这么修过）
+  if (!item.value.sourceKey) return undefined;
+  return {
+    name: item.value.source,
+    time: item.value.time,
+    followed: user.isLoggedIn && follows.isFollowing(item.value.sourceKey),
+  };
+});
+
+/** 关注入口（E6b）：未登录先弹门禁，别让用户被 401 打回 */
+const loginGateOpen = ref(false);
+const followHint = ref('');
+let hintTimer: ReturnType<typeof setTimeout> | undefined;
+
+function showHint(msg: string) {
+  followHint.value = msg;
+  window.clearTimeout(hintTimer);
+  hintTimer = window.setTimeout(() => {
+    followHint.value = '';
+  }, 2400);
+}
+
+onBeforeUnmount(() => window.clearTimeout(hintTimer));
+
+async function toggleFollow() {
+  const key = item.value?.sourceKey;
+  if (!key) return;
+  followHint.value = '';
+  if (!user.isLoggedIn) {
+    loginGateOpen.value = true;
+    return;
+  }
+  const ok = follows.isFollowing(key) ? await follows.unfollow(key) : await follows.follow(key);
+  if (!ok) showHint(follows.error || '操作失败，请稍后重试');
+}
 
 /**
  * 正文段落（E1）：后端按段落以 \n 分隔下发，这里切段渲染。
@@ -80,6 +118,11 @@ function onFavorite() {
   if (item.value) user.toggleFavorite(item.value.id);
 }
 
+onMounted(() => {
+  // 目录不随详情每次重载：已加载过就不再打接口（目录是公开静态数据）
+  if (!follows.loaded) void follows.loadDirectory();
+});
+
 /**
  * 举报入口（E5）：挂在导航「更多」上。
  *
@@ -97,6 +140,7 @@ const reportOpen = ref(false);
       show-back
       show-more
       @back="router.back()"
+      @follow="toggleFollow"
       @more="reportOpen = true"
     />
     <div class="detail__scroll">
@@ -171,6 +215,14 @@ const reportOpen = ref(false);
 
     <!-- 举报弹窗（E5）：目标固定为当前资讯；登录态与提交由弹窗内部处理 -->
     <ReportDialog v-model:open="reportOpen" target-type="news" :target-id="item.id" />
+
+    <!-- 关注失败/未登录提示（E6b）：失败必须让用户看见，别默默吞掉 -->
+    <p v-if="followHint" class="detail__hint" role="status">{{ followHint }}</p>
+    <LoginGateDialog
+      v-model:open="loginGateOpen"
+      title="关注来源"
+      message="登录后即可关注该来源，关注内容会出现在首页「关注」标签里。"
+    />
   </div>
 
   <!-- 深链加载中：先显示骨架，避免误判为「内容不存在」 -->
@@ -319,6 +371,13 @@ const reportOpen = ref(false);
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* E6b：关注操作的即时反馈（失败原因 / 未登录提示） */
+.detail__hint {
+  padding: 8px 16px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 .detail__bar {

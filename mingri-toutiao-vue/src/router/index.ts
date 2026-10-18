@@ -50,6 +50,9 @@ const router = createRouter({
     },
     { path: '/favorites', name: 'favorites', component: () => import('@/views/Favorites.vue') },
     { path: '/history', name: 'history', component: () => import('@/views/History.vue') },
+    // 来源目录（E6b）：可关注哪些来源、各源有多少内容。不在 TabBar，
+    // 从首页「关注」空态与「我的 → 我的关注」进入
+    { path: '/sources', name: 'sources', component: () => import('@/views/Sources.vue') },
     // 运营向入口：不在 TabBar 中，仅对管理员在「我的」页展示（后端按白名单判定）
     {
       path: '/admin/sources',

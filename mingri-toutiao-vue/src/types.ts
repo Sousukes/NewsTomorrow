@@ -1,4 +1,4 @@
-import type { Channel } from '@/constants/channels';
+import type { Channel, ListKey } from '@/constants/channels';
 
 export type NewsVariant = 'triple' | 'left-right' | 'text' | 'video';
 
@@ -16,6 +16,14 @@ export interface NewsItem {
    */
   content?: string;
   source: string;
+  /**
+   * 来源稳定标识（E6b，对应后端 `rss_sources.key`）。
+   *
+   * 关注关系挂在它上面而不是 `source` 名称：运营改名后名称会变，key 不变。
+   * **可空**：历史数据回填不上、或旧后端不下发时为 null/undefined——
+   * 此时前端按「不可关注」处理（不显示关注按钮），而不是报错。
+   */
+  sourceKey?: string | null;
   commentCount?: number;
   time: string;
   /** 配图 URL 列表，三图变体取前 3 张 */
@@ -46,10 +54,13 @@ export interface Tab {
   active?: boolean;
 }
 
-/** 资讯频道标签项：`ChannelTab[]` 可赋给 `Tab[]`（Channel ⊂ string） */
+/**
+ * 列表标签项：首页频道栏 + 关注流（E6b）共用这个形状。
+ * `key` 是 `ListKey` 而非 `Channel`——「关注」不是频道，只是另一种列表键。
+ */
 export interface ChannelTab {
   label: string;
-  key: Channel;
+  key: ListKey;
   active?: boolean;
 }
 
