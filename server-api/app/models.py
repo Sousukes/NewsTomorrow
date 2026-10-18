@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     false as sa_false,
     true as sa_true,
 )
@@ -693,4 +694,36 @@ class NicknameHit(Base):
     __table_args__ = (
         # 「这个词命中过多少次 / 最近命中」按词查且要按时间倒序
         Index("ix_nickname_hits_word_id", "word", "id"),
+    )
+
+class Report(Base):
+    """用户举报（E5）：评论 / 资讯的反馈通道。
+
+    设计要点（见 `docs/后端/E5用户举报设计.md`）：
+    - **不建外键到评论/资讯**：`target_id` 是异构主键（评论/资讯两类 id），
+      无法用单一 FK；且目标被删后举报记录仍需留存（审计溯源）。
+    - **幂等去重**：`UNIQUE(reporter_id, target_type, target_id)`，同一用户对
+      同一目标重复举报**更新 reason、不新增行**——这是「达阈值自动处置」
+      防刷的地基：单用户最多贡献 1 次，想刷下架一条内容需要 N 个真实账号。
+    - `status`：`pending`（待复核）/ `resolved`（已处置）/ `dismissed`（驳回）。
+      自动软隐藏只算 `pending` 的举报数。
+    """
+
+    __tablename__ = "reports"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reporter_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    target_type = Column(String(10), nullable=False)  # comment | news
+    target_id = Column(String(64), nullable=False)
+    reason = Column(String(20), nullable=False)
+    status = Column(String(12), nullable=False, default="pending")
+    resolution = Column(String(12), nullable=True)  # hidden | kept（人工结论）
+    created_at = Column(String(30), nullable=False, default=now_str, index=True)
+    resolved_at = Column(String(30), nullable=True)
+    resolved_by = Column(String(20), nullable=True)  # 管理员手机号
+
+    __table_args__ = (
+        UniqueConstraint("reporter_id", "target_type", "target_id", name="uq_report_once"),
+        # 复核队列按「待处理优先、时间倒序」查
+        Index("ix_reports_status_created", "status", "created_at"),
     )

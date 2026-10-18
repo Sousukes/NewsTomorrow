@@ -127,6 +127,14 @@ CHANNEL_PREF_TTL_SECONDS = max(30, int(_env("CHANNEL_PREF_TTL_SECONDS", "300")))
 # 往返，收益远小于代价。`now` 显式传入时（测试/回放）**绕过缓存**，见实现。
 HOT_TERMS_TTL_SECONDS = max(10, int(_env("HOT_TERMS_TTL_SECONDS", "60")))
 
+# ---- 用户举报（E5）----
+# 预设分类：结构化、可统计、防滥用。文案是**前端展示与后端校验共用的唯一事实源**，
+# 前端据此渲染单选、后端据此校验（不在集合内 → 42206）。
+REPORT_REASONS = ["色情低俗", "政治敏感", "广告营销", "侵权", "谣言不实", "其他"]
+# 达阈值自动软隐藏/下架。计数口径是**去重后**的 pending 举报数（同一用户对同一
+# 目标只算一次），所以想刷下架一条内容需要 N 个真实账号——这是防刷的关键。
+REPORT_AUTO_HIDE_THRESHOLD = max(2, int(_env("REPORT_AUTO_HIDE_THRESHOLD", "3")))
+
 # 种子演示账号
 DEMO_PHONE = _env("DEMO_PHONE", "13800138000")
 DEMO_PASSWORD = _env("DEMO_PASSWORD", "123456")

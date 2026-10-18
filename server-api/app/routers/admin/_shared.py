@@ -46,6 +46,8 @@ AUDIT_NICKNAME_WORD_UPDATE = "nicknameWord.update"
 AUDIT_NICKNAME_WORD_DELETE = "nicknameWord.delete"
 AUDIT_NICKNAME_WORD_RELOAD = "nicknameWord.reload"
 AUDIT_NICKNAME_REVIEW = "nickname.review"
+# E5：举报复核
+AUDIT_REPORT_RESOLVE = "report.resolve"
 
 # 管理端资讯排序键：published_at 为空按空串处理（倒序时排最后），与公开列表同口径
 _PUB = func.coalesce(News.published_at, "")

@@ -106,6 +106,7 @@ from . import audit as audit_mod  # noqa: E402
 from . import comments as comments_mod  # noqa: E402
 from . import news as news_mod  # noqa: E402
 from . import nickname as nickname_mod  # noqa: E402
+from . import reports as reports_mod  # noqa: E402
 from . import sources as sources_mod  # noqa: E402
 from . import users as users_mod  # noqa: E402
 from . import words as words_mod  # noqa: E402
@@ -122,6 +123,7 @@ for _mod in (
     nickname_mod,
     users_mod,
     audit_mod,
+    reports_mod,
 ):
     router.include_router(_mod.router)
 

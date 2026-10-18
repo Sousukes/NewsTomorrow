@@ -351,3 +351,9 @@ class NicknameWordUpdateIn(BaseModel):
     enabled: bool | None = None
 
     _aliases_clean = field_validator("aliases")(_clean_aliases)
+
+
+class ReportResolveIn(BaseModel):
+    """举报处置入参（E5）：`hidden` 确认隐藏 / `kept` 驳回并恢复。"""
+
+    resolution: str = Field(pattern="^(hidden|kept)$")
