@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（15 项）
+## 开放项（14 项）
 
 ### P1 · 安全
 
@@ -32,7 +32,6 @@
 
 | ID | 问题 | 成本 | 建议方向 | 来源 |
 | --- | --- | --- | --- | --- |
-| B5 | 抓取与 API 同进程，共用线程池与连接池，长抓取挤压请求侧 | M | 拆独立 worker 进程 / cron 容器 | 审查报告 §3.1 |
 | B6 | 热度重算全表扫描（已有 `only_stale` 缓解） | — | 观察项：仅在大表量级下关注 | 审查报告 §3.1 |
 
 ### P1 · 架构与工程债
@@ -90,6 +89,7 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-61 | B5 连接池隔离：后台任务独立 engine（`FEED_DB_POOL_SIZE=2`）+ 独立 `application_name`；`dispose()` 释放两个池；SQLite 例外复用同 engine；10 项测试（含真建 PG engine 验 `pool.size()`）；pytest 851 → 861 |
 | P1-60 | F3' 收尾：补 History/Search/Messages/Videos/Gallery 五份视图 spec（24 项）；覆盖率 82.41%，**0% 文件清零**，阈值 78/71/66/81。发现 `Videos.vue` 无空态 UI（记债未擅自改） |
 | P1-59 | F5 收尾：补 `StepUpDialog`(0→78%) / `PhoneFrame`(0→100%) / `App.vue`(0→96%) 共 19 项；覆盖率 79.73%，阈值 75/68/63/78；**0% 文件 15→5，剩下的全是视图（归 F3'）** |
 | P1-58 | F5 第二批：补 `useNewsDetail`(0→100%) / `api/comments`(0→85%) / `api/messages`(0→91%) 共 28 项；修两个真 bug（网络失败被说成已下架、未读数可能 NaN）；覆盖率 78.29%，阈值抬至 74/67/62/77；0% 12→9 |

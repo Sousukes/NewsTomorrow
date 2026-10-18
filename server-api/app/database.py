@@ -22,6 +22,9 @@ from .config import (
     DB_POOL_RECYCLE,
     DB_POOL_SIZE,
     DB_POOL_TIMEOUT,
+    FEED_DB_APP_NAME,
+    FEED_DB_MAX_OVERFLOW,
+    FEED_DB_POOL_SIZE,
 )
 
 logger = logging.getLogger("toutiao.db")
@@ -61,6 +64,42 @@ engine: Engine = create_engine(DATABASE_URL, future=True, **_engine_kwargs(DATAB
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
+def _scheduler_engine_kwargs(url: str) -> Dict[str, Any]:
+    """后台任务（抓取 / 热度重算）的池参数（B5）。
+
+    与 API 池的差别只有两点：**容量小**、**应用名不同**。
+
+    为什么必须分开：抓取周期**整段持有**一条连接——advisory lock 绑在会话上，
+    中途不能关（关了锁就没了）；而一个周期里要发 N 个 HTTP 请求、各带超时，
+    这条连接会被占几分钟。与 API 共用 5+10 的池时，抓取 + 热度重算能长期
+    吃掉 2 条，请求峰值就在 `pool_timeout` 上排队。
+
+    共享连接池不是"省资源"，而是**把两种完全不同的占用时长混在一起**：
+    请求是毫秒级占用，抓取是分钟级占用。混池的后果是后者决定前者的尾延迟。
+    """
+    kwargs = _engine_kwargs(url)
+    kwargs["pool_size"] = FEED_DB_POOL_SIZE
+    kwargs["max_overflow"] = FEED_DB_MAX_OVERFLOW
+    kwargs["connect_args"] = {
+        **kwargs.get("connect_args", {}),
+        "application_name": FEED_DB_APP_NAME,
+    }
+    return kwargs
+
+
+# SQLite（含内存库）**必须复用同一个 engine**：内存库靠 `StaticPool` 共享同一条
+# 连接才有数据可言，另建 engine 会得到一个空库——症状是"表不存在"，
+# 而根因是池隔离。所以池隔离只对服务端库生效。
+scheduler_engine: Engine = (
+    engine
+    if DATABASE_URL.startswith("sqlite")
+    else create_engine(DATABASE_URL, future=True, **_scheduler_engine_kwargs(DATABASE_URL))
+)
+SchedulerSessionLocal = sessionmaker(
+    bind=scheduler_engine, autoflush=False, autocommit=False, future=True
+)
+
+
 def get_db():
     """FastAPI 依赖：请求级会话，结束归还连接。
 
@@ -90,6 +129,12 @@ def pool_status() -> dict:
 
 
 def dispose() -> None:
-    """关闭全部连接（进程退出前调用）。"""
+    """关闭全部连接（进程退出前调用）。
+
+    两个池都要释放：只 dispose `engine` 会留下后台任务的连接，
+    进程退出时服务端仍看到它们（PG 端表现为 idle 连接慢慢堆积）。
+    """
     engine.dispose()
-    logger.info("连接池已释放")
+    if scheduler_engine is not engine:
+        scheduler_engine.dispose()
+    logger.info("连接池已释放（API + 后台任务）")

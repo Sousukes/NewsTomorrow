@@ -45,6 +45,16 @@ DB_POOL_PRE_PING = _env("DB_POOL_PRE_PING", "true").lower() in ("1", "true", "ye
 DB_CONNECT_TIMEOUT = int(_env("DB_CONNECT_TIMEOUT", "10"))  # 建连超时秒数
 DB_APP_NAME = _env("DB_APP_NAME", "toutiao-api")  # 便于在 pg_stat_activity 中识别应用
 
+# ---- 后台任务的**独立**连接池（B5）----
+# 抓取周期会**整段持有**一条连接（advisory lock 绑在会话上，中途不能关），
+# 而一个周期里要发 N 个 HTTP 请求、各带超时——这条连接会被占几分钟。
+# 与 API 共用 5+10 的池时，抓取+热度重算能长期吃掉 2 条，请求峰值就在等连接。
+# 拆成独立小池：后台任务挤自己，不挤压请求侧。
+FEED_DB_POOL_SIZE = int(_env("FEED_DB_POOL_SIZE", "2"))  # 抓取 + 热度重算，2 条够用
+FEED_DB_MAX_OVERFLOW = int(_env("FEED_DB_MAX_OVERFLOW", "1"))
+# 单独的应用名：`pg_stat_activity` 里能一眼分出哪条连接是后台任务
+FEED_DB_APP_NAME = _env("FEED_DB_APP_NAME", "toutiao-scheduler")
+
 # JWT 配置
 DEFAULT_JWT_SECRET = "dev-secret-change-me"
 JWT_SECRET = _env("JWT_SECRET", DEFAULT_JWT_SECRET)

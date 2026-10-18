@@ -25,7 +25,7 @@ from .config import (
     HOT_CRON_INTERVAL_MINUTES,
     HOT_STALE_MINUTES,
 )
-from .database import SessionLocal, dispose
+from .database import SchedulerSessionLocal, dispose
 from .feeds.health import prune as prune_health_events
 from .feeds.ingest import FetchReport, prune_old_news, run_ingest
 from .hit_logs import prune_hit_logs
@@ -92,7 +92,7 @@ async def _job(channel: str | None = None, keyword: str | None = None) -> None:
 
 def _run_once(channel: str | None = None, keyword: str | None = None) -> FetchReport:
     """获取互斥锁后执行一次抓取；未获得锁则跳过本轮。"""
-    with SessionLocal() as db:
+    with SchedulerSessionLocal() as db:
         if not _try_lock(db, _ADVISORY_LOCK_KEY):
             logger.info("未获得抓取锁（其他实例正在执行），跳过本轮")
             return FetchReport()
@@ -130,7 +130,7 @@ def _run_once(channel: str | None = None, keyword: str | None = None) -> FetchRe
 
 def _run_hot_once() -> int:
     """增量重算热度分（只刷过期行）；未获得锁则跳过本轮。"""
-    with SessionLocal() as db:
+    with SchedulerSessionLocal() as db:
         if not _try_lock(db, _HOT_ADVISORY_LOCK_KEY):
             logger.info("未获得热度锁（其他实例正在执行），跳过本轮")
             return 0
