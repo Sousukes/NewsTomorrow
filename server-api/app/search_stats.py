@@ -15,9 +15,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from .cache import build_cache
+from .config import HOT_TERMS_TTL_SECONDS, REDIS_URL
 from .models import SearchLog, now_str
 
 logger = logging.getLogger("toutiao.search_stats")
+
+# 热搜词缓存（D6）：进程内 / Redis 由 `cache.build_cache` 按 REDIS_URL 选。
+# 键包含 `days` 与 `limit`——两者的任意组合都是一份不同的榜，共用一个键会串数据。
+_hot_cache = build_cache(HOT_TERMS_TTL_SECONDS, REDIS_URL)
 
 # 同一用户同一词的去重窗口（秒）：窗口内重复搜索不重复计数
 DEDUP_WINDOW_SECONDS = 60
@@ -75,7 +81,27 @@ def record_search(db: Session, term: str, user_id: int | None = None, now=None) 
 
 
 def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=None) -> list[dict]:
-    """近 `days` 天热词，按搜索次数倒序；同次数按词升序（保证顺序稳定）。"""
+    """近 `days` 天热词，按搜索次数倒序；同次数按词升序（保证顺序稳定）。
+
+    为什么要缓存（D6）：这是一条 `GROUP BY term + ORDER BY count` 的聚合，
+    每次打开搜索页都打一次，而**窗口内的结果对所有用户都相同**——典型的
+    "同样的昂贵计算被重复做了 N 次"。
+
+    两条刻意设计：
+    1. **显式传 `now` 时绕过缓存**。`now` 是测试与回放的注入点，缓存会让
+       "换个时间点重算"直接拿到上一份结果——测试之间会互相污染，
+       而且这种失败看起来像"聚合算错了"，极难定位。
+    2. **不做主动失效**（只靠 TTL，默认 60s）。为它加失效意味着每次
+       `record_search` 都要删一次全站共享的键——高频写路径上多一次往返，
+       换来的只是"刚搜的词立刻上榜"，不值。
+    """
+    use_cache = now is None
+    key = f"hot_terms:{days}:{limit}"
+    if use_cache:
+        cached = _hot_cache.get(key)
+        if cached is not None:
+            return cached
+
     now = now or datetime.now(timezone.utc)
     cutoff = _iso(now - timedelta(days=days))
     rows = (
@@ -86,7 +112,11 @@ def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=Non
         .limit(limit)
         .all()
     )
-    return [{"term": t, "count": int(c)} for t, c in rows]
+    out = [{"term": t, "count": int(c)} for t, c in rows]
+    if use_cache:
+        # 空榜也缓存：无数据时每次都跑聚合同样是浪费（而且空榜更常见于新站）
+        _hot_cache.set(key, out, HOT_TERMS_TTL_SECONDS)
+    return out
 
 
 def prune_search_logs(db: Session, keep_days: int = LOG_KEEP_DAYS, now=None) -> int:

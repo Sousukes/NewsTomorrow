@@ -120,6 +120,13 @@ CACHE_ENABLED = _env("CACHE_ENABLED", "true").lower() in ("1", "true", "yes", "o
 # 会主动删键，所以这个值只兜「用户行为变了但没走写入路径」的漏网情况。
 CHANNEL_PREF_TTL_SECONDS = max(30, int(_env("CHANNEL_PREF_TTL_SECONDS", "300")))
 
+# 热搜词缓存（D6）。**短 TTL + 不做主动失效**是刻意的：
+# 热搜是「近 N 天聚合」的统计值，本来就不需要秒级准确；用户搜索后最多 60 秒
+# 才在榜上看到自己那个词，完全可接受。反之，如果为它加主动失效，
+# 每次 `record_search` 都要删一次全站共享的键——高频写路径上多一次 Redis
+# 往返，收益远小于代价。`now` 显式传入时（测试/回放）**绕过缓存**，见实现。
+HOT_TERMS_TTL_SECONDS = max(10, int(_env("HOT_TERMS_TTL_SECONDS", "60")))
+
 # 种子演示账号
 DEMO_PHONE = _env("DEMO_PHONE", "13800138000")
 DEMO_PASSWORD = _env("DEMO_PASSWORD", "123456")
