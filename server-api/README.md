@@ -297,6 +297,12 @@ POST /api/auth/step-up   { password }        →  { stepUpToken, expiresIn }
 （在后），未授权者拿到的是 **40301**（权限不足）而不是 40304——不向外透露
 站内有哪类操作需要二次校验。
 
+## 部署
+
+容器化形态（postgres + redis + 后端 + nginx 托管前端）与**迁移前置钩子**见
+仓库根的 [`docs/deploy.md`](../docs/deploy.md)。要点：迁移是一次性服务，
+失败会**阻止**服务启动；生产必须设置 `OPS_TOKEN`（否则容器健康检查不通过）。
+
 ## 图片代理（B4）
 
 `GET /api/img?url=<原地址>&w=<目标宽度>`

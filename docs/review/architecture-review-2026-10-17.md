@@ -54,6 +54,9 @@
 > - **B4** 图片直连源站 / CSP 收不紧 → P1-43 已处置（`GET /api/img` 代理，
 >   SSRF 防线逐条写在 `app/routers/img.py` 顶部；有后端时 `img-src` 收掉
 >   `https:`；`media-src` 保留是**视频**未代理，已开 B7 单独跟踪）
+> - **D8** 无容器化 / 无迁移前置钩子 → P1-44 已处置（compose 四服务 +
+>   `migrate` 一次性服务 + `docs/deploy.md`）。**边界**：本机无 Docker 守护
+>   进程，镜像**未在 CI 验证**，已开「CI 验证镜像可构建」单独跟踪
 
 ## 1. 资产快照（实测）
 
@@ -65,7 +68,7 @@
 | 迁移 | 28 个版本（0001 ~ 0028） | `alembic check` 当前无漂移 |
 | mock 后端 | `server.mjs` 3,007 行 | **后端逻辑的第二实现**（含昵称引擎副本） |
 | 文档 | README 102KB / 优化落地记录 139KB | 单文件体积已影响可检索性 |
-| CI | 前端 依赖审计+type+lint+format+test+build+storybook；后端 import+pytest+启动+契约+迁移校验 | **不含覆盖率**（F2 待排期） |
+| CI | 前端 依赖审计+type+lint+format+test+build+storybook；后端 import+pytest+启动+契约+迁移校验 | **不含覆盖率**（F2 待排期）、**不含 docker build**（P1-44 已登记） |
 
 ---
 

@@ -1,0 +1,22 @@
+# 上下文里不需要的东西一律排掉（否则它们会进镜像层，白占体积还可能带进密钥）
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite3
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+tests/
+docs/
+README.md
+scripts/*.sh
+!scripts/entrypoint.sh
+tmp/
+.tmp/

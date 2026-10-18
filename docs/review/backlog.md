@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（21 项）
+## 开放项（20 项）
 
 ### P1 · 安全
 
@@ -39,7 +39,6 @@
 
 | ID | 问题 | 成本 | 建议方向 | 来源 |
 | --- | --- | --- | --- | --- |
-| D8 | 无 Docker / 部署编排 / 迁移前置钩子 | S | Dockerfile + compose；启动前 `alembic upgrade head`（直接消除 P1-24 那类环境债） | 审查报告 §3.3 |
 | F2 | 无覆盖率门槛与趋势 | S | `--cov-fail-under` 下限 + CI 趋势（不追求高数字，先防下跌） | 审查报告 §3.3 |
 | F4 | 文档体积失控（README 102KB、落地记录 139KB），单文件已影响可检索性 | S | 按专题拆到 `docs/`（接口/运维/治理/前端），主文档只留索引 | 审查报告 §4 |
 | D2 | `admin.py` 单文件 1,640 行 / 34 端点，跨 6 个业务域 | M | 拆 `routers/admin/{sources,news,comments,words,nickname,users,audit}.py`，共享 `_require_admin`/`record_audit` | 审查报告 §3.3 |
@@ -51,6 +50,7 @@
 
 | ID | 方向 | 成本 | 说明 | 来源 |
 | --- | --- | --- | --- | --- |
+| D8 | CI 验证镜像可构建 | S | P1-44 落地了 Dockerfile/compose，但**本机无 Docker 守护进程，镜像未在 CI 验证**。需在 workflow 增加 `docker compose build`（顺带能挡住 nginx.conf / Dockerfile 语法漂移）。当前只有 entrypoint 的实际执行验证 + 部署文件静态断言 | P1-44 拆出 |
 | E5 | 用户举报入口 | S | 内容治理只有机器审核 + 运营后台，用户侧无反馈通道 | 审查报告 §4 |
 | E6 | 评论排序（最热/最新）、关注作者 | S | 互动深度不足 | 审查报告 §4 |
 | D6 | Redis 升级为二级缓存层 | M | 限流已支持；`app/cache.py` 已落地（B3）但仅 JSON 值；扩展至热搜词、热门列表、词库指纹 |
@@ -89,3 +89,4 @@
 | P1-41 | C4 修改密码 + 管理员代重置 + 强制改密受限态（迁移 0028） |
 | P1-42 | B2 列表默认走 keyset（首页免全表 count）+ B3 频道偏好缓存（`app/cache.py`） |
 | P1-43 | B4 图片代理 + CSP `img-src` 收紧（SSRF 防线；Pillow 走可选依赖） |
+| P1-44 | D8 容器化 + 迁移前置钩子（compose 四服务、`migrate` 一次性服务、`docs/deploy.md`） |

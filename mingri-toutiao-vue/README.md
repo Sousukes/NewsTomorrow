@@ -610,6 +610,14 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 后端那半（端点清单、账号维度锁定、40304 而非 401 的理由）见 `server-api/README.md`。
 
+## 部署
+
+容器化形态（nginx 托管 SPA + 反代 `/api`，前后端同源）与两个**必须显式传**的
+构建参数（`VITE_USE_MOCK=false`、留空的 `VITE_API_BASE`）见仓库根的
+[`docs/deploy.md`](../docs/deploy.md)。nginx 侧只补 `frame-ancestors` 响应头——
+它是 `<meta>` 里被规范忽略、只有响应头才生效的那一条；其余 CSP 仍由构建期注入，
+避免两份策略各自漂移。
+
 ## 图片代理与 CSP 收紧（B4）
 
 外站图片一律改走**本域图片代理**：`utils/image.ts::proxiedImageUrl(url, width)`

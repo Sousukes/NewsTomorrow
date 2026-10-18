@@ -1,0 +1,125 @@
+# 本地部署形态（D8）：postgres + redis + backend + frontend
+#
+# 设计上的几个刻意：
+#
+# - **迁移是一次性服务**（migrate），不是每个副本都跑。多副本并发跑同一份
+#   DDL 会互相锁死；backend `depends_on: migrate: service_completed_successfully`，
+#   于是「服务起来时 schema 一定是新的」，且迁移失败会**阻止**服务启动
+#   （而不是起一个满屏 500 的服务）。
+# - **backend 设 RUN_MIGRATIONS=false**：迁移已由上面那个服务负责，
+#   entrypoint 里那个开关就是为这两种用法准备的。
+# - **frontend 反代 /api**：前后端同源，浏览器只跟一个源打交道——
+#   CSP 能收得最紧（img-src 不必放行任何外域）、没有 CORS 预检。
+# - **数据库健康检查**：postgres 起来不等于能接受连接（initdb 期间不行）。
+#   `depends_on: condition: service_healthy` 是唯一可靠的做法，
+#   靠 sleep 是拿概率换确定性。
+#
+# 迁移/运行分离也为 backlog 的 B5（抓取 worker 独立进程）留好了位置：
+# 将来加一个 worker 服务复用同一镜像即可，不必重排这四个服务。
+
+name: toutiao
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-toutiao}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须在 .env 里设置}
+      POSTGRES_DB: ${POSTGRES_DB:-toutiao}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # -d/-U 与环境变量保持一致：pg_isready 用错用户会一直报"accepting
+      # connections"之外的状态，健康检查因此永远不过
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-toutiao} -d ${POSTGRES_DB:-toutiao}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # 不对宿主机暴露端口：数据库只在 compose 网络内可达。
+    # 需要本地连库调试时用 `docker compose exec db psql -U …`，而不是把 5432 开出去。
+    expose:
+      - "5432"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 缓存与限流都是**可丢**数据（丢了只是慢 / 计数不准），
+    # 所以不持久化：省一次磁盘写入，也避免"缓存脏了要手动清"的运维动作
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # 一次性迁移服务：跑完退出 0。backend 等它成功结束才启动。
+  migrate:
+    build:
+      context: ./server-api
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: &backend_env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-toutiao}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-toutiao}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      JWT_SECRET: ${JWT_SECRET:?必须在 .env 里设置，至少 32 字节}
+      # C2/C5：应急管理员与运维令牌。**生产至少留一条 env 管理员**——
+      # 它是数据库故障或白名单被误删时唯一还能进后台的入口
+      ADMIN_PHONES: ${ADMIN_PHONES:-}
+      OPS_TOKEN: ${OPS_TOKEN:-}
+      REDIS_URL: redis://redis:6379/0
+      LOGIN_FAIL_LIMIT: ${LOGIN_FAIL_LIMIT:-5}
+      LOGIN_FAIL_WINDOW_SECONDS: ${LOGIN_FAIL_WINDOW_SECONDS:-900}
+      FEED_CRON_ENABLED: ${FEED_CRON_ENABLED:-true}
+      HOT_CRON_ENABLED: ${HOT_CRON_ENABLED:-true}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      CHANNEL_PREF_TTL_SECONDS: ${CHANNEL_PREF_TTL_SECONDS:-300}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: ./server-api
+    restart: unless-stopped
+    environment:
+      <<: *backend_env
+      # 迁移已由 migrate 服务负责
+      RUN_MIGRATIONS: "false"
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      # nginx 反代进来时，对端是 compose 网络里的 nginx；
+      # 采信 X-Forwarded-For 只对这一网段生效（防伪造绕过限流）
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-768M}
+
+  frontend:
+    build:
+      context: ./mingri-toutiao-vue
+      args:
+        # 留空 = 请求走相对路径 /api/…，由 nginx 反代（前后端同源）
+        VITE_API_BASE: ""
+        # **必须显式 false**：USE_MOCK 默认值是「没配后端地址就当演示态」，
+        # 不显式传的话生产镜像会静默跑起内置 mock，界面上完全看不出来
+        VITE_USE_MOCK: "false"
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+volumes:
+  db-data:
