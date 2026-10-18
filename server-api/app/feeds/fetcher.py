@@ -38,6 +38,9 @@ class RawItem:
     # 正文：去标签后按段落以 \n 分隔（E1）。空串 = 该源没给正文
     content: str = ""
     source: str = ""
+    # 来源的稳定标识（`rss_sources.key`，E6b）。`source` 是名称快照，运营改名后
+    # 就与历史行对不上；关注/聚合必须靠 key。
+    source_key: str = ""
     time_text: str = ""
     published_at: datetime | None = None
     url: str = ""
@@ -235,6 +238,9 @@ def parse_feed(xml_text: str, source: dict) -> list[RawItem]:
                 summary=summary,
                 content=content,
                 source=source["name"],
+                # key 缺失时留空串（单测/脚本直接用 dict 造源时可能没有 key）：
+                # 落库后为 NULL，不进关注流，但不影响展示
+                source_key=source.get("key", ""),
                 time_text=_to_relative_time(published),
                 published_at=published,
                 url=link,

@@ -132,6 +132,27 @@ const news = [
   },
 ];
 
+/* E6b：来源目录与稳定标识 ---------------------------------------------------
+ *
+ * mock 没有 `rss_sources` 表：按 `source` 名称去重合成目录，`key` 由名称 slug 化，
+ * 并把 `sourceKey` 回写到每条资讯上（与后端 `to_out` 的 sourceKey 同形）。
+ * 这与真后端的差别只在「key 从哪来」——真后端来自可配置的源表，
+ * mock 来自现有资讯的名称；关注、过滤、计数三条链路的行为一致。
+ */
+const SOURCE_DIR = new Map(); // key → { key, name, channel, enabled }
+const SOURCE_KEY_BY_NAME = new Map(); // name → key（回写 news.sourceKey 用）
+for (const n of news) {
+  if (!n.source || SOURCE_KEY_BY_NAME.has(n.source)) continue;
+  const key = `src_${SOURCE_DIR.size + 1}`;
+  SOURCE_KEY_BY_NAME.set(n.source, key);
+  SOURCE_DIR.set(key, { key, name: n.source, channel: n.channel, enabled: true });
+}
+for (const n of news) {
+  const key = SOURCE_KEY_BY_NAME.get(n.source);
+  if (key) n.sourceKey = key;
+}
+const sourceCount = (key) => news.filter((n) => n.sourceKey === key && n.hidden !== true).length;
+
 /**
  * 文章 id → 评论列表（内存，可增删改）。
  * 两级评论（P1-12，与后端一致）：rootId 为 null 的是主评论；回复的 rootId
@@ -1220,6 +1241,16 @@ function marksOf(phone) {
 /** 历史保留上限（与后端 HISTORY_MAX 对齐） */
 const HISTORY_LIMIT = 50;
 
+/* E6b：关注来源（phone → Set<source_key>）。与后端 user_follows 同语义：
+   复合主键天然幂等，重复关注不会产生第二条。 */
+const follows = new Map();
+/** 关注上限（与后端 me.FOLLOW_MAX 对齐） */
+const FOLLOW_MAX = 200;
+function followsOf(phone) {
+  if (!follows.has(phone)) follows.set(phone, new Set());
+  return follows.get(phone);
+}
+
 /**
  * 账号注册表（P1-24）：phone → { id, name, pendingReview, reviewedAt }。
  * mock 无注册端点，账号在**登录时懒创建**（默认名与后端新用户一致），改名走
@@ -1961,7 +1992,20 @@ const server = createServer(async (req, res) => {
     if (!SORT_MODES.includes(sort)) {
       return fail(res, 422, 42201, `排序方式不支持：${sort}`);
     }
-    let list = channel === 'recommend' ? news : news.filter((n) => n.channel === channel);
+    // E6b：关注流（需登录；**忽略 channel**——前端切 tab 时会带着上一次的频道）
+    const feed = url.searchParams.get('feed');
+    if (feed && feed !== 'following') {
+      return fail(res, 422, 42200, `不支持的 feed：${feed}`);
+    }
+    let list;
+    if (feed === 'following') {
+      const t = requireAuth(req, res);
+      if (!t) return;
+      const keys = followsOf(tokens.get(t)?.phone ?? 'unknown');
+      list = news.filter((n) => keys.has(n.sourceKey));
+    } else {
+      list = channel === 'recommend' ? news : news.filter((n) => n.channel === channel);
+    }
     // P1-20：公开列表实时过滤已下架（软下架，与后端 list_news 同口径）
     list = list.filter((n) => n.hidden !== true);
     // 热度模式：无服务端时用评论数近似（离线演示也能看出差异）
@@ -2278,6 +2322,70 @@ const server = createServer(async (req, res) => {
       'Content-Disposition': 'inline',
     });
     return res.end(png);
+  }
+
+  // GET /sources（E6b，公开）：来源目录
+  //
+  // 只暴露 key/name/channel/newsCount——真后端也不下发 url 与健康状态，
+  // 那是运营信息，公开出去等于给抓取滥用者一份清单。
+  if (head === 'sources' && !a && method === 'GET') {
+    const channel = url.searchParams.get('channel');
+    const list = [...SOURCE_DIR.values()]
+      .filter((s) => s.enabled && (!channel || s.channel === channel))
+      .map((s) => ({
+        key: s.key,
+        name: s.name,
+        channel: s.channel,
+        newsCount: sourceCount(s.key),
+      }));
+    return ok(res, { list });
+  }
+
+  // ---- 关注来源（/me/follows，E6b，需登录）----
+  // 与后端同口径：写操作返回完整集合 { keys, list }；POST / DELETE 均幂等。
+  if (head === 'me' && a === 'follows') {
+    const t = requireAuth(req, res);
+    if (!t) return;
+    const phone = tokens.get(t)?.phone ?? 'unknown';
+    if (method !== 'GET' && !requirePasswordCurrent(req, res, phone)) return;
+    const set = followsOf(phone);
+    const payload = () => {
+      // 源被删除（mock 里不会发生）时应从列表消失但保留关系——与后端一致
+      const keys = [...set].filter((k) => SOURCE_DIR.has(k));
+      return {
+        keys,
+        list: keys.map((k) => {
+          const s = SOURCE_DIR.get(k);
+          return {
+            key: s.key,
+            name: s.name,
+            channel: s.channel,
+            enabled: s.enabled,
+            newsCount: sourceCount(k),
+          };
+        }),
+      };
+    };
+
+    if (method === 'GET') return ok(res, payload());
+
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const key = String(body.sourceKey ?? '').trim();
+      if (!key) return fail(res, 422, 42207, '来源标识不能为空');
+      const src = SOURCE_DIR.get(key);
+      if (!src || !src.enabled) return fail(res, 404, 40410, '来源不存在或已停用');
+      if (!set.has(key)) {
+        if (set.size >= FOLLOW_MAX) return fail(res, 422, 42207, `最多关注 ${FOLLOW_MAX} 个来源`);
+        set.add(key);
+      }
+      return ok(res, payload(), '已关注');
+    }
+
+    if (method === 'DELETE' && b) {
+      set.delete(decodeURIComponent(b));
+      return ok(res, payload(), '已取消关注');
+    }
   }
 
   // ---- 收藏 / 浏览历史（/me/*，需登录）----

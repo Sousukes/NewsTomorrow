@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user, require_password_current
-from ..models import News, User, UserFavorite, UserHistory
+from ..models import News, RssSource, User, UserFavorite, UserFollow, UserHistory
 from ..nickname_moderation import (
     MESSAGE_REVIEW,
     RESULT_BLOCK,
@@ -30,7 +30,7 @@ from ..nickname_moderation import (
 )
 from ..ranking import bump_hot_score, invalidate_channel_preferences, recompute_hot_scores
 from ..response import ok
-from ..schemas import MarkBulkIn, MarkIn, NicknameUpdateIn
+from ..schemas import FollowIn, MarkBulkIn, MarkIn, NicknameUpdateIn
 from ..step_up import require_step_up
 from .news import to_out as news_to_out
 
@@ -38,6 +38,8 @@ router = APIRouter(prefix="/api/me", tags=["me"])
 
 # 历史保留上限（与前端 `.slice(0, 50)` 对齐）
 HISTORY_MAX = 50
+# 关注来源上限（E6b）：防脚本刷关注把表撑爆，也防「关注了 2000 个源」这种无意义状态
+FOLLOW_MAX = 200
 
 
 def _now() -> datetime:
@@ -269,6 +271,108 @@ def merge_history(
     added = _merge(db, user, UserHistory, UserHistory.viewed_at, body.ids)
     _trim_history(db, user)
     return ok(_history_payload(db, user), message=f"已合并 {added} 条历史")
+
+
+# ------------------------------ 关注来源（E6b） ------------------------------
+
+
+def _follows_payload(db: Session, user: User) -> dict:
+    """`{ keys, list }`：关注列表按关注时间倒序，附带来源展示信息。
+
+    - 只返回**仍存在**的来源（源被删除时关注行保留，但不该出现在列表里）；
+    - 带 `enabled`：停用源的关注流必然是空的，界面要能解释「为什么没内容」，
+      而不是让用户以为功能坏了；
+    - `newsCount` 一次 `GROUP BY` 取全部，不逐源查询。
+    """
+    rows = db.execute(
+        select(UserFollow.source_key, UserFollow.created_at)
+        .where(UserFollow.user_id == user.id)
+        .order_by(UserFollow.created_at.desc(), UserFollow.source_key.desc())
+    ).all()
+    keys = [k for k, _ in rows]
+    if not keys:
+        return {"keys": [], "list": []}
+
+    sources = {
+        key: (name, channel, enabled)
+        for key, name, channel, enabled in db.execute(
+            select(RssSource.key, RssSource.name, RssSource.channel, RssSource.enabled).where(
+                RssSource.key.in_(keys)
+            )
+        ).all()
+    }
+    counts = dict(
+        db.execute(
+            select(News.source_key, func.count(News.id))
+            .where(News.source_key.in_(keys), News.hidden.is_(False))
+            .group_by(News.source_key)
+        ).all()
+    )
+
+    alive = [k for k in keys if k in sources]
+    return {
+        "keys": alive,
+        "list": [
+            {
+                "key": k,
+                "name": sources[k][0],
+                "channel": sources[k][1],
+                "enabled": bool(sources[k][2]),
+                "newsCount": int(counts.get(k, 0)),
+            }
+            for k in alive
+        ],
+    }
+
+
+@router.get("/follows", response_model=None)
+def list_follows(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """我关注的来源（按关注时间倒序）。"""
+    return ok(_follows_payload(db, user))
+
+
+@router.post("/follows", response_model=None)
+def add_follow(
+    body: FollowIn, db: Session = Depends(get_db), user: User = Depends(require_password_current)
+):
+    """关注一个来源（幂等）。来源不存在或已停用 → 40410。"""
+    key = (body.sourceKey or "").strip()
+    if not key:
+        raise HTTPException(status_code=422, detail={"code": 42207, "message": "来源标识不能为空"})
+
+    src = db.get(RssSource, key)
+    # 停用源与不存在同码：对外不暴露「它存在但被停用了」（与资讯软下架同一处方）
+    if src is None or not src.enabled:
+        raise HTTPException(
+            status_code=404, detail={"code": 40410, "message": "来源不存在或已停用"}
+        )
+
+    if db.get(UserFollow, {"user_id": user.id, "source_key": key}) is None:
+        total = db.execute(
+            select(func.count()).select_from(UserFollow).where(UserFollow.user_id == user.id)
+        ).scalar() or 0
+        if total >= FOLLOW_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": 42207, "message": f"最多关注 {FOLLOW_MAX} 个来源"},
+            )
+        db.add(UserFollow(user_id=user.id, source_key=key, created_at=_now_iso()))
+        db.commit()
+    return ok(_follows_payload(db, user), message="已关注")
+
+
+@router.delete("/follows/{source_key}", response_model=None)
+def remove_follow(
+    source_key: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_password_current),
+):
+    """取消关注（幂等；未关注也返回成功）。"""
+    row = db.get(UserFollow, {"user_id": user.id, "source_key": source_key})
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    return ok(_follows_payload(db, user), message="已取消关注")
 
 
 # ------------------------------ 昵称（P1-24） ------------------------------

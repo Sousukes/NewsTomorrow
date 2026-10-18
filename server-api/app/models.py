@@ -172,6 +172,11 @@ class News(Base):
     # 列表接口（to_out）刻意不输出它，避免一页 20 条几十 KB 的无效带宽。
     content = Column(Text, nullable=True)
     source = Column(String(50), default="")
+    # 来源的**稳定标识**（对应 `rss_sources.key`），E6b。
+    # `source` 是名称快照，运营改名后同一源会出现两个名字；关注、按源聚合等
+    # 「跨改名仍要成立」的关系必须挂在 key 上，不能挂在名称上。
+    # **可空**：回填时名称已对不上的历史行为 NULL（不参与关注流，展示不受影响）。
+    source_key = Column(String(64), index=True)
     comment_count = Column(Integer, default=0)
     time = Column(String(30), default="")
     images = Column(JSONType, default=list)
@@ -393,6 +398,30 @@ class UserHistory(Base):
     viewed_at = Column(String(30), default=now_str, nullable=False)
 
     __table_args__ = (Index("ix_user_history_user_viewed", "user_id", "viewed_at"),)
+
+
+class UserFollow(Base):
+    """用户关注来源（user × rss_sources.key，E6b）。
+
+    为什么按 `key` 而不是按名称：`rss_sources.name` 可被运营改名，名称一变，
+    已关注用户的关注流就会**静默变空**（界面还显示「已关注」）——这是最难排查的
+    一类缺陷。`key` 是主键，稳定不变。
+
+    **不建外键到 `rss_sources`**：源可被删除/重建（key 可能复用），关注行应保留；
+    列表接口按「源仍存在」过滤即可（与 `reports.target_id` 不建外键同理）。
+
+    复合主键 `(user_id, source_key)` 天然幂等：重复关注由主键冲突兜住，
+    与 `user_favorites` 同一处方。
+    """
+
+    __tablename__ = "user_follows"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    source_key = Column(String(64), primary_key=True)
+    # 绝对 ISO 时间：关注列表按关注时间倒序的唯一依据
+    created_at = Column(String(30), default=now_str, nullable=False)
+
+    __table_args__ = (Index("ix_user_follows_source", "source_key"),)
 
 
 class SearchLog(Base):

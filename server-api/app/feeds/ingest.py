@@ -398,6 +398,9 @@ def upsert_news(db: Session, items: list[RawItem]) -> FetchReport:
                     summary=it.summary,
                     content=it.content or None,
                     source=it.source,
+                    # E6b：稳定标识随抓取一并写入。迁移 0033 只回填历史，
+                    # 这里不写的话新数据会重新变成 NULL（关注流随即漏内容）
+                    source_key=it.source_key or None,
                     comment_count=0,
                     time=it.time_text or "刚刚",
                     images=it.images or None,

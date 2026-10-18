@@ -8,7 +8,8 @@
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
  * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）、
  * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）、令牌双轨与续期（P1-38/C1）、
- * 高敏操作二次校验（P1-40/C10）、用户举报（P1-65/E5）、评论排序（E6）。
+ * 高敏操作二次校验（P1-40/C10）、用户举报（P1-65/E5）、评论排序（E6）、
+ * 关注来源与关注流（P1-68/E6b）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -594,6 +595,88 @@ const run = async () => {
       '举报对象不存在或已删除',
     );
     check('目标不存在 → 40409 提示', missingTarget === '举报对象不存在或已删除', missingTarget);
+  }
+
+  // 8.95) 关注来源（E6b）：源目录 + /me/follows + 关注流
+  //
+  // 收尾会取关，不留残留；关注流断言用「不含该源」而不是「整体为空」——
+  // 开发库里可能本来就有关注关系，契约检查不该假设干净状态。
+  const dir = await request('/sources');
+  // 优先挑一个**有内容**的来源：关注一个空来源，"关注流只含该源"会在空列表上
+  // 恒真，等于没验。有内容才验得动过滤逻辑。
+  const dirList = dir.list ?? [];
+  const firstSource = dirList.find((s) => s.newsCount > 0) ?? dirList[0];
+  check(
+    'GET /sources 返回来源目录（公开）',
+    !!firstSource && 'key' in firstSource && 'newsCount' in firstSource,
+    firstSource?.name,
+  );
+  check('来源目录不暴露 url（运营信息）', !('url' in (firstSource ?? {})));
+
+  let followUnauthorized = false;
+  try {
+    await request('/me/follows');
+  } catch (e) {
+    followUnauthorized = e.message === '未登录或登录已过期';
+  }
+  check('无 token 访问 /me/follows → 401', followUnauthorized);
+
+  if (token && firstSource) {
+    const followed = await request('/me/follows', {
+      method: 'POST',
+      body: { sourceKey: firstSource.key },
+      token,
+    });
+    check(
+      '关注成功返回 { keys, list }',
+      Array.isArray(followed.keys) && followed.keys.includes(firstSource.key),
+    );
+    const again = await request('/me/follows', {
+      method: 'POST',
+      body: { sourceKey: firstSource.key },
+      token,
+    });
+    check(
+      '重复关注幂等（keys 不重复）',
+      again.keys.filter((k) => k === firstSource.key).length === 1,
+    );
+
+    const feedPage = await request('/news?feed=following&pageSize=5', { token });
+    check(
+      '关注流只含已关注来源',
+      (feedPage.list ?? []).every((n) => n.sourceKey === firstSource.key),
+      `${(feedPage.list ?? []).length} 条`,
+    );
+    if (firstSource.newsCount > 0) {
+      check(
+        '关注流返回该来源的内容（过滤不是"全空"）',
+        (feedPage.list ?? []).length > 0,
+        `newsCount=${firstSource.newsCount}`,
+      );
+    }
+    check(
+      '关注流条目带 sourceKey（前端据此判断"已关注"）',
+      (feedPage.list ?? []).every((n) => typeof n.sourceKey === 'string'),
+    );
+
+    let badFeed = '';
+    try {
+      await request('/news?feed=bogus', { token });
+    } catch (e) {
+      badFeed = e.message;
+    }
+    check('非法 feed → 42200 提示', badFeed.includes('不支持的 feed'), badFeed);
+
+    const unfollowed = await request(`/me/follows/${firstSource.key}`, {
+      method: 'DELETE',
+      token,
+    });
+    check('取关后返回空集合（幂等）', !unfollowed.keys.includes(firstSource.key));
+    const after = await request('/news?feed=following', { token });
+    check(
+      '取关后关注流不含该来源',
+      (after.list ?? []).every((n) => n.sourceKey !== firstSource.key),
+    );
   }
 
   // 9) 收藏 / 浏览历史云端同步（/api/me/*）

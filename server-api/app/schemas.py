@@ -84,6 +84,17 @@ class MarkIn(BaseModel):
     newsId: str = Field(min_length=1, max_length=32)
 
 
+class FollowIn(BaseModel):
+    """关注来源（E6b）：`sourceKey` 对应 `rss_sources.key`。
+
+    刻意**不校验是否存在**：那是路由的职责（要查库，且错误码是 40410 而非 422）。
+    这里只挡长度与空值——`min_length=1` 让空串在 422 阶段就被拒，
+    不必等到路由里再判一次。
+    """
+
+    sourceKey: str = Field(min_length=1, max_length=64)
+
+
 class MarkBulkIn(BaseModel):
     """收藏 / 历史：并集合并入参（客户端本地数据并入云端）。
 

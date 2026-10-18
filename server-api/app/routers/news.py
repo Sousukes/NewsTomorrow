@@ -24,12 +24,12 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, case, func, or_, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user_optional
-from ..models import News, User
+from ..models import News, User, UserFollow
 from ..ranking import (
     SORT_FOR_YOU,
     SORT_HOT,
@@ -57,6 +57,10 @@ _SIMILARITY_THRESHOLD = 0.05
 
 # 游标版本：v2 起携带 sort 与排序键（见模块 docstring）
 _CURSOR_V2 = 2
+
+# 关注流标识（E6b）。**不做成 channel**：`CHANNELS` 同时被后端用来校验运营填的
+# 频道（`feeds/sources.py::CHANNEL_KEYS`），混进去会让管理端多出一个非法频道选项。
+FEED_FOLLOWING = "following"
 
 
 def _trgm_available(db: Session) -> bool:
@@ -166,6 +170,9 @@ def to_out(n: News) -> dict:
         "title": n.title,
         "summary": n.summary or None,
         "source": n.source,
+        # E6b：来源稳定标识（可空）。前端据此判断"是否已关注"，
+        # 缺省时前端按"不可关注"处理（旧后端 / mock 未同步时不会报错）
+        "sourceKey": n.source_key,
         "commentCount": n.comment_count or 0,
         "time": n.time,
         "images": n.images or None,
@@ -285,6 +292,9 @@ def list_news(
     ),
     pageSize: int = Query(20, ge=1, le=100),
     cursor: Optional[str] = Query(None, description="游标分页；优先于 page"),
+    feed: Optional[str] = Query(
+        None, description="`following` = 关注流（需登录，忽略 channel）；缺省为普通信息流"
+    ),
     db: Session = Depends(get_db),
     current: Optional[User] = Depends(get_current_user_optional),
 ):
@@ -308,12 +318,43 @@ def list_news(
         raise HTTPException(
             status_code=422, detail={"code": 42201, "message": f"排序方式不支持：{sort}"}
         )
+    if feed not in (None, "", FEED_FOLLOWING):
+        raise HTTPException(
+            status_code=422, detail={"code": 42200, "message": f"不支持的 feed：{feed}"}
+        )
 
     # 频道偏好只服务 for-you；未登录时为空 → 自然退化为纯热度排序
     weights = channel_preferences(db, current.id) if (current and sort == SORT_FOR_YOU) else {}
 
     q = db.query(News)
-    if channel and channel != "recommend":
+    if feed == FEED_FOLLOWING:
+        # 关注流（E6b）：必须登录——未登录没有关注关系，静默返回空列表会让客户端
+        # 误以为"关注了但没内容"，不如直接 401 让前端引导登录
+        if current is None:
+            raise HTTPException(
+                status_code=401, detail={"code": 40100, "message": "未登录或登录已过期"}
+            )
+        followed = (
+            db.execute(select(UserFollow.source_key).where(UserFollow.user_id == current.id))
+            .scalars()
+            .all()
+        )
+        # **忽略 channel**：前端从别的 tab 切过来时会带着上一次的频道，
+        # 报错只会制造无意义的失败；关注流本身就是跨频道的
+        if not followed:
+            return ok(
+                {
+                    "list": [],
+                    "total": None,
+                    "page": None,
+                    "pageSize": pageSize,
+                    "sort": sort,
+                    "nextCursor": None,
+                    "hasMore": False,
+                }
+            )
+        q = q.filter(News.source_key.in_(followed))
+    elif channel and channel != "recommend":
         q = q.filter(News.channel == channel)
     # P1-20：已下架内容不进公开信息流（游标分页同样生效——过滤加在 keyset 之前）
     q = q.filter(News.hidden.is_(False))
