@@ -37,11 +37,12 @@ SQLite 把**以数字开头的字符串当数字**处理，于是整列的时间
     downgrade 为**空操作**。转成 timestamptz 后无法区分某行原先是 naive 还是
     aware（0027 已统一），强行回退等于把真 UTC 值改写成假 naive。
 """
-from datetime import datetime, timezone
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+
+from app.migration_utils import convert_column_type
 
 revision: str = "0030_health_event_at_datetime"
 down_revision: Union[str, None] = "0029_time_empty_to_null"
@@ -50,23 +51,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 TABLE = "rss_source_health_events"
 TMP = "rss_source_health_events_d1tmp"
-
-
-def _parse(value):
-    """ISO → aware datetime；不可解析或为空返回 None（不编造）。
-
-    naive 一律**按 UTC 解释**——与 0027 回填、`models.parse_dt` 同一口径。
-    """
-    if value is None or value == "":
-        return None
-    text = str(value).strip()
-    try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def upgrade() -> None:
@@ -81,79 +65,14 @@ def upgrade() -> None:
         )
         return
 
-    # ---- SQLite：显式重建（**不能用 CAST**，见文件头）----
-    old = sa.Table(TABLE, sa.MetaData(), autoload_with=bind)
-    columns = [c.name for c in old.columns]
-
-    new_columns = []
-    for col in old.columns:
-        # **外键必须一起搬**：只搬列定义的话，重建出来的表会悄悄丢掉
-        # `ON DELETE CASCADE`——源被删时健康历史不会跟着清理，而这种缺失
-        # 没有任何症状（数据只会越积越多）。复合外键不搬（当前表没有）。
-        # 用**位置参数**传 ForeignKey：写成 `foreign_keys=` 会被 SQLAlchemy
-        # 当成方言专用参数（'foreign_keys' 被拆成方言名 'foreign'）。
-        args = []
-        if len(col.foreign_keys) == 1:
-            fk = next(iter(col.foreign_keys))
-            # `ondelete` 也要搬：不搬的话重建出来的外键变成 NO ACTION，
-            # 源被删时健康历史**不会跟着清理**，而这种缺失没有任何症状
-            #（数据只会越积越多，直到有人翻代码才发现）。
-            args = [
-                sa.ForeignKey(
-                    fk.target_fullname,
-                    ondelete=fk.ondelete,
-                    onupdate=fk.onupdate,
-                    initially=fk.initially,
-                    deferrable=fk.deferrable,
-                    use_alter=fk.use_alter,
-                    name=fk.name,
-                )
-            ]
-        new_columns.append(
-            sa.Column(
-                col.name,
-                # 只换 `at` 的类型，其余原样搬
-                sa.DateTime(timezone=True) if col.name == "at" else col.type,
-                *args,
-                nullable=col.nullable,
-                primary_key=col.primary_key,
-            )
-        )
-    # 挂在**反射表的同一个 MetaData** 上：外键目标 `rss_sources` 必须在同一个
-    # MetaData 里才能解析得到（否则 NoReferencedTableError）。
-    # 用 `create()` 而不是 `metadata.create_all()`——后者会连带重建旧表。
-    new = sa.Table(TMP, old.metadata, *new_columns)
-    new.create(bind)
-
-    converted = 0
-    skipped = 0
-    # **不要**用 `with bind.begin()`：alembic 在迁移上下文里已经开启了事务，
-    # 再 begin 一次会报 `This connection has already initialized a SQLAlchemy
-    # Transaction()` —— 迁移直接中止，数据没转换却"看起来跑过了"。
-    rows = bind.execute(sa.select(old)).fetchall()
-    for row in rows:
-        data = {name: getattr(row, name) for name in columns}
-        data["at"] = _parse(data.get("at"))
-        if data["at"] is None:
-            skipped += 1
-        else:
-            converted += 1
-        bind.execute(new.insert().values(**data))
-
-    bind.execute(sa.text(f"DROP TABLE {TABLE}"))  # noqa: S608
-    bind.execute(sa.text(f"ALTER TABLE {TMP} RENAME TO {TABLE}"))  # noqa: S608
-    # 索引随旧表一并消失，必须按**模型里的原定义**补回——
-    # 自造一个名字相近的索引会让 `test_migrations` 断言"索引名与模型一致"时
-    # 报错，而真正的问题是"索引没了"被掩盖成"名字不对"。
-    bind.execute(
-        sa.text(
-            f"CREATE INDEX IF NOT EXISTS ix_rss_health_key_at ON {TABLE} (source_key, at)"  # noqa: S608
-        )
-    )
-
+    # SQLite：走公共 helper（反射 → 建新表 → Python 逐行转换 → 换名 → 按**反射到的
+    # 真名**重建索引）。helper 在 `app/migration_utils.py`，带 12 项通用测试——
+    # 不在这里重写一遍，是因为重建类迁移的坑不在算法而在"你记得搬哪些"，
+    # 复制粘贴的版本下一个迁移就会忘了搬外键。
+    res = convert_column_type(bind, TABLE, "at", sa.DateTime(timezone=True))
     print(
-        f"[0030] at 列已转 DateTime：转换 {converted} 行"
-        + (f"，{skipped} 行不可解析（写 NULL）" if skipped else "")
+        f"[0030] at 列已转 DateTime：转换 {res['converted']} 行"
+        + (f"，{res['skipped']} 行不可解析（写 NULL）" if res["skipped"] else "")
     )
 
 

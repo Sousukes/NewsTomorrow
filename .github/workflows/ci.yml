@@ -94,6 +94,21 @@ jobs:
         run: |
           python -m alembic upgrade head
           python -m alembic check
+      # P1-54：上面那一步在**空库**上跑，只验证了 PG 分支的语法，没验证
+      # **存量转换行为**——而这正是出问题最贵的地方（0030 在 SQLite 上把整列
+      # 时间截成年份，只因"排序看着正常"差点蒙过去）。这里造几条真实格式的
+      # 存量行再迁一次，断言值完整、偏移没丢。
+      - name: 迁移演练（带存量数据 · PostgreSQL）
+        env:
+          DATABASE_URL: postgresql+psycopg://toutiao:toutiao@localhost:5432/toutiao_drill
+        run: |
+          psql "postgresql://toutiao:toutiao@localhost:5432/postgres" \
+            -c "DROP DATABASE IF EXISTS toutiao_drill" \
+            -c "CREATE DATABASE toutiao_drill OWNER toutiao" >/dev/null
+          python -m alembic upgrade 0029_time_empty_to_null
+          python scripts/_migration_drill.py --insert
+          python -m alembic upgrade head
+          python scripts/_migration_drill.py --verify
       - name: 单元测试（带覆盖率门槛，F2）
         # 门槛在 .coveragerc 的 fail_under（实测 −2）：低于它这一步直接失败，
         # 于是"加了模块不写测试"过不了 CI。--cov-report=term 只打没覆盖满的
