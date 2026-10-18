@@ -150,3 +150,16 @@ jobs:
           # 复用后端配置里的演示密码，避免与仓库内默认值脱节
           pw=$(cd ../server-api && python -c "from app.config import DEMO_PASSWORD;print(DEMO_PASSWORD)")
           DEMO_PASSWORD="$pw" node scripts/contract-check.mjs
+  docker:
+    name: 镜像构建（Dockerfile / compose 语法验证，D8）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # compose 用了 `${JWT_SECRET:?}` / `${POSTGRES_PASSWORD:?}` 的必填拦截，
+      # `docker compose build` 阶段插值就会要求它们存在。这里给**占位值**——
+      # build 只解析文件、不启动服务，占位值不会进入任何运行态。
+      - name: 构建全部镜像（不启动服务）
+        env:
+          POSTGRES_PASSWORD: ci-placeholder-password
+          JWT_SECRET: ci-placeholder-secret-not-for-production
+        run: docker compose build

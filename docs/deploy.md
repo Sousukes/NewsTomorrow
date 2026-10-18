@@ -114,12 +114,15 @@ RUN pip install --no-cache-dir Pillow>=10.0
 
 ## 镜像可运维性说明
 
-`docker build` **不在 CI 里跑**（本机无 Docker 守护进程，无法验证）。
-当前保证的是：
+CI 的 `docker` job 会 `docker compose build`（D8）——**镜像构建在推 PR 时就验证**，
+`Dockerfile` / `nginx.conf` / `docker-compose.yml` 的语法漂移会在 CI 直接红。
 
+当前保证分三层：
+
+- **CI 构建**：`docker compose build` 验证「四个镜像都能构建成功」；
 - entrypoint 的执行顺序与失败即停，由 `tests/test_deploy.py` **实际执行**验证；
 - compose / Dockerfile / nginx.conf 的关键不变量（迁移顺序、`/api` 不做 SPA
   fallback、healthcheck 带令牌、禁 mock 等）由**静态断言**守住。
 
-把 `docker compose build` 加进 CI 是下一步（backlog 已登记）。在那之前，
-镜像本身是「结构正确但未在 CI 验证」的状态——这个边界必须清楚。
+诚实边界：**构建通过 ≠ 能跑起来**。CI 验证的是"镜像可构建"，不是"容器能正常
+启动并服务"——后者仍没有端到端验证（需要真实 PG/Redis 运行态，属后续项）。

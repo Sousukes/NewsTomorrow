@@ -256,12 +256,42 @@ class TestDeployDoc:
         for token in ("JWT_SECRET", "POSTGRES_PASSWORD", "OPS_TOKEN", "TRUSTED_PROXIES"):
             assert token in DEPLOY_DOC, f"部署文档没提 {token}"
 
-    def test_doc_states_docker_build_unverified(self):
-        """边界必须写在文档里，不能让人以为镜像已经在 CI 验证过。"""
-        assert "不在 CI 里跑" in DEPLOY_DOC or "无法验证" in DEPLOY_DOC
+    def test_doc_states_images_are_built_in_ci(self):
+        """边界必须诚实：CI 验证的是**构建**，不是**运行**。
+
+        构建通过 ≠ 能跑起来。部署文档要写清这两件事的边界，
+        不能因为加了 CI 构建就让读者以为镜像已被端到端验证过。
+        """
+        assert "CI" in DEPLOY_DOC and ("构建" in DEPLOY_DOC or "build" in DEPLOY_DOC.lower())
 
 
 def test_sh_is_available_for_posix_only():
     """Windows 本机有 Git Bash，但 CI 才有真正的 sh；缺 sh 时整体跳过。"""
     if sys.platform != "win32" and not shutil.which("sh"):
         pytest.skip("环境里没有 sh")
+
+class TestCiBuildsImages:
+    """D8：镜像构建已经进 CI（此前只有静态断言 + entrypoint 执行验证）。"""
+
+    def test_ci_declares_docker_compose_build(self):
+        import yaml
+
+        ci = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        assert "docker" in ci["jobs"], "CI 缺 docker job"
+        runs = [s.get("run", "") for s in ci["jobs"]["docker"]["steps"]]
+        assert any("docker compose build" in r for r in runs), runs
+
+    def test_build_job_feeds_placeholder_secrets(self):
+        """compose 的 ${VAR:?} 在 build 阶段插值也要变量存在。
+
+        占位值只用于通过插值（build 不启动服务），绝不能是"看起来能用的默认值"。
+        """
+        import yaml
+
+        ci = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        build_step = next(s for s in ci["jobs"]["docker"]["steps"] if s.get("run") == "docker compose build")
+        env = build_step.get("env", {})
+        assert "POSTGRES_PASSWORD" in env
+        assert "JWT_SECRET" in env
+        # 占位值里必须带 placeholder，防止有人误填成真实/可用的默认密钥
+        assert "placeholder" in env["JWT_SECRET"].lower()

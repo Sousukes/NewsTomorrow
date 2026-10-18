@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（12 项）
+## 开放项（11 项）
 
 ### P1 · 安全
 
@@ -46,7 +46,6 @@
 
 | ID | 方向 | 成本 | 说明 | 来源 |
 | --- | --- | --- | --- | --- |
-| D8 | CI 验证镜像可构建 | S | P1-44 落地了 Dockerfile/compose，但**本机无 Docker 守护进程，镜像未在 CI 验证**。需在 workflow 增加 `docker compose build`（顺带能挡住 nginx.conf / Dockerfile 语法漂移）。当前只有 entrypoint 的实际执行验证 + 部署文件静态断言 | P1-44 拆出 |
 | E5 | 用户举报入口 | S | 内容治理只有机器审核 + 运营后台，用户侧无反馈通道 | 审查报告 §4 |
 | E6 | 评论排序（最热/最新）、关注作者 | S | 互动深度不足 | 审查报告 §4 |
 | B7 | 视频仍直连源站（`media-src` 保留 `https:`） | L | B4 图片代理落地后，CSP **只剩这一处**松口。视频是几十 MB + Range 请求，与图片不是一个量级：需要 Range 透传、分片缓存、带宽/成本预案后再做 | P1-43 拆出 |
@@ -88,6 +87,7 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-64 | D8 镜像构建进 CI：`docker` job 跑 `docker compose build`（占位密钥通过 compose 的 `${VAR:?}` 插值）；更新 deploy.md 诚实边界（构建≠能运行）；test_deploy 改正向断言 + 加占位密钥断言 |
 | P1-63 | F5 最终批：补 `ChangePassword`(15.6%↑) / `api/me`(18.9%↑) / `api/news` 兜底（19 项）；覆盖率 83.69%，阈值 79/72/68/82；**F5 彻底闭环**；vitest 664 → 682 |
 | P1-62 | D6 热搜词缓存（`hot_terms`）：显式 `now` 绕过缓存、不做主动失效、`days/limit` 独立键；9 项测试（含 SQL 计数验证不查库）；**热门列表评估后刻意不做**（响应含用户态，缓存会串收藏态）；pytest 861 → 870 |
 | P1-61 | B5 连接池隔离：后台任务独立 engine（`FEED_DB_POOL_SIZE=2`）+ 独立 `application_name`；`dispose()` 释放两个池；SQLite 例外复用同 engine；10 项测试（含真建 PG engine 验 `pool.size()`）；pytest 851 → 861 |
