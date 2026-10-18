@@ -11,6 +11,7 @@ router 级依赖的价值不在于「少写几行」，而在于让「新增端�
 **必须用 `app.openapi()["paths"]`** 才能拿到完整清单。
 """
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -83,10 +84,18 @@ class TestAdminGuardIsStructural:
 
         这条测试防的是「重构回退」——有人为了省事又把守卫写回函数体，
         下一个人新增端点时仍会漏。
+
+        D2 拆分后必须扫**整个包**：端点分布��� 7 个子模块，只看 `__init__.py`
+        会让这条断言变成空转（那里根本没有端点），保护力归零。
         """
         from app.routers import admin as admin_mod
 
         assert admin_mod.router.dependencies, "router 未声明鉴权依赖"
-        source = open(admin_mod.__file__, encoding="utf-8").read()
-        calls = [ln for ln in source.splitlines() if ln.strip().startswith("_require_admin(")]
-        assert not calls, f"仍有逐端点守卫调用: {calls}"
+        pkg_dir = Path(admin_mod.__file__).parent
+        sources = [Path(admin_mod.__file__)] + sorted(pkg_dir.glob("*.py"))
+        offenders: list[str] = []
+        for src in sources:
+            for ln in src.read_text(encoding="utf-8").splitlines():
+                if ln.strip().startswith("_require_admin("):
+                    offenders.append(f"{src.name}: {ln.strip()}")
+        assert not offenders, f"仍有逐端点守卫调用: {offenders}"

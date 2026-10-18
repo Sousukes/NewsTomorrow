@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（20 项）
+## 开放项（19 项）
 
 ### P1 · 安全
 
@@ -39,7 +39,6 @@
 
 | ID | 问题 | 成本 | 建议方向 | 来源 |
 | --- | --- | --- | --- | --- |
-| D2 | `admin.py` 单文件 1,640 行 / 34 端点，跨 6 个业务域 | M | 拆 `routers/admin/{sources,news,comments,words,nickname,users,audit}.py`，共享 `_require_admin`/`record_audit` | 审查报告 §3.3 |
 | D3 | 8 个 Admin 页面约 6,010 行，`load/error/denied/toast/筛选/分页` 样板逐页复制 | M | 抽 `useAdminGuard` + `usePagedList` + 统一 `<AdminTable>`/`<FilterBar>`；预计减 30~40% 代码量 | 审查报告 §3.3 |
 | F3 | 测试分布倒挂：11 个用户侧视图无 spec，8 个管理页全覆盖 | M | 优先补 `HomeFeed / NewsDetail / Comments / Login / SearchResults` 五条核心路径 | 审查报告 §3.3 |
 | D1 | 时间一律存 `String(30)` ISO 字符串，排序/索引/时间函数都受限 | L | 改 `TIMESTAMP`/`DateTime(timezone=True)`：一次性迁移 + 双写灰度。**与 A3 同源，批量偿还** | 审查报告 §3.3 |
@@ -92,3 +91,4 @@
 | P1-44 | D8 容器化 + 迁移前置钩子（compose 四服务、`migrate` 一次性服务、`docs/deploy.md`） |
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
+| P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |

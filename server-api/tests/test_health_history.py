@@ -25,6 +25,7 @@ from app.database import Base, SessionLocal, engine  # noqa: E402
 from app.feeds import health as health_mod  # noqa: E402
 from app.feeds import ingest as ingest_mod  # noqa: E402
 from app.models import RssSource, RssSourceHealthEvent, now_str  # noqa: E402
+from app.config import FEED_HEALTH_LIST_DAYS  # noqa: E402
 from app.routers import admin as admin_mod  # noqa: E402
 
 ADMIN_PHONE = "13800138000"
@@ -643,7 +644,7 @@ class TestSourceListHealth:
         assert row["health"]["attempts"] == 2
         assert row["health"]["avgItems"] == 15.0
         # 前端要标出"近 N 天"，否则 100% 这个数字没有时间范围就是误导
-        assert d["healthDays"] == admin_mod.FEED_HEALTH_LIST_DAYS
+        assert d["healthDays"] == FEED_HEALTH_LIST_DAYS
 
     def test_source_without_history_has_null_health(self, client):
         """新加的源没有历史：`health` 为 null 而不是全零摘要——

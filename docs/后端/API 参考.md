@@ -284,7 +284,7 @@ router = APIRouter(
 )
 ```
 
-- `require_admin`（`app/routers/admin.py`）：未登录 → **401**，已登录但非管理员 → **403 / 40301**，
+- `require_admin`（`app/routers/admin/__init__.py`，D2 拆分后）：未登录 → **401**，已登录但非管理员 → **403 / 40301**，
   判定复用 `is_admin()`（`ADMIN_PHONES` 白名单 ∪ `admin_users` 表，双源并集）。
 - **为什么在 router 级**：此前 34 个端点各自在函数体首行写 `_require_admin(user, db)`。
   每个都写了，但这是「靠人记住」的约束——新增端点忘写一行就直接成为越权面，

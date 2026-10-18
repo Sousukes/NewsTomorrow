@@ -63,12 +63,15 @@
 > - **F4** 文档体积失控 → P1-46 已处置（`docs/` 下 64 篇，入口文档从
 >   137/68/217/137KB 降到 3.3/3.1/27/0.8KB）。**护栏**：链接完整性 +
 >   入口 <40KB、任意单篇 <60KB，`tests/test_docs_index.py` 19 项
+> - **D2** 管理端单文件 1,640 行 → P1-47 已处置（7 个子模块 + 聚合 router，
+>   最大 411 行）。拆分顺带暴露并收敛了 `ADMIN_PHONES` 的双真相源
+>   （白名单端点读 config 快照、`is_admin` 读包全局）
 
 ## 1. 资产快照（实测）
 
 | 维度 | 数值 | 备注 |
 | --- | --- | --- |
-| 后端 Python | 16,252 行（app 约 5,000 + tests 约 7,300） | `admin.py` 1,640 行 / 34 端点为最大单文件 |
+| 后端 Python | 16,252 行（app 约 5,000 + tests 约 7,300） | 管理端已按业务域拆包（P1-47），最大单文件 `nickname.py` 411 行 |
 | 前端 src | 22,006 行（含 spec 约 7,000） | 8 个 `Admin*.vue` 合计约 6,010 行 |
 | 测试 | pytest 805 / vitest 532 / 契约 72（双端 72-0；CHECK_ADMIN 档 285-0，2026-10-18 更新） | 后端覆盖率 **92.55%**，门槛 91（P1-45，`.coveragerc`） |
 | 迁移 | 28 个版本（0001 ~ 0028） | `alembic check` 当前无漂移 |
@@ -122,7 +125,7 @@
 
 | # | 问题 | 证据 | 建议 | 成本 |
 | --- | --- | --- | --- | --- |
-| D2 | `admin.py` 单文件 1,640 行 / 34 端点，跨 6 个业务域 | — | 拆 `routers/admin/{sources,news,comments,words,nickname,users,audit}.py`，共享 `_require_admin`/`record_audit` | M |
+| D2 | `admin.py` 单文件 1,640 行 / 34 端点，跨 6 个业务域 | — | ✅ P1-47 已拆为 `routers/admin/{sources,news,comments,words,nickname,users,audit}.py`（最大 411 行），鉴权仍挂聚合 router | M |
 | D3 | 8 个 Admin 页面约 6,010 行，`load/error/denied/toast/筛选/分页` 样板逐页复制 | 如 `AdminNicknameWords.vue:51-75` | 抽 `useAdminGuard` + `usePagedList` composable + 统一 `<AdminTable>`/`<FilterBar>`；预计可减 30~40% 代码量 | M |
 | D1 | 时间一律存 `String(30)` ISO 字符串 | `models.py` 全表 | 改 `TIMESTAMP`/`DateTime(timezone=True)`：排序由数据库保证、可用时间函数、索引更紧凑。需一次性迁移 + 双写灰度 | L |
 | D8 | 无 Docker / 部署编排 / 迁移前置钩子 | 仓库无 Dockerfile | Dockerfile + compose；启动前 `alembic upgrade head`（直接消除 P1-24 那类环境债） | S |
