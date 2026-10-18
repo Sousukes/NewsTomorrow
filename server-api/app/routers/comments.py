@@ -43,7 +43,16 @@ from ..config import MODERATION_ENABLED
 from ..database import get_db
 from ..deps import get_current_user, get_current_user_optional, require_password_current
 from ..moderation import engine, snippet_of
-from ..models import Comment, CommentLike, News, SensitiveHit, SensitiveWord, User, now_str
+from ..models import (
+    Comment,
+    CommentLike,
+    News,
+    SensitiveHit,
+    SensitiveWord,
+    User,
+    display_time,
+    now_str,
+)
 from ..notify import (
     notify_comment_liked,
     notify_comment_on_article,
@@ -97,7 +106,9 @@ def to_out(
         "name": c.user_name,
         "seed": c.seed,
         "content": c.content,
-        "time": c.time,
+        # 展示文案由绝对时间推导（comments.time 存的是 ISO 串，原样透传会让用户
+        # 新发的评论显示 2026-10-18T14:42:17+00:00）；排序/过滤只用 createdAt
+        "time": display_time(c.time, c.created_at),
         "createdAt": c.created_at,
         "likes": c.likes or 0,
         "liked": liked,

@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（17 项）
+## 开放项（18 项）
 
 ### P1 · 安全
 
@@ -39,7 +39,8 @@
 
 | ID | 问题 | 成本 | 建议方向 | 来源 |
 | --- | --- | --- | --- | --- |
-| D1 | 时间一律存 `String(30)` ISO 字符串，排序/索引/时间函数都受限 | L | 改 `TIMESTAMP`/`DateTime(timezone=True)`：一次性迁移 + 双写灰度。**与 A3 同源，批量偿还** | 审查报告 §3.3 |
+| D1-a | 时间列改 `TIMESTAMP`：**只排序、不参与 SQL 范围过滤**的列 | L | P1-50 已盘点并给出安全网（`tests/test_time_contract.py` 14 项 + `docs/后端/时间字段盘点与D1决策.md`）。低风险批 |
+| D1-b | 时间列改 `TIMESTAMP`：**参与 SQL 范围过滤**的列 | L | 需先决定 cutoff 走参数绑定还是表达式；注意 `coalesce(x,'')` 改类型后会类型错（换 `NULLS LAST`），SQLite 无原生时间类型 → 迁移脚本必须分方言、downgrade 空操作 |
 
 ### P2 · 能力扩展
 
@@ -91,5 +92,6 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-50 | D1 决策准备（不改 schema）：产出 `docs/后端/时间字段盘点与D1决策.md` + 时间格式护栏 14 项；并修掉「新建评论显示原始 ISO 串」的用户可见 bug（展示文案改为由绝对时间推导） |
 | P1-49 | F3 补齐用户侧核心路径测试（HomeFeed / Login / Comments，+24 项）；并拆出 F3'（其余 8 个视图） |
 | P1-48 | D3 管理端页面样板抽取（`useAdminPage.ts`：守卫 8 页接入 / 列表 3 页接入；**未抽 `<AdminTable>`/`<FilterBar>`**，理由见批次记录） |

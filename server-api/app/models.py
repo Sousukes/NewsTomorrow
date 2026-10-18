@@ -59,6 +59,48 @@ def parse_dt(value: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def display_time(stored: str | None, absolute: str | None = None, *, now: datetime | None = None) -> str:
+    """把时间列渲染成**给人看的相对文案**（输出侧唯一入口）。
+
+    为什么要有这个函数：`comments.time` / `messages.time` 这两列同时装着
+    两种东西——用户新建时写的是 ISO 时间串（`time=ts, created_at=ts`），
+    演示种子写的是「1小时前」这种相对文案。`to_out` 原样透传，于是**用户刚发
+    的评论显示的是 `2026-10-18T14:42:17+00:00`**。
+
+    正确的分法是：`created_at` 存绝对时间（排序、过滤只用它），
+    展示文案**由它推导**而不是另存一份。存量演示数据的「1小时前」不是时间
+    （那是排版效果，不是事实），所以本函数原样保留它。
+
+    规则：
+    - 能解析成 ISO 的 → 现算相对文案（受 `now` 控制，便于测试）；
+    - 已经是展示文案（解析不了）→ **原样返回**，不覆盖；
+    - 都没有 → 回落到 `absolute`（仍是 ISO 时同样现算），再不行返回空串。
+    """
+    if stored:
+        parsed = parse_dt(stored)
+        if parsed is None:
+            return stored  # 已经是「1小时前」这类文案
+    else:
+        parsed = parse_dt(absolute)
+        if parsed is None:
+            return ""
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    seconds = int((reference - parsed).total_seconds())
+    if seconds < 0:
+        return parsed.strftime("%Y-%m-%d %H:%M")  # 未来时间（时钟漂移/时区错配）
+    if seconds < 60:
+        return "刚刚"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    if seconds < 86400 * 7:
+        return f"{seconds // 86400} 天前"
+    return parsed.astimezone().strftime("%Y-%m-%d")
+
+
 class User(Base):
     __tablename__ = "users"
 

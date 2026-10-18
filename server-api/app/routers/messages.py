@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user, get_current_user_optional
-from ..models import Message, MessageRead, User, now_str
+from ..models import Message, MessageRead, User, display_time, now_str
 from ..response import ok
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
@@ -43,7 +43,7 @@ def to_out(m: Message, read_ids: set[str]) -> dict:
         "title": m.title,
         "summary": m.summary or "",
         "newsId": m.news_id,
-        "time": m.time,
+        "time": display_time(m.time, m.created_at),
         "read": m.id in read_ids,
     }
 
