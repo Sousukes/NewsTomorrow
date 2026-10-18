@@ -94,8 +94,20 @@ jobs:
         run: |
           python -m alembic upgrade head
           python -m alembic check
-      - name: 单元测试
-        run: pytest -q
+      - name: 单元测试（带覆盖率门槛，F2）
+        # 门槛在 .coveragerc 的 fail_under（实测 −2）：低于它这一步直接失败，
+        # 于是"加了模块不写测试"过不了 CI。--cov-report=term 只打没覆盖满的
+        # 文件，避免日志被 100% 的模块刷屏。
+        run: pytest -q --cov --cov-report=term:skip-covered --cov-report=xml:htmlcov/coverage.xml
+      # 覆盖率报告作为构件留存：GitHub Actions 里可直接下载对比历史，
+      # 不引入 codecov 这类外部服务（那会带来数据外发与第三方可用性依赖）
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: server-api/htmlcov/coverage.xml
+          if-no-files-found: error
       - name: 启动后端
         run: |
           nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/api.log 2>&1 &

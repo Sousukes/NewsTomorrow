@@ -200,6 +200,44 @@ class TestBackendContainer:
         assert 'ENTRYPOINT ["./scripts/entrypoint.sh"]' in BACKEND_DOCKERFILE
 
 
+class TestCoverageGate:
+    """F2：覆盖率门槛的配置必须一直在。
+
+    门槛被悄悄删掉时，CI 仍然是绿的——这类"护栏自身的失效"没有任何症状，
+    只能靠断言守住。
+    """
+
+    def test_coveragerc_sets_a_sane_floor(self):
+        cfg = _read(SERVER / ".coveragerc")
+        m = re.search(r"fail_under\s*=\s*([\d.]+)", cfg)
+        assert m, ".coveragerc 里没有 fail_under：覆盖率门槛被删了？"
+        floor = float(m.group(1))
+        # 实测 93%，下限 91。低于 80 说明被拍脑袋调低了；高于 99 说明
+        # 调到了"下次必然失败"的位置（除极端情况外这个门槛只会制造噪音）
+        assert 80 <= floor <= 99, f"下限 {floor} 不合理"
+
+    def test_coveragerc_is_not_gitignored(self):
+        """被 .gitignore 挡掉的话，本地看起来配好了，CI 上根本没有这个文件。"""
+        ignored = _read(REPO / ".gitignore")
+        assert ".coveragerc" not in ignored
+
+    def test_ci_runs_tests_with_coverage(self):
+        ci = _read(REPO / ".github" / "workflows" / "ci.yml")
+        assert "--cov" in ci, "CI 没开覆盖率：门槛在 CI 上不生效"
+        assert "upload-artifact" in ci, "覆盖率报告没留存：无法看趋势"
+
+    def test_pytest_cov_is_declared(self):
+        """CI 只装 requirements.txt；没声明 pytest-cov 的话门槛步骤会以
+        'unrecognized arguments' 报错，症状与"门槛坏了"很像。"""
+        req = _read(SERVER / "requirements.txt")
+        assert "pytest-cov" in req
+
+    def test_convention_is_documented(self):
+        """「下限只许升不许降」这条约定必须落在文档里，否则半年后没人记得。"""
+        readme = _read(SERVER / "README.md")
+        assert "fail_under" in readme or "只许升不许降" in readme
+
+
 class TestDeployDoc:
     def test_doc_mentions_required_secrets(self):
         for token in ("JWT_SECRET", "POSTGRES_PASSWORD", "OPS_TOKEN", "TRUSTED_PROXIES"):

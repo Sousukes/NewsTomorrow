@@ -1,0 +1,35 @@
+# 覆盖率配置（F2）
+#
+# 只在**显式启用 coverage 时**生效（CI 跑 `pytest --cov`；本地 `pytest -q`
+# 不带 --cov，保持快、不落文件）。这样门槛不会变成"本地每次跑测试都要
+# 多花一分钟"的噪音，但 CI 一定会拦。
+[run]
+source = app
+branch = false
+# 迁移脚本不在 app/ 下，本来就不计入；显式 exclude 是为了防止将来有人把
+# migrations/ 挪进包里，然后让一堆 0% 的迁移代码把总数拖下来
+omit =
+    */migrations/*
+    */__main__.py
+
+[report]
+# 门槛 = 实测值 − 2（落地时实测 93%）。
+# 定在这里而不是命令行，是为了让 CI 与本地显式跑出来的数一致；
+# 少于 2 个点的余量，是为了允许"重构挪动代码"这种不改变测试价值的变化。
+#
+# 维护约定：**下限只许升不许降**。
+# - 实测上升（加了测试）→ 顺手把它抬到「实测 − 2」；
+# - 实测下降 → 先补测试；确实要降门槛必须在提交信息里写明理由。
+fail_under = 91
+# 只看没覆盖满的文件，避免 CI 日志被 100% 的模块刷屏
+skip_covered = true
+show_missing = true
+# 只报应用代码；测试代码自身的覆盖率没有意义（它被测的是被测对象）
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    if __name__ == .__main__.:
+
+[html]
+directory = htmlcov

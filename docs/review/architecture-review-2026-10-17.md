@@ -57,6 +57,9 @@
 > - **D8** 无容器化 / 无迁移前置钩子 → P1-44 已处置（compose 四服务 +
 >   `migrate` 一次性服务 + `docs/deploy.md`）。**边界**：本机无 Docker 守护
 >   进程，镜像**未在 CI 验证**，已开「CI 验证镜像可构建」单独跟踪
+> - **F2** 无覆盖率门槛与趋势 → P1-45 已处置（`.coveragerc` `fail_under=91`，
+>   实测 92.55%；CI 出 XML 构件）。已知缺口（`seed.py` 56%、
+>   `scheduler.py`/`ratelimit.py` 68%）拆为 F5，前端覆盖率拆为 F4'
 
 ## 1. 资产快照（实测）
 
@@ -64,11 +67,11 @@
 | --- | --- | --- |
 | 后端 Python | 16,252 行（app 约 5,000 + tests 约 7,300） | `admin.py` 1,640 行 / 34 端点为最大单文件 |
 | 前端 src | 22,006 行（含 spec 约 7,000） | 8 个 `Admin*.vue` 合计约 6,010 行 |
-| 测试 | pytest 764 / vitest 532 / 契约 72（双端 72-0；CHECK_ADMIN 档 285-0，2026-10-18 更新） | 计数以运行期实测为准（契约脚本含重复调用，故为单次项数） |
+| 测试 | pytest 787 / vitest 532 / 契约 72（双端 72-0；CHECK_ADMIN 档 285-0，2026-10-18 更新） | 后端覆盖率 **92.55%**，门槛 91（P1-45，`.coveragerc`） |
 | 迁移 | 28 个版本（0001 ~ 0028） | `alembic check` 当前无漂移 |
 | mock 后端 | `server.mjs` 3,007 行 | **后端逻辑的第二实现**（含昵称引擎副本） |
 | 文档 | README 102KB / 优化落地记录 139KB | 单文件体积已影响可检索性 |
-| CI | 前端 依赖审计+type+lint+format+test+build+storybook；后端 import+pytest+启动+契约+迁移校验 | **不含覆盖率**（F2 待排期）、**不含 docker build**（P1-44 已登记） |
+| CI | 前端 依赖审计+type+lint+format+test+build+storybook；后端 import+pytest(+覆盖率门槛)+启动+契约+迁移校验 | **不含前端覆盖率**（F4'）、**不含 docker build**（P1-44 已登记） |
 
 ---
 

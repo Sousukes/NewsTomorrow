@@ -16,3 +16,6 @@ redis>=5.0
 
 # 测试
 pytest>=8.0
+# 覆盖率（F2）：门槛在 .coveragerc（fail_under），CI 跑 pytest --cov 时生效。
+# 本地 `pytest -q` 不带 --cov 就不会触发，保持快。
+pytest-cov>=5.0
