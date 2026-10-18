@@ -217,9 +217,17 @@ class TestCoverageGate:
         assert 80 <= floor <= 99, f"下限 {floor} 不合理"
 
     def test_coveragerc_is_not_gitignored(self):
-        """被 .gitignore 挡掉的话，本地看起来配好了，CI 上根本没有这个文件。"""
-        ignored = _read(REPO / ".gitignore")
-        assert ".coveragerc" not in ignored
+        """被 .gitignore 挡掉的话，本地看起来配好了，CI 上根本没有这个文件。
+
+        **只看有效规则行**（跳过注释）——.gitignore 的注释里提到
+        `.coveragerc` 是正常且必要的说明，按整份文件做子串匹配会假阳性。
+        """
+        rules = [
+            ln.strip()
+            for ln in _read(REPO / ".gitignore").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        assert not any(".coveragerc" in r for r in rules), f".coveragerc 被 .gitignore 忽略了：{rules}"
 
     def test_ci_runs_tests_with_coverage(self):
         ci = _read(REPO / ".github" / "workflows" / "ci.yml")
@@ -233,9 +241,14 @@ class TestCoverageGate:
         assert "pytest-cov" in req
 
     def test_convention_is_documented(self):
-        """「下限只许升不许降」这条约定必须落在文档里，否则半年后没人记得。"""
-        readme = _read(SERVER / "README.md")
-        assert "fail_under" in readme or "只许升不许降" in readme
+        """「下限只许升不许降」这条约定必须落在文档里，否则半年后没人记得。
+
+        F4 拆分后阈值说明在 `docs/后端/快速开始与配置.md`（入口 README 只留索引），
+        所以两处都要查：文档里有、且 README 指得到它。
+        """
+        detail = _read(REPO / "docs" / "后端" / "快速开始与配置.md")
+        assert "fail_under" in detail or "只许升不许降" in detail
+        assert "快速开始与配置.md" in _read(SERVER / "README.md")
 
 
 class TestDeployDoc:

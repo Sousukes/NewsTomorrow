@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（21 项）
+## 开放项（20 项）
 
 ### P1 · 安全
 
@@ -39,7 +39,6 @@
 
 | ID | 问题 | 成本 | 建议方向 | 来源 |
 | --- | --- | --- | --- | --- |
-| F4 | 文档体积失控（README 102KB、落地记录 139KB），单文件已影响可检索性 | S | 按专题拆到 `docs/`（接口/运维/治理/前端），主文档只留索引 | 审查报告 §4 |
 | D2 | `admin.py` 单文件 1,640 行 / 34 端点，跨 6 个业务域 | M | 拆 `routers/admin/{sources,news,comments,words,nickname,users,audit}.py`，共享 `_require_admin`/`record_audit` | 审查报告 §3.3 |
 | D3 | 8 个 Admin 页面约 6,010 行，`load/error/denied/toast/筛选/分页` 样板逐页复制 | M | 抽 `useAdminGuard` + `usePagedList` + 统一 `<AdminTable>`/`<FilterBar>`；预计减 30~40% 代码量 | 审查报告 §3.3 |
 | F3 | 测试分布倒挂：11 个用户侧视图无 spec，8 个管理页全覆盖 | M | 优先补 `HomeFeed / NewsDetail / Comments / Login / SearchResults` 五条核心路径 | 审查报告 §3.3 |
@@ -92,3 +91,4 @@
 | P1-43 | B4 图片代理 + CSP `img-src` 收紧（SSRF 防线；Pillow 走可选依赖） |
 | P1-44 | D8 容器化 + 迁移前置钩子（compose 四服务、`migrate` 一次性服务、`docs/deploy.md`） |
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
+| P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
