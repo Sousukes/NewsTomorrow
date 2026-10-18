@@ -142,6 +142,26 @@ const run = async () => {
     );
   }
 
+  // 1.2) 图片代理（B4）：只验**安全策略**，不验"能取到图"
+  //     ——真后端取图要出网，契约环境无外网；取图行为由后端单测覆盖。
+  //     这里是 SSRF 防线，必须双端一致。
+  const imgRejects = async (u) => {
+    try {
+      await request(`/img?url=${encodeURIComponent(u)}`);
+      return '(未拒绝)';
+    } catch (e) {
+      return e.message;
+    }
+  };
+  const imgFile = await imgRejects('file:///etc/passwd');
+  check('图片代理拒绝非 http(s) 协议（B4/SSRF）', imgFile.includes('只支持'), imgFile);
+  const imgLocal = await imgRejects('http://127.0.0.1:8000/x.png');
+  check('图片代理拒绝本机地址（B4/SSRF）', imgLocal.includes('内网'), imgLocal);
+  const imgMeta = await imgRejects('http://169.254.169.254/latest/meta-data/');
+  check('图片代理拒绝云元数据地址 169.254.169.254（B4/SSRF）', imgMeta.includes('内网'), imgMeta);
+  const imgNone = await imgRejects('');
+  check('图片代理拒绝缺 url 参数（B4）', imgNone.includes('缺少图片地址'), imgNone);
+
   // 2) 资讯详情
   const detail = normalize(await request(`/news/${items[0].id}`));
   check('GET /news/:id 详情', detail.id === items[0].id);

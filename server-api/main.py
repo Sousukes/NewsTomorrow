@@ -49,7 +49,7 @@ from app.deps import get_current_user, require_ops_access
 from app.hit_logs import prune_hit_logs
 from app.models import User
 from app.ratelimit import build_limiter
-from app.routers import admin, auth, comments, me, messages, news
+from app.routers import admin, auth, comments, img, me, messages, news
 from app.security_headers import apply_security_headers
 from app.scheduler import hot_status, start_scheduler, stop_scheduler
 from app.seed import init_db
@@ -187,6 +187,9 @@ app.include_router(comments.router)
 app.include_router(messages.router)
 app.include_router(me.router)
 app.include_router(admin.router)
+# B4 图片代理：必须排在最后注册？——不必，它有独立前缀 /api/img，
+# 与 /api/news/{news_id} 的动态段无歧义（img 是字面量段）。
+app.include_router(img.router)
 
 limiter = build_limiter(RATE_LIMIT_WINDOW_SECONDS, REDIS_URL)
 

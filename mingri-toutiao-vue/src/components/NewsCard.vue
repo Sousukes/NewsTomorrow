@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { bgFor, safeImageUrl } from '@/utils/image';
+import { bgFor, proxiedImageUrl } from '@/utils/image';
 import type { NewsItem } from '@/types';
 
 defineProps<{ item: NewsItem }>();
@@ -9,14 +9,14 @@ const emit = defineEmits<{
   (e: 'image', id: string, index: number): void;
 }>();
 
-/** 真实图片 URL（已做协议白名单校验）；无则返回空串走渐变占位 */
+/** 真实图片 URL（协议白名单 + 走图片代理 B4）；无则返回空串走渐变占位 */
 function imgOf(url?: string | null): string {
-  return safeImageUrl(url);
+  return proxiedImageUrl(url, 320);
 }
 
 /** 渐变占位样式（无真实配图时使用） */
 function coverStyle(seed: string, url?: string): Record<string, string> {
-  return { backgroundImage: bgFor(seed, url) };
+  return { backgroundImage: bgFor(seed, url, 640) };
 }
 
 function formatCount(n?: number): string {

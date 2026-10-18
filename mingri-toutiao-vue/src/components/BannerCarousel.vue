@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useCarousel } from '@/composables/useCarousel';
-import { safeImageUrl } from '@/utils/image';
+import { proxiedImageUrl } from '@/utils/image';
 import type { NewsItem } from '@/types';
 
 const props = withDefaults(
@@ -49,9 +49,9 @@ const palette = [
   'linear-gradient(135deg,#3a74e0,#122a63)',
 ];
 
-/** 真实封面（经协议白名单校验）；无则返回空串 */
+/** 真实封面（协议白名单 + 图片代理 B4）；无则返回空串 */
 function coverOf(id: string): string {
-  return safeImageUrl(itemById.value.get(id)?.cover ?? '');
+  return proxiedImageUrl(itemById.value.get(id)?.cover ?? '', 960);
 }
 
 /** 无真实封面时的品牌蓝渐变兜底 */

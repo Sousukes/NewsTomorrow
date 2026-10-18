@@ -35,10 +35,27 @@ describe('security/csp（C9）', () => {
     expect(d['style-src']).toContain("'unsafe-inline'");
   });
 
-  it('图片与媒体放行外链 https（B4 图片代理落地前无法收紧）', () => {
+  it('无后端（mock 演示态）：图片保留 https 外链', () => {
     const d = parse(buildCsp());
     expect(d['img-src']).toContain('https:');
     expect(d['img-src']).toContain('data:');
+    expect(d['media-src']).toContain('https:');
+  });
+
+  it('B4：有后端时 img-src 收掉 https（外链图一律走本域代理）', () => {
+    // 这一条是 B4 落地后 CSP 真正多出来的收益：
+    // 挡掉「<img src=https://evil/x> 泄露用户 IP 与浏览行为」——
+    // 纯 CSP 在图片上无论如何都挡不住，只有把图收进自己源站才行。
+    const d = parse(buildCsp({ apiBase: 'https://api.example.com/api' }));
+    expect(d['img-src']).not.toContain('https:');
+    expect(d['img-src']).toContain("'self'");
+    // 代理跨源时它自己的源要放行（图片请求直接打到 API 源）
+    expect(d['img-src']).toContain('https://api.example.com');
+    expect(d['img-src']).toContain('data:');
+  });
+
+  it('media-src 仍放行 https：视频没有被代理（诚实边界）', () => {
+    const d = parse(buildCsp({ apiBase: 'https://api.example.com/api' }));
     expect(d['media-src']).toContain('https:');
   });
 

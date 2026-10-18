@@ -2193,6 +2193,48 @@ const server = createServer(async (req, res) => {
     return ok(res, target.rootId ? replyOut(target, parents) : commentOut(target, list));
   }
 
+  // GET /api/img —— 图片代理（B4）
+  //
+  // 与真后端同口径地**拒绝**危险目标（契约脚本在双端都验这些），
+  // 但成功时**不真的回源**：mock 不该替用户发起外网请求，返回一张 1×1 PNG。
+  // 于是 mock 的诚实边界是"形状与安全策略相同，取图行为不同"。
+  if (head === 'img' && !a && method === 'GET') {
+    const raw = url.searchParams.get('url') || '';
+    if (!raw.trim()) return fail(res, 422, 42206, '缺少图片地址');
+    let parsed;
+    try {
+      parsed = new URL(raw.trim());
+    } catch {
+      return fail(res, 400, 40008, '图片地址无法解析');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return fail(res, 400, 40008, '只支持 http/https 地址');
+    }
+    const host = parsed.hostname.toLowerCase();
+    const isPrivate =
+      host === 'localhost' ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^169\.254\./.test(host);
+    if (isPrivate) return fail(res, 400, 40008, '不允许访问内网地址');
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': png.length,
+      'Cache-Control': 'public, max-age=86400',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': 'inline',
+    });
+    return res.end(png);
+  }
+
   // ---- 收藏 / 浏览历史（/me/*，需登录）----
   // 与真实后端契约一致：写操作返回完整集合 { ids, list }；PUT 为并集合并（只增不删）。
   if (head === 'me' && (a === 'favorites' || a === 'history')) {

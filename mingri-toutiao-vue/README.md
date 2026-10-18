@@ -610,6 +610,33 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 后端那半（端点清单、账号维度锁定、40304 而非 401 的理由）见 `server-api/README.md`。
 
+## 图片代理与 CSP 收紧（B4）
+
+外站图片一律改走**本域图片代理**：`utils/image.ts::proxiedImageUrl(url, width)`
+把 `https://cdn.x/a.jpg` 换成 `${API_BASE}/api/img?url=…&w=…`。
+
+三条分支，每条都有理由：
+- **相对路径 / 同源资源** → 原样返回（本就是自己的源站，进代理是多余一跳）；
+- **mock 模式** → 原样返回外链。离线演示没有后端，fixture 图就是外站地址；
+- **真实后端** → 换成代理地址。宽度只能取**后端白名单里的值**
+  （200/320/480/640/960/1280），因为后端按 (URL, 宽度) 缓存，
+  任意宽度等于让缓存键爆炸。
+
+`encodeURIComponent` 的产物不含引号/反斜杠/控制字符，所以拼进 CSS `url()`
+也是安全的——比原来手写转义更强：结构上就不可能出现转义逃逸。
+
+**CSP 随之收紧**：有后端时 `img-src` 从 `'self' data: blob: https:` 收成
+`'self' data: blob: <API 源>`。这挡掉的正是「外链图片把用户 IP 与浏览行为
+泄露给任意外站」——**纯 CSP 无论如何都挡不住，只有把图收进自己源站才行**。
+
+两条仍然存在的诚实边界（都写进了 `security/csp.ts` 的注释）：
+- `media-src` 仍放行 `https:`：**视频 mp4 没有被代理**（几十 MB + Range 请求是
+  另一个量级的设计，见 backlog B4 后续项）；
+- 没配 `VITE_API_BASE` 的 mock 演示态没有后端代理，图片仍直连外站，
+  此时 `img-src` 保留 `https:`——那是唯一保留松口的地方。
+
+后端那半（SSRF 防线、错误码、Pillow 可选）见 `server-api/README.md`。
+
 ## 修改密码与受限态（C4）
 
 **两条入口，一个页面**：`/change-password`。
