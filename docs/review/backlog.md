@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（17 项）
+## 开放项（16 项）
 
 ### P1 · 安全
 
@@ -47,9 +47,8 @@
 
 | ID | 方向 | 成本 | 说明 | 来源 |
 | --- | --- | --- | --- | --- |
-| F3' | 用户侧仍有 8 个视图无 spec（Messages / Favorites / History / ChangePassword / Search / Gallery / Videos / Showcase） | S | P1-49 已补 HomeFeed / Login / Comments 三条核心路径（backlog 点名的另两条 NewsDetail / SearchResults 早前已补）。剩余 8 个交互复杂度较低，按需补 |
-| F4 | 前端无覆盖率门槛（后端已由 P1-45 建立，见 `.coveragerc`） | S | 需装 `@vitest/coverage-v8`。**本机 `npm install` 有 esbuild EBUSY 老坑**（须 `--ignore-scripts` 后手动补 `@esbuild/win32-x64`），不要为了凑数字把依赖装坏 | P1-45 拆出 |
-| F5 | 补齐低覆盖模块的真测试 | M | `seed.py` 56%（演示数据填充）、`scheduler.py` / `ratelimit.py` 68%（需受控时钟 / 真 Redis 容器）。它们是真实技术债，覆盖率门槛没掩盖，只是拦住了继续下滑 | P1-45 拆出 |
+| F3' | 用户侧仍有 8 个视图无 spec（Messages / History / Search / Gallery / Videos / Showcase 为 0%；Favorites 10% / ChangePassword 15.6%） | S | P1-49 已补 HomeFeed / Login / Comments 三条核心路径（backlog 点名的另两条 NewsDetail / SearchResults 早前已补）。剩余 8 个交互复杂度较低，按需补 |
+| F5 | 补齐低覆盖模块的真测试 | M | **P1-56 已量出基线（62 文件 / 行 74.71%），15 个文件为 0%**。按「安全/错误路径 > API 层 > 展示页」排：`stores/stepUp.ts`(0%, 二次校验) / `api/auth.ts`(0%) / `components/ErrorBoundary.vue`(0%) 优先；其次 `api/{comments,messages}.ts`、`useNewsDetail.ts`；展示页归 F3' | `seed.py` 56%（演示数据填充）、`scheduler.py` / `ratelimit.py` 68%（需受控时钟 / 真 Redis 容器）。它们是真实技术债，覆盖率门槛没掩盖，只是拦住了继续下滑 | P1-45 拆出 |
 | D8 | CI 验证镜像可构建 | S | P1-44 落地了 Dockerfile/compose，但**本机无 Docker 守护进程，镜像未在 CI 验证**。需在 workflow 增加 `docker compose build`（顺带能挡住 nginx.conf / Dockerfile 语法漂移）。当前只有 entrypoint 的实际执行验证 + 部署文件静态断言 | P1-44 拆出 |
 | E5 | 用户举报入口 | S | 内容治理只有机器审核 + 运营后台，用户侧无反馈通道 | 审查报告 §4 |
 | E6 | 评论排序（最热/最新）、关注作者 | S | 互动深度不足 | 审查报告 §4 |
@@ -93,6 +92,7 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-56 | F4 前端覆盖率门槛（`all: true` + 阈值 70/64/60/73，实测 71.93/65.75/60.77/74.71；已验「抬高阈值会红」）；CI 改用 `test:cov`；顺带量出 15 个 0% 文件作为 F5/F3' 的排序依据 |
 | P1-55 | D1 最终定案：逐列核实后「只排序/只写入」列**不迁**（无纯低价值列——`_merge` 时间算术 / 输出点都要连带改，收益仅类型诚实）；D1 收尾为「只迁了有真价值的 `health_events.at`」 |
 | P1-54 | 迁移重建工具化（`app/migration_utils.convert_column_type`：索引/外键/ondelete 全部反射拿 + 13 项测试）；CI 增加带存量数据的 PG 迁移演练（`scripts/_migration_drill.py`）；pytest 838 → 851 |
 | P1-53 | D1-1 首列迁移（0030，`rss_source_health_events.at` → DateTime）：确立 `now_dt`/`iso_utc` 双入口、cutoff 参数绑定；**踩中并修复 SQLite `batch_alter_table` 的 CAST 毁数据陷阱**（重建路径 + 外键/索引/ondelete 逐项补齐）；pytest 831 → 838 |

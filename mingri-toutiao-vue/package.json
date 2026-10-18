@@ -19,7 +19,8 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "mock:api": "node mock-server/server.mjs",
-    "dev:api": "vite --mode api"
+    "dev:api": "vite --mode api",
+    "test:cov": "vitest run --coverage"
   },
   "dependencies": {
     "pinia": "^2.3.1",
@@ -30,6 +31,7 @@
     "@eslint/js": "^10.0.1",
     "@storybook/vue3-vite": "^10.6.1",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vitest/coverage-v8": "5.0.3",
     "@vue/test-utils": "^2.5.1",
     "eslint": "^10.12.0",
     "eslint-plugin-vue": "^10.11.1",

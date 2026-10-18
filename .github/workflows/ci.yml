@@ -31,8 +31,11 @@ jobs:
         run: npm run lint
       - name: 格式检查
         run: npm run format:check
-      - name: 单元测试
-        run: npm run test
+      - name: 单元测试（带覆盖率门槛，F4）
+        # 门槛在 vite.config.ts 的 `test.coverage.thresholds`——**`all: true`**，
+        # 未被任何测试导入的文件按 0% 计入，所以「加了模块不写测试」会直接失败。
+        # 与后端 `pytest --cov` 的门槛（.coveragerc）配套。
+        run: npm run test:cov
       - name: 构建
         run: npm run build
       - name: Storybook 静态构建

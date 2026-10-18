@@ -48,6 +48,36 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       globals: true,
       include: ['src/**/*.spec.ts'],
+      /**
+       * F4：覆盖率门槛（后端 P1-45 的对偶，见 `.coveragerc`）。
+       *
+       * **`all: true` 是关键**：不打开时只统计"被测试 import 过的文件"，
+       * 于是**新增模块且不写测试 -> 数字一点不掉**，门槛形同虚设。
+       * 打开后未被导入的文件按 0% 计入——这才是"加了代码要配测试"的真约束。
+       *
+       * 阈值取实测值下浮约 2 个点（与后端 `.coveragerc` 同一策略）：
+       * 门槛只防回退，不追求数字好看；真要提覆盖率是 F5 的活。
+       */
+      coverage: {
+        provider: 'v8',
+        all: true,
+        include: ['src/**/*.{ts,vue}'],
+        exclude: [
+          'src/**/*.spec.ts',
+          'src/**/*.d.ts',
+          'src/main.ts',
+          'src/types/**',
+          'src/**/*.stories.ts',
+        ],
+        reporter: ['text-summary', 'json-summary'],
+        reportsDirectory: 'coverage',
+        thresholds: {
+          statements: 70,
+          branches: 64,
+          functions: 60,
+          lines: 73,
+        },
+      },
     },
   };
 });

@@ -4,3 +4,6 @@ storybook-static
 *.local
 .DS_Store
 tmp/
+
+# F4：覆盖率产物（每次跑 test:cov 都会重建）
+coverage/
