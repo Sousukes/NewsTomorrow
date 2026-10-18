@@ -25,3 +25,10 @@ contract-run.log
 
 # 单测/校验脚本的临时输出（pytest / vitest / verify / build 重定向产物）
 .tmp*.log
+
+# 覆盖率产物（F2）：`.coverage` 是 SQLite 数据文件，`htmlcov/` 是 HTML 报告
+# —— 两者都是本地生成物，`.coveragerc` 才是要进版本库的那份配置
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
