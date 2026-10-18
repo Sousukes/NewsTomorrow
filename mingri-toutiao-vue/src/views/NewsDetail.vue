@@ -17,7 +17,7 @@ const router = useRouter();
 const user = useUserStore();
 const comments = useCommentsStore();
 
-const { item, resolving } = useNewsDetail(() => route.params.id as string);
+const { item, resolving, failed } = useNewsDetail(() => route.params.id as string);
 const commentCount = computed(() => (item.value ? comments.countOf(item.value.id) : 0));
 const thumbCount = computed(() => Math.min(item.value?.images?.length ?? 0, 3));
 const author = computed<Author | undefined>(() =>
@@ -164,11 +164,14 @@ function onFavorite() {
     <div class="detail-skeleton__line detail-skeleton__line--short" />
   </div>
 
+  <!-- 网络失败与「真的不存在」要分开说：把临时故障说成"已下架"会误导用户 -->
   <EmptyState
     v-else
     icon="network"
-    title="内容不存在或已下架"
-    description="该资讯可能已被删除，换条新闻看看吧"
+    :title="failed ? '加载失败，请稍后重试' : '内容不存在或已下架'"
+    :description="
+      failed ? '网络或服务暂时不可用，检查网络后重试' : '该资讯可能已被删除，换条新闻看看吧'
+    "
   >
     <Button variant="primary" label="返回首页" @click="router.push('/')" />
   </EmptyState>

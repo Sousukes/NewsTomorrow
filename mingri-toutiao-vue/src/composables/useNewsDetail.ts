@@ -31,6 +31,13 @@ export function useNewsDetail(id: () => string) {
       const found = await news.loadDetail(key);
       item.value = found;
       failed.value = !found;
+    } catch {
+      // 网络/服务端错误：必须置 `failed`。
+      // 不改的话 `loadDetail` 抛出的错误会变成 **unhandled rejection**（`onMounted`
+      // 里没人 await 它），而且 `resolving` 已复位、`item` 仍是 null——视图落到
+      // `v-else` 的「内容不存在或已下架」，**把临时故障说成了下架**。
+      item.value = null;
+      failed.value = true;
     } finally {
       resolving.value = false;
     }

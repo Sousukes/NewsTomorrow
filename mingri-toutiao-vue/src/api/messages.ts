@@ -97,7 +97,10 @@ export async function fetchMessages(): Promise<Message[]> {
 export async function fetchUnreadCount(): Promise<number> {
   if (USE_MOCK) return mockDelay(MOCK_MESSAGES.filter((m) => !m.read).length);
   const data = await request<unknown>('/messages/unread-count');
-  return Number(data ?? 0);
+  // 归一成"有限的非负数"：后端若返回对象/undefined/`"abc"`，`Number(...)` 会得到 NaN，
+  // 而角标渲染 NaN 比不显示更糟（用户以为坏了）。非有限值一律当 0。
+  const n = Number(data ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
 /** PATCH /messages/:id —— 标记已读 */

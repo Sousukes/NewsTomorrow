@@ -47,7 +47,7 @@
 
 | ID | 方向 | 成本 | 说明 | 来源 |
 | --- | --- | --- | --- | --- |
-| F5 | 补齐剩余低覆盖模块的真测试 | M | P1-57 已清掉优先级最高的三个（`stepUp.ts` 100% / `auth.ts` 68% / `ErrorBoundary.vue` 100%）。**剩余 12 个 0%**：`api/{comments,messages}.ts`、`useNewsDetail.ts`、`StepUpDialog.vue`、`PhoneFrame.vue`、`App.vue` + 6 个视图（归 F3'）。按「API/组合式 > 组件 > 视图」排 |
+| F5 | 补齐剩余低覆盖模块的真测试 | M | P1-57/58 已清掉 6 个（`stepUp` 100% / `auth` 68% / `ErrorBoundary` 100% / `useNewsDetail` 100% / `api/comments` 85% / `api/messages` 91%）。**剩余 9 个 0%**：`StepUpDialog.vue`、`PhoneFrame.vue`、`App.vue` + 6 个视图（归 F3'） |
 | F3' | 用户侧仍有 8 个视图无 spec（Messages / History / Search / Gallery / Videos / Showcase 为 0%；Favorites 10% / ChangePassword 15.6%） | S | P1-49 已补 HomeFeed / Login / Comments 三条核心路径（backlog 点名的另两条 NewsDetail / SearchResults 早前已补）。剩余 8 个交互复杂度较低，按需补 |
 | D8 | CI 验证镜像可构建 | S | P1-44 落地了 Dockerfile/compose，但**本机无 Docker 守护进程，镜像未在 CI 验证**。需在 workflow 增加 `docker compose build`（顺带能挡住 nginx.conf / Dockerfile 语法漂移）。当前只有 entrypoint 的实际执行验证 + 部署文件静态断言 | P1-44 拆出 |
 | E5 | 用户举报入口 | S | 内容治理只有机器审核 + 运营后台，用户侧无反馈通道 | 审查报告 §4 |
@@ -92,6 +92,7 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-58 | F5 第二批：补 `useNewsDetail`(0→100%) / `api/comments`(0→85%) / `api/messages`(0→91%) 共 28 项；修两个真 bug（网络失败被说成已下架、未读数可能 NaN）；覆盖率 78.29%，阈值抬至 74/67/62/77；0% 12→9 |
 | P1-57 | F5 第一批：补 `stepUp.ts`(0→100%) / `auth.ts`(0→68%) / `ErrorBoundary.vue`(0→100%) 共 26 项；覆盖率 74.71→76.30，阈值抬至 72/65/60/75；0% 文件 15→12 |
 | P1-56 | F4 前端覆盖率门槛（`all: true` + 阈值 70/64/60/73，实测 71.93/65.75/60.77/74.71；已验「抬高阈值会红」）；CI 改用 `test:cov`；顺带量出 15 个 0% 文件作为 F5/F3' 的排序依据 |
 | P1-55 | D1 最终定案：逐列核实后「只排序/只写入」列**不迁**（无纯低价值列——`_merge` 时间算术 / 输出点都要连带改，收益仅类型诚实）；D1 收尾为「只迁了有真价值的 `health_events.at`」 |

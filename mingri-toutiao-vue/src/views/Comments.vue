@@ -13,7 +13,7 @@ const commentsStore = useCommentsStore();
 
 const articleId = computed(() => route.params.id as string);
 // 深链安全：内存无此条时自动按 id 拉取
-const { item, resolving } = useNewsDetail(() => articleId.value);
+const { item, resolving, failed } = useNewsDetail(() => articleId.value);
 
 const list = computed<Comment[]>(() => commentsStore.byArticle[articleId.value] ?? []);
 // 评论总数 = 主评论 + 回复（与后端 comment_count 口径一致）
@@ -249,8 +249,10 @@ function send() {
   <EmptyState
     v-else
     icon="network"
-    title="内容不存在或已下架"
-    description="该资讯可能已被删除，换条新闻看看吧"
+    :title="failed ? '加载失败，请稍后重试' : '内容不存在或已下架'"
+    :description="
+      failed ? '网络或服务暂时不可用，检查网络后重试' : '该资讯可能已被删除，换条新闻看看吧'
+    "
   >
     <Button variant="primary" label="返回首页" @click="router.push('/')" />
   </EmptyState>
