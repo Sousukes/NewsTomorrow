@@ -203,3 +203,68 @@ describe('fetchHotTerms', () => {
     await expect(fetchHotTerms()).resolves.toEqual([]);
   });
 });
+
+describe('normalizeNewsItem 字段兜底', () => {
+  it('空对象给安全默认值（不留 undefined 让列表崩）', async () => {
+    const { normalizeNewsItem } = await import('@/api/news');
+    const item = normalizeNewsItem({});
+    expect(item.id).toBe('');
+    expect(item.title).toBe('');
+    expect(item.commentCount).toBe(0);
+    expect(item.channel).toBe('recommend');
+    expect(item.isTop).toBe(false);
+  });
+
+  it('兼容后端的蛇形字段命名（comment_count / mediaName / digest / publishTime）', async () => {
+    const { normalizeNewsItem } = await import('@/api/news');
+    const item = normalizeNewsItem({
+      id: 'n1',
+      title: '标题',
+      comment_count: 7,
+      mediaName: '新华社',
+      digest: '摘要',
+      publishTime: '1小时前',
+    });
+    expect(item.commentCount).toBe(7);
+    expect(item.source).toBe('新华社');
+    expect(item.summary).toBe('摘要');
+    expect(item.time).toBe('1小时前');
+  });
+
+  it('列表不带 content（正文只由详情接口下发）', async () => {
+    const { normalizeNewsItem } = await import('@/api/news');
+    expect(normalizeNewsItem({ id: 'n1', title: 't' }).content).toBeUndefined();
+  });
+});
+
+describe('fetchNewsById', () => {
+  it('找到时归一返回', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ id: 'n1', title: '标题' })),
+    );
+    const { fetchNewsById } = await import('@/api/news');
+    const item = await fetchNewsById('n1');
+    expect(item).toMatchObject({ id: 'n1', title: '标题' });
+  });
+
+  it('请求失败返回 null（让调用方走"不存在"分支，不抛）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('404');
+      }),
+    );
+    const { fetchNewsById } = await import('@/api/news');
+    await expect(fetchNewsById('gone')).resolves.toBeNull();
+  });
+
+  it('空响应返回 null', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond(null)),
+    );
+    const { fetchNewsById } = await import('@/api/news');
+    await expect(fetchNewsById('n1')).resolves.toBeNull();
+  });
+});
