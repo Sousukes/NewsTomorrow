@@ -322,6 +322,23 @@ export async function removeAdminUser(phone: string): Promise<void> {
   await request<unknown>(`/admin/users/${encodeURIComponent(phone)}`, { method: 'DELETE' });
 }
 
+/** POST /admin/users/:phone/reset-password —— 管理员代重置密码（C4）。
+ *
+ * 需要二次校验（服务端 40304 → 全局密码对话框）。返回的 `tempPassword`
+ * **只此一次**：服务端不存明文，丢了只能再重置一次。
+ */
+export async function resetUserPassword(phone: string): Promise<{
+  phone: string;
+  tempPassword: string;
+  mustChangePassword: boolean;
+}> {
+  ensureRealBackend();
+  return request<{ phone: string; tempPassword: string; mustChangePassword: boolean }>(
+    `/admin/users/${encodeURIComponent(phone)}/reset-password`,
+    { method: 'POST' },
+  );
+}
+
 /**
  * GET /admin/audit —— 运营审计时间线（游标分页，新的在前）。
  *

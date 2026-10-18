@@ -41,7 +41,7 @@ from sqlalchemy.orm import Session, aliased
 
 from ..config import MODERATION_ENABLED
 from ..database import get_db
-from ..deps import get_current_user, get_current_user_optional
+from ..deps import get_current_user, get_current_user_optional, require_password_current
 from ..moderation import engine, snippet_of
 from ..models import Comment, CommentLike, News, SensitiveHit, SensitiveWord, User, now_str
 from ..notify import (
@@ -358,7 +358,8 @@ def create_comment(
     news_id: str,
     body: CommentCreateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    # C4：受限账号（刚被代重置密码）不得发言——否则临时密码可长期使用
+    user: User = Depends(require_password_current),
 ):
     """发表评论；带 `parentId` 时为回复（二级评论）。
 
@@ -472,7 +473,7 @@ def set_like(
     comment_id: str,
     body: LikeIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_password_current),
 ):
     """点赞/取消点赞（幂等）。
 
@@ -516,7 +517,7 @@ def delete_comment(
     news_id: str,
     comment_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_password_current),
 ):
     """删除自己的评论（软删除，幂等）。
 

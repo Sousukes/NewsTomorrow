@@ -1,6 +1,10 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
-import { login as apiLogin, logout as apiLogout } from '@/api/auth';
+import {
+  changePassword as apiChangePassword,
+  login as apiLogin,
+  logout as apiLogout,
+} from '@/api/auth';
 import { UNAUTHORIZED_EVENT, clearSession, getToken, setSession } from '@/api/http';
 import {
   MARKS_SYNC_SUPPORTED,
@@ -52,6 +56,12 @@ interface PrefsShape {
    * 刷新页面后「我的」页不退回默认名。服务端改动要等下次登录才可见。
    */
   name: string;
+  /**
+   * 受限态：管理员刚代其重置过密码（C4）。
+   * **必须落盘**——否则刷新页面后守卫失效，用户能到处逛，
+   * 直到某个写操作撞上 40305 才想起"我还没改密码"，比一开始就被拦住更困惑。
+   */
+  mustChangePassword: boolean;
 }
 
 interface MarksShape {
@@ -155,6 +165,8 @@ function loadPrefs(): PrefsShape {
     theme: toThemeMode(parsed?.theme),
     isAdmin: parsed?.isAdmin === true,
     name: typeof parsed?.name === 'string' ? parsed.name : '',
+    // C4：受限态落盘；缺省 false（历史存档没有该字段）
+    mustChangePassword: parsed?.mustChangePassword === true,
   };
 }
 
@@ -178,6 +190,8 @@ export const useUserStore = defineStore('user', () => {
   const isAdmin = ref(prefs.isAdmin && isLoggedIn.value);
   /** 当前账号昵称；未登录/无记录时为空，界面回落默认名 */
   const name = ref(prefs.name && isLoggedIn.value ? prefs.name : '');
+  /** C4：管理员刚代其重置过密码 → 受限态（可读不可写，强制改密后才解除） */
+  const mustChangePassword = ref(prefs.mustChangePassword === true && isLoggedIn.value);
   const theme = ref<ThemeMode>(prefs.theme);
 
   const marks = loadMarks(userId.value);
@@ -191,7 +205,7 @@ export const useUserStore = defineStore('user', () => {
   const syncError = ref('');
 
   watch(
-    [isLoggedIn, userId, theme, isAdmin, name],
+    [isLoggedIn, userId, theme, isAdmin, name, mustChangePassword],
     () =>
       writeJson(PREFS_KEY, {
         isLoggedIn: isLoggedIn.value,
@@ -199,6 +213,7 @@ export const useUserStore = defineStore('user', () => {
         theme: theme.value,
         isAdmin: isAdmin.value,
         name: name.value,
+        mustChangePassword: mustChangePassword.value,
       }),
     { deep: true },
   );
@@ -316,6 +331,9 @@ export const useUserStore = defineStore('user', () => {
     isAdmin.value = res.user?.isAdmin === true;
     // 昵称同样以登录响应为准（P1-24：改名后下次登录会拿到新值）
     name.value = typeof res.user?.name === 'string' ? res.user.name : '';
+    // C4：管理员刚代其重置过密码 → 受限态。落盘让刷新/切路由也能保持约束，
+    // 而不只是登录那一刻的一次性提示
+    mustChangePassword.value = res.user?.mustChangePassword === true;
     favorites.value = adopted.favorites;
     history.value = adopted.history;
     saveMarks(nextUserId, adopted);
@@ -338,7 +356,25 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn.value = false;
     isAdmin.value = false;
     name.value = '';
+    mustChangePassword.value = false;
     switchScope(null);
+  }
+
+  /**
+   * 修改密码（C4）。
+   *
+   * 走二次校验（服务端 40304 会触发全局对话框），成功后：
+   * - 后端已把旧令牌全部作废并下发新的一对，这里接着写本地；
+   * - 清掉受限标志，用户可以正常发评论/收藏了；
+   * - 主动同步一次收藏/历史：受限期间它们的云端写入被拦过，本地数据还没并上去。
+   */
+  async function changePassword(oldPassword: string, newPassword: string) {
+    const res = await apiChangePassword(oldPassword, newPassword);
+    token.value = res.token;
+    setSession(res);
+    mustChangePassword.value = false;
+    await syncMarks();
+    return res;
   }
 
   // 序号守卫：并发推送时只应用"最新一次"的响应，避免旧响应覆盖新状态
@@ -427,6 +463,7 @@ export const useUserStore = defineStore('user', () => {
     userId,
     isAdmin,
     name,
+    mustChangePassword,
     favorites,
     history,
     searchTerms,
@@ -435,6 +472,7 @@ export const useUserStore = defineStore('user', () => {
     syncError,
     login,
     logout,
+    changePassword,
     syncMarks,
     toggleFavorite,
     isFavorite,

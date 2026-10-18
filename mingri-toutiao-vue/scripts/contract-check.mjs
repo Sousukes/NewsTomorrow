@@ -23,6 +23,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 const STEP_UP_PATTERNS = [
   /^\/me\/nickname$/,
+  /^\/auth\/password$/,
   /^\/admin\/users(\/|$)/,
   /^\/admin\/sources\/[^/]+$/,
   /^\/admin\/sources\/reset$/,
@@ -237,6 +238,90 @@ const run = async () => {
       headers: suHeaders,
     });
     check('带 step-up 令牌可改名', nicknamed.result !== undefined);
+
+    // 8) 自助改密（C4）：用一个**临时账号**跑完整闭环，不动演示账号
+    //    （后续若干段还会用演示账号重新登录，改了它整场契约都会崩）。
+    //    手机号按运行时间生成：固定号码第二次跑会撞 409（账号已注册）。
+    const runTag = String(Date.now()).slice(-8);
+    const c4Phone = `139${runTag}`;
+    const c4Old = 'c4-old-pass';
+    const c4New = 'c4-new-pass';
+    const regC4 = await request('/auth/register', {
+      method: 'POST',
+      body: { phone: c4Phone, password: c4Old, name: '改密临时账号' },
+    });
+    check('注册改密用临时账号', regC4.token !== undefined);
+    const c4Login = await request('/auth/login', {
+      method: 'POST',
+      body: { phone: c4Phone, password: c4Old },
+    });
+    check('新账号登录默认不受限（C4）', c4Login.user.mustChangePassword === false);
+
+    let noStepUp = false;
+    try {
+      await request('/auth/password', {
+        method: 'PUT',
+        body: { oldPassword: c4Old, newPassword: c4New },
+        token: c4Login.token,
+        stepUp: false,
+      });
+    } catch (e) {
+      noStepUp = e.message === '此操作需要二次校验，请先验证身份';
+    }
+    check('改密缺二次校验令牌 → 40304（C4/C10）', noStepUp);
+
+    const c4Su = await request('/auth/step-up', {
+      method: 'POST',
+      body: { password: c4Old },
+      token: c4Login.token,
+    });
+    const c4SuHeaders = { 'X-Step-Up-Token': c4Su.stepUpToken };
+
+    let wrongOld = false;
+    try {
+      await request('/auth/password', {
+        method: 'PUT',
+        body: { oldPassword: 'definitely-wrong', newPassword: c4New },
+        token: c4Login.token,
+        headers: c4SuHeaders,
+      });
+    } catch (e) {
+      wrongOld = e.message === '原密码不正确';
+    }
+    check('改密旧密码错误 → 40101', wrongOld);
+
+    const changed = await request('/auth/password', {
+      method: 'PUT',
+      body: { oldPassword: c4Old, newPassword: c4New },
+      token: c4Login.token,
+      headers: c4SuHeaders,
+    });
+    check('改密成功并下发新令牌对', !!changed.token && !!changed.refreshToken);
+    // 旧 access 已作废（改密 = 作废旧凭证）
+    let oldTokenDead = false;
+    try {
+      await request('/me/favorites', { token: c4Login.token });
+    } catch {
+      oldTokenDead = true;
+    }
+    check('改密后旧 access 立即失效', oldTokenDead);
+    const meAfter = await request('/me/favorites', { token: changed.token });
+    check('改密后新 access 可用', Array.isArray(meAfter.ids));
+    let oldPwdDead = false;
+    try {
+      await request('/auth/login', { method: 'POST', body: { phone: c4Phone, password: c4Old } });
+    } catch {
+      oldPwdDead = true;
+    }
+    const c4NewLogin = await request('/auth/login', {
+      method: 'POST',
+      body: { phone: c4Phone, password: c4New },
+    });
+    // 自助改密不是「代重置」，不该留下受限态
+    check(
+      '旧密码不能登录、新密码可以且不受限（C4）',
+      oldPwdDead && c4NewLogin.user.mustChangePassword === false,
+    );
   }
 
   // 5) 鉴权：无 token 发评论应被拒
@@ -589,6 +674,75 @@ const run = async () => {
       removeMissing = true;
     }
     check('重复移除被拒（404）', removeMissing);
+
+    // 管理员代重置密码（C4）：对**已注册的普通用户**生效，不只是管理员
+    // 手机号同样按运行时间生成：固定号码第二次跑会撞 409（账号已注册）
+    const resetPhone = `138${String(Date.now()).slice(-8)}`;
+    await request('/auth/register', {
+      method: 'POST',
+      body: { phone: resetPhone, password: 'c4-target-pass', name: '待重置用户' },
+    });
+    let selfReset = '';
+    try {
+      await request(`/admin/users/${phone}/reset-password`, { method: 'POST', token });
+    } catch (e) {
+      selfReset = e.message;
+    }
+    check('不能重置自己的密码（C4）', selfReset.includes('不能重置自己的密码'), selfReset);
+
+    let unknownReset = '';
+    try {
+      await request('/admin/users/13911119999/reset-password', { method: 'POST', token });
+    } catch (e) {
+      unknownReset = e.message;
+    }
+    // 与公开接口同码：不靠错误码区分「手机号是否已注册」
+    check('重置未注册手机号 → 404 且文案不区分（C4）', unknownReset === '用户不存在');
+
+    const reset = await request(`/admin/users/${resetPhone}/reset-password`, {
+      method: 'POST',
+      token,
+    });
+    check(
+      '代重置返回一次性临时密码并置受限（C4）',
+      typeof reset.tempPassword === 'string' && reset.tempPassword.length >= 8,
+    );
+    const afterReset = await request('/auth/login', {
+      method: 'POST',
+      body: { phone: resetPhone, password: reset.tempPassword },
+    });
+    check('临时密码可登录且标记待改密（C4）', afterReset.user.mustChangePassword === true);
+
+    let restricted = false;
+    try {
+      await request('/me/favorites', {
+        method: 'POST',
+        body: { newsId: items[0].id },
+        token: afterReset.token,
+      });
+    } catch (e) {
+      restricted = e.message === '请先修改初始密码';
+    }
+    check('受限账号写操作被拦 40305（C4）', restricted);
+
+    const targetSu = await request('/auth/step-up', {
+      method: 'POST',
+      body: { password: reset.tempPassword },
+      token: afterReset.token,
+    });
+    const targetChanged = await request('/auth/password', {
+      method: 'PUT',
+      body: { oldPassword: reset.tempPassword, newPassword: 'c4-target-new' },
+      token: afterReset.token,
+      headers: { 'X-Step-Up-Token': targetSu.stepUpToken },
+    });
+    check('受限账号改密后解除受限（C4）', targetChanged.user.mustChangePassword === false);
+    const afterChange = await request('/me/favorites', {
+      method: 'POST',
+      body: { newsId: items[0].id },
+      token: targetChanged.token,
+    });
+    check('解除后写操作恢复（C4）', afterChange.ids.includes(items[0].id));
   }
 
   // 12) 管理端：运营审计（P1-15）

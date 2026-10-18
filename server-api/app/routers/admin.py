@@ -79,6 +79,7 @@ from ..schemas import (
     WordIn,
     WordUpdateIn,
 )
+from ..security import generate_temp_password, hash_password
 from ..step_up import require_step_up
 # ILIKE 转义只保留一份实现：规则虽短，但漏转义 `%` 等于把通配符交给用户输入
 # （既是错误结果，也是潜在的信息收集面），不允许两边各写一遍后悄悄漂移。
@@ -95,6 +96,9 @@ AUDIT_SOURCE_DELETE = "source.delete"
 AUDIT_SOURCE_RESET = "source.reset"
 AUDIT_ADMIN_ADD = "admin.add"
 AUDIT_ADMIN_REMOVE = "admin.remove"
+# C4：代重置密码。**detail 里绝不含明文密码**——审计表是长期留存的，
+# 把凭据写进去等于给任何有只读权限的人发了一份密码清单。
+AUDIT_PASSWORD_RESET = "user.password.reset"
 # P1-20：资讯审核与下架
 AUDIT_NEWS_HIDE = "news.hide"
 AUDIT_NEWS_RESTORE = "news.restore"
@@ -151,9 +155,18 @@ def require_admin(
     返回 `User` 供需要 actor 的端点（审计 `record_audit`、日志）直接注入：
     `user: User = Depends(require_admin)`。同一请求内 FastAPI 会缓存依赖结果，
     因此与 router 级的那次调用共用同一个实例，不会重复查库。
+
+    C4：这里同时拦下「受限账号」（管理员刚被代重置过密码、尚未改密）。
+    放在**这一个**函数里而不是 34 个端点各写一次——受保护面与判定逻辑同处，
+    新增端点自动继承，不会漏。
     """
     if not is_admin(user.phone, db):
         raise HTTPException(status_code=403, detail={"code": 40301, "message": "无权限执行该操作"})
+    if user.must_change_password:
+        # 拿着临时密码管后台 = 临时密码长期有效，「强制改密」名存实亡
+        raise HTTPException(
+            status_code=403, detail={"code": 40305, "message": "请先修改初始密码"}
+        )
     return user
 
 
@@ -1579,6 +1592,55 @@ def remove_admin_user(
     db.commit()
     logger.info("管理员 %s 移除管理员 %s", user.phone, phone)
     return ok({"phone": phone}, message="已移除管理员")
+
+
+@router.post("/users/{phone}/reset-password", response_model=None)
+def reset_user_password(
+    phone: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    # C10 + C4：代重置等价于「替别人换锁」，是本项目里权限最高的一类动作——
+    # 攻击者拿到管理员会话就能锁死任意账号。
+    step: User = Depends(require_step_up),
+):
+    """管理员代重置密码（C4）：解决「用户忘记密码只能无解」。
+
+    为什么不给用户自助找回：本项目**没有可送达的凭证通道**（无短信、无邮箱，
+    C3 说的正是这件事）。在通道补上之前，「管理员线下核实身份 + 代发一次性
+    临时密码」是唯一诚实的解法——它把「验证身份」放在人身上，而不是假装
+    系统能确认你是谁。
+
+    三处刻意：
+    - **临时密码由服务端生成**：管理员不该替用户挑密码（容易挑出弱口令，
+      且会成为跨站点复用的源头）。字符集剔除易混字符，因为它靠口头/手写传达；
+    - **置 `must_change_password` 并自增 `token_version`**：临时密码若能长期
+      使用，「强制改密」就名存实亡；顺带吊销该用户所有已签发令牌
+      （密码泄露场景的关键一步，否则旧的 access 还能用 30 分钟）；
+    - **不能重置自己**：那是一条把自己踢下线的路，自助改密才是正解。
+
+    临时密码**只在此响应里出现一次**，不写日志、不入审计 detail。
+    """
+    if phone == user.phone:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": 40007, "message": "不能重置自己的密码，请使用「修改密码」"},
+        )
+    target = db.query(User).filter(User.phone == phone).first()
+    if target is None:
+        # 与公开接口同码：不能靠错误码区分「手机号是否已注册」（账号枚举）
+        raise HTTPException(status_code=404, detail={"code": 40400, "message": "用户不存在"})
+    temp_password = generate_temp_password()
+    target.password_hash = hash_password(temp_password)
+    target.must_change_password = True
+    target.token_version = (target.token_version or 0) + 1
+    # detail 只留「是否已改过」这类事实，绝不含明文
+    record_audit(db, user.phone, AUDIT_PASSWORD_RESET, phone, {"forced": True})
+    db.commit()
+    logger.info("管理员 %s 重置了 %s 的密码（受限态已置位）", user.phone, phone)
+    return ok(
+        {"phone": phone, "tempPassword": temp_password, "mustChangePassword": True},
+        message="临时密码仅显示一次，请立即转交本人并提醒其登录后修改",
+    )
 
 
 # ---------------------------------------------------------------- 运营审计（P1-15）

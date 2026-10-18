@@ -17,6 +17,7 @@ vi.mock('@/api/me', () => ({
 vi.mock('@/api/auth', () => ({
   login: vi.fn(),
   logout: vi.fn(),
+  changePassword: vi.fn(),
 }));
 
 vi.mock('@/api/news', () => ({
@@ -660,5 +661,80 @@ describe('stores/user 昵称（P1-24）', () => {
     expect(localStorage.getItem('mingri-toutiao:token')).toBeNull();
     expect(localStorage.getItem('mingri-toutiao:refresh-token')).toBeNull();
     expect(localStorage.getItem('mingri-toutiao:token-exp')).toBeNull();
+  });
+
+  it('登录带 mustChangePassword → 置受限标志并落盘（C4）', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 't',
+      user: { id: 1, name: '用户', mustChangePassword: true },
+    });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+
+    const s = makeStore();
+    await s.login('13800138000', 'old-pass');
+
+    expect(s.mustChangePassword).toBe(true);
+    // **必须落盘**：刷新页面后守卫失效，用户能到处逛，直到某个写操作撞 40305
+    const prefs = JSON.parse(localStorage.getItem(PREFS_KEY)!);
+    expect(prefs.mustChangePassword).toBe(true);
+  });
+
+  it('普通登录 mustChangePassword 为 false（缺省不授予受限）', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 't',
+      user: { id: 1, name: '用户' },
+    });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+
+    const s = makeStore();
+    await s.login('13800138000', 'old-pass');
+    expect(s.mustChangePassword).toBe(false);
+  });
+
+  it('修改密码成功后清受限标志，并写入后端下发的新令牌（C4）', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 'temp-access',
+      refreshToken: 'temp-refresh',
+      user: { id: 1, name: '用户', mustChangePassword: true },
+    });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    vi.mocked(authApi.changePassword).mockResolvedValue({
+      token: 'new-access',
+      refreshToken: 'new-refresh',
+      expiresIn: 1800,
+      user: { id: 1, name: '用户', mustChangePassword: false },
+    });
+
+    const s = makeStore();
+    await s.login('13800138000', 'temp-pass');
+    expect(s.mustChangePassword).toBe(true);
+
+    await s.changePassword('temp-pass', 'brand-new-pass');
+
+    expect(authApi.changePassword).toHaveBeenCalledWith('temp-pass', 'brand-new-pass');
+    expect(s.mustChangePassword).toBe(false);
+    expect(s.token).toBe('new-access');
+    // 后端已作废旧令牌，本地必须换成新的一对，否则用户被自己踢下线
+    expect(localStorage.getItem('mingri-toutiao:token')).toBe('new-access');
+    expect(localStorage.getItem('mingri-toutiao:refresh-token')).toBe('new-refresh');
+  });
+
+  it('登出清掉受限标志（下一位用这台设备的人不该被锁在改密页）', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      token: 't',
+      user: { id: 1, name: '用户', mustChangePassword: true },
+    });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    vi.mocked(authApi.logout).mockResolvedValue(undefined);
+
+    const s = makeStore();
+    await s.login('13800138000', 'old-pass');
+    await s.logout();
+
+    expect(s.mustChangePassword).toBe(false);
   });
 });

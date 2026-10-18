@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
-import { addAdminUser, fetchAdminUsers, removeAdminUser } from '@/api/admin';
+import { addAdminUser, fetchAdminUsers, removeAdminUser, resetUserPassword } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
 import type { AdminUserItem } from '@/types';
 
@@ -115,6 +115,47 @@ async function doRemove() {
     busyPhone.value = '';
     pendingRemove.value = null;
   }
+}
+
+// ------------------------------ 代重置密码（C4） ------------------------------
+
+/**
+ * 用手机号直接重置，而不是"从管理员列表里挑一个"。
+ *
+ * 理由：C4 的真实场景是**普通用户**忘记密码，而本页列的是应用内管理员白名单——
+ * 普通用户根本不在列表里，做成列表项等于"只允许重置管理员"，反而漏了正主。
+ */
+const resetPhone = ref('');
+const resetBusy = ref(false);
+const resetError = ref('');
+const resetResult = ref<{ phone: string; tempPassword: string } | null>(null);
+
+async function doReset() {
+  const phone = resetPhone.value.trim();
+  if (!/^1\d{10}$/.test(phone)) {
+    resetError.value = '请输入正确的 11 位手机号';
+    return;
+  }
+  resetBusy.value = true;
+  resetError.value = '';
+  try {
+    const data = await resetUserPassword(phone);
+    resetResult.value = { phone: data.phone, tempPassword: data.tempPassword };
+    resetPhone.value = '';
+    showToast(`已重置 ${data.phone} 的密码`);
+  } catch (e) {
+    resetResult.value = null;
+    resetError.value = message(e, '重置失败');
+  } finally {
+    resetBusy.value = false;
+  }
+}
+
+function copyTempPassword() {
+  const text = resetResult.value?.tempPassword ?? '';
+  if (!text) return;
+  void navigator.clipboard?.writeText(text);
+  showToast('已复制临时密码');
 }
 
 // ------------------------------ 展示辅助 ------------------------------
@@ -233,6 +274,41 @@ function formatTime(iso: string): string {
         </li>
       </ul>
 
+      <!-- 代重置密码（C4）：对**任意已注册用户**生效，故用手机号输入而非列表项 -->
+      <form class="admin__form admin__form--new" @submit.prevent="doReset">
+        <h2 class="admin__form-title">重置用户密码</h2>
+        <label class="admin__field">
+          <span>用户手机号</span>
+          <input v-model="resetPhone" maxlength="11" placeholder="11 位手机号" />
+        </label>
+        <p class="admin__form-tip">
+          系统会生成一个一次性临时密码，该用户登录后**必须**先修改密码才能发评论、收藏或进入后台。
+          重置会立即作废该账号已登录的所有设备。
+        </p>
+        <p v-if="resetError" class="admin__form-error">{{ resetError }}</p>
+        <div class="admin__form-actions">
+          <Button
+            type="submit"
+            variant="primary"
+            size="md"
+            :label="resetBusy ? '重置中…' : '生成临时密码'"
+            :disabled="resetBusy"
+          />
+        </div>
+      </form>
+
+      <div v-if="resetResult" class="admin__confirm" role="alertdialog" aria-label="临时密码">
+        <p>
+          「{{ resetResult.phone }}」的临时密码：
+          <strong class="admin__temp">{{ resetResult.tempPassword }}</strong>
+        </p>
+        <p>只显示这一次，请立即通过安全渠道转交本人，并提醒其登录后修改。</p>
+        <div class="admin__confirm-actions">
+          <Button variant="secondary" size="md" label="复制密码" @click="copyTempPassword" />
+          <Button variant="secondary" size="md" label="我已转交" @click="resetResult = null" />
+        </div>
+      </div>
+
       <!-- 移除确认 -->
       <div
         v-if="pendingRemove"
@@ -317,6 +393,14 @@ function formatTime(iso: string): string {
   font-size: 11px;
   line-height: 1.6;
   color: #d93025;
+}
+
+/* 临时密码：等宽 + 大字 + 高对比——它要被口头/手写传达一次，字形含糊就是事故 */
+.admin__temp {
+  font-family: var(--font-num, monospace);
+  font-size: 18px;
+  letter-spacing: 1px;
+  color: var(--color-primary, #d43d3d);
 }
 
 .admin__banner {

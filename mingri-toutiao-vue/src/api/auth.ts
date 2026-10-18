@@ -19,7 +19,14 @@ export interface LoginResult {
    * `isAdmin` 由后端按 `ADMIN_PHONES` 白名单判定后下发——前端据此决定
    * 是否展示管理入口，省掉一次探测请求；只下发布尔值，不下发白名单本身。
    */
-  user: { id?: number; name: string; phone?: string; isAdmin?: boolean };
+  user: {
+    id?: number;
+    name: string;
+    phone?: string;
+    isAdmin?: boolean;
+    /** C4：管理员刚代其重置过密码 → 前端强制跳改密页 */
+    mustChangePassword?: boolean;
+  };
 }
 
 /** POST /auth/login —— 登录（成功即写入 token） */
@@ -72,4 +79,21 @@ export async function stepUp(password: string): Promise<boolean> {
   if (!data?.stepUpToken) return false;
   setStepUpToken(data.stepUpToken, data.expiresIn);
   return true;
+}
+
+/** POST /auth/password —— 自助改密（C4）。
+ *
+ * 需要二次校验（`X-Step-Up-Token`）与旧密码；成功后**后端会作废全部旧令牌**，
+ * 因此响应里带的是**新的一对**令牌，必须立刻写入，否则用户改完密被自己踢下线。
+ */
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<LoginResult> {
+  const data = await request<LoginResult>('/auth/password', {
+    method: 'PUT',
+    body: { oldPassword, newPassword },
+  });
+  if (data?.token) setSession(data);
+  return data;
 }

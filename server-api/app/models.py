@@ -77,6 +77,13 @@ class User(Base):
     created_at = Column(String(30), nullable=False, default=now_str)
     # token 版本：JWT 载荷携带 ver，校验时比对；自增即可吊销该用户全部已签发 token
     token_version = Column(Integer, nullable=False, default=0, server_default="0")
+    # ---- C4 强制改密 ----
+    # 管理员代重置密码后置位：账号处于「受限态」——可读可改密，但发评论/点赞/
+    # 收藏/进管理端都被拦（40305）。没有这个标志，「代重置」就等于给用户发了一个
+    # 可以长期使用的临时密码：用户完全可以不改，然后那个密码就永久有效了。
+    must_change_password = Column(
+        Boolean, nullable=False, default=False, server_default=sa_false()
+    )
 
 
 class News(Base):

@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, require_password_current
 from ..models import News, User, UserFavorite, UserHistory
 from ..nickname_moderation import (
     MESSAGE_REVIEW,
@@ -172,7 +172,7 @@ def list_favorites(db: Session = Depends(get_db), user: User = Depends(get_curre
 
 @router.post("/favorites", response_model=None)
 def add_favorite(
-    body: MarkIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: MarkIn, db: Session = Depends(get_db), user: User = Depends(require_password_current)
 ):
     """收藏一条资讯（幂等）。资讯不存在返回 404。"""
     if db.get(News, body.newsId) is None:
@@ -187,7 +187,7 @@ def add_favorite(
 
 @router.delete("/favorites/{news_id}", response_model=None)
 def remove_favorite(
-    news_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    news_id: str, db: Session = Depends(get_db), user: User = Depends(require_password_current)
 ):
     """取消收藏（幂等；未收藏也返回成功）。"""
     row = db.get(UserFavorite, {"user_id": user.id, "news_id": news_id})
@@ -200,7 +200,7 @@ def remove_favorite(
 
 @router.put("/favorites", response_model=None)
 def merge_favorites(
-    body: MarkBulkIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: MarkBulkIn, db: Session = Depends(get_db), user: User = Depends(require_password_current)
 ):
     """并集合并（登录时把本地收藏并入云端）。
 
@@ -224,7 +224,7 @@ def list_history(db: Session = Depends(get_db), user: User = Depends(get_current
 
 @router.post("/history", response_model=None)
 def record_history(
-    body: MarkIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: MarkIn, db: Session = Depends(get_db), user: User = Depends(require_password_current)
 ):
     """记录一次浏览（同一资讯只刷新时间，幂等）。
 
@@ -245,7 +245,7 @@ def record_history(
 
 
 @router.delete("/history", response_model=None)
-def clear_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def clear_history(db: Session = Depends(get_db), user: User = Depends(require_password_current)):
     """清空浏览历史。"""
     db.execute(UserHistory.__table__.delete().where(UserHistory.user_id == user.id))
     db.commit()
@@ -254,7 +254,7 @@ def clear_history(db: Session = Depends(get_db), user: User = Depends(get_curren
 
 @router.put("/history", response_model=None)
 def merge_history(
-    body: MarkBulkIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: MarkBulkIn, db: Session = Depends(get_db), user: User = Depends(require_password_current)
 ):
     """并集合并（登录时把本地历史并入云端），随后按上限裁剪。"""
     added = _merge(db, user, UserHistory, UserHistory.viewed_at, body.ids)
@@ -269,7 +269,7 @@ def merge_history(
 def update_nickname(
     body: NicknameUpdateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_password_current),
     # C10：改名是用户侧唯一改身份的操作，且会触发/清除人工复核状态——
     # 令牌被偷时最容易被拿去「顶着受害者名字说话」，故要求二次校验。
     step: User = Depends(require_step_up),

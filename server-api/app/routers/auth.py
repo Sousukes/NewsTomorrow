@@ -23,7 +23,7 @@ from ..nickname_moderation import (
     validate_nickname_shape,
 )
 from ..response import ok
-from ..schemas import LoginIn, RefreshIn, RegisterIn, StepUpIn, TokenOut
+from ..schemas import LoginIn, PasswordChangeIn, RefreshIn, RegisterIn, StepUpIn, TokenOut
 from ..security import (
     TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_REFRESH,
@@ -32,7 +32,7 @@ from ..security import (
     hash_password,
     verify_password,
 )
-from ..step_up import issue_step_up_token
+from ..step_up import issue_step_up_token, require_step_up
 from .admin import is_admin
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -78,6 +78,10 @@ def _token_payload(user: User, db: Session) -> dict:
             # 否则这个标志只有管理员看得见，用户侧只剩保存那一刻的一次性提示，
             # 刷新即失忆（写而不读的状态，迟早被当成没用的字段删掉）。
             "namePendingReview": bool(user.name_pending_review),
+            # C4：管理员刚代其重置过密码 → 前端强制跳改密页，
+            # 并禁用发评论/收藏等动作。放在登录响应里是因为**登录是唯一**
+            # 能让用户立刻知道这件事的时机。
+            "mustChangePassword": bool(user.must_change_password),
         },
     }
 
@@ -156,6 +160,44 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
     # 成功即清零：失败计数只反映「连续」失败，不让历史手滑累积成锁定
     record_success(body.phone)
     return ok(_token_payload(user, db), message="登录成功")
+
+
+@router.put("/password", response_model=None)
+def change_password(
+    body: PasswordChangeIn,
+    user: User = Depends(get_current_user),
+    # 改密是「换掉最重要的那把钥匙」，必须比普通写操作多一道证明：
+    # 令牌被偷时，攻击者拿临时密码或会话就能把账号永久占住。
+    step: User = Depends(require_step_up),
+    db: Session = Depends(get_db),
+):
+    """自助改密（C4）。
+
+    两道证明都要过：`require_step_up`（持令牌者再验一次密码）+ `oldPassword`。
+    单靠 step-up 不够——用户被诱导弹窗时输入的仍是他自己的密码，
+    而"旧密码错误"这道校验能挡住其中一部分。
+
+    成功后**自增 token_version**：改密的语义就是"作废旧的一切凭证"，
+    其他设备上的 access/refresh 立即失效（与 /logout 同款做法）。
+    调用方手上的令牌也因此失效，所以直接下发**新的一对**——否则用户改完密
+    会被自己踢下线，那体验比不改还糟。
+    """
+    if not verify_password(body.oldPassword, user.password_hash):
+        raise HTTPException(
+            status_code=401, detail={"code": 40101, "message": "原密码不正确"}
+        )
+    if verify_password(body.newPassword, user.password_hash):
+        raise HTTPException(
+            status_code=422, detail={"code": 42205, "message": "新密码不能与原密码相同"}
+        )
+    user.password_hash = hash_password(body.newPassword)
+    # 解除受限态（C4）：这一步是「强制改密」的终点，改完即恢复正常
+    user.must_change_password = False
+    user.token_version = (user.token_version or 0) + 1
+    db.commit()
+    db.refresh(user)
+    logger.info("用户 %s 修改了密码（受限态解除=%s）", user.phone, not user.must_change_password)
+    return ok(_token_payload(user, db), message="密码已更新")
 
 
 @router.post("/logout", response_model=None)

@@ -56,6 +56,24 @@ def get_current_user(
     return user
 
 
+def require_password_current(user: User = Depends(get_current_user)) -> User:
+    """C4：受限账号（管理员刚代其重置过密码）不能做「以本人身份对外」的动作。
+
+    拦截范围刻意**只覆盖写操作**：受限账号仍可浏览、搜索、看消息、改自己的
+    资料——把它整个锁死除了让人焦急，没有任何安全收益；真正要防的是
+    「拿着临时密码发评论/收藏/进管理端」，因为那等于让临时密码长期有效，
+    「强制改密」就名存实亡。
+
+    刻意用 403 / 40305：会话是有效的（401 会让前端清登录态，把用户踢回登录页，
+    而他此刻需要的恰恰是留在原地改密）。
+    """
+    if user.must_change_password:
+        raise HTTPException(
+            status_code=403, detail={"code": 40305, "message": "请先修改初始密码"}
+        )
+    return user
+
+
 def require_ops_access(
     authorization: Optional[str] = Header(None),
     x_ops_token: Optional[str] = Header(None),

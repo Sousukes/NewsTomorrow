@@ -1238,6 +1238,16 @@ const accounts = new Map([
   ['13900139002', { id: 102, name: '笨蛋大佬', pendingReview: true, reviewedAt: null }],
 ]);
 let accountSeq = 102;
+/** 演示口令（mock 只有一套，与登录校验同源） */
+const DEMO_PASSWORD = '123456';
+/** C4：代重置用的临时密码字符集，与后端 security.TEMP_PASSWORD_ALPHABET 一致 */
+const TEMP_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+function tempPassword() {
+  let out = '';
+  for (let i = 0; i < 12; i += 1)
+    out += TEMP_ALPHABET[Math.floor(Math.random() * TEMP_ALPHABET.length)];
+  return out;
+}
 function accountOf(phone) {
   const p = String(phone ?? '');
   if (!accounts.has(p)) {
@@ -1247,9 +1257,26 @@ function accountOf(phone) {
       name: '明日头条用户',
       pendingReview: false,
       reviewedAt: null,
+      password: DEMO_PASSWORD,
+      mustChangePassword: false,
     });
+  } else if (accounts.get(p).password === undefined) {
+    // 种子账号补齐 C4 字段（进程内数据，懒补即可）
+    const acc = accounts.get(p);
+    acc.password = DEMO_PASSWORD;
+    acc.mustChangePassword = false;
   }
   return accounts.get(p);
+}
+
+/**
+ * C4 受限态：账号刚被代重置过密码时，写操作必须被拦（40305）。
+ * 与后端 `deps.require_password_current` 同口径；读操作不受影响。
+ */
+function requirePasswordCurrent(req, res, phone) {
+  if (!accountOf(phone).mustChangePassword) return true;
+  fail(res, 403, 40305, '请先修改初始密码');
+  return false;
 }
 /** 按 userId 反查账号（复核队列/复核操作按 id 定位，与后端 User.id 对齐） */
 function accountById(userId) {
@@ -1630,6 +1657,11 @@ function requireAdmin(req, res) {
     fail(res, 403, 40301, '无权限执行该操作');
     return null;
   }
+  // C4：受限账号（刚被代重置密码）不进后台——否则临时密码可长期有效
+  if (accountOf(phone).mustChangePassword) {
+    fail(res, 403, 40305, '请先修改初始密码');
+    return null;
+  }
   return phone;
 }
 
@@ -1704,7 +1736,8 @@ const server = createServer(async (req, res) => {
     const { phone, password } = await readBody(req);
     if (!/^1\d{10}$/.test(String(phone ?? '')))
       return fail(res, 400, 40001, '请输入正确的 11 位手机号');
-    if (String(password ?? '') !== '123456')
+    // C4：与账号当前密码比对（代重置后会变），而非固定演示口令
+    if (String(password ?? '') !== accountOf(phone).password)
       return fail(res, 401, 40101, '手机号或密码错误，请重新输入');
     const { token, refreshToken } = issueTokenPair(phone);
     seenPhones.add(String(phone));
@@ -1723,6 +1756,8 @@ const server = createServer(async (req, res) => {
         phone,
         isAdmin: isAdminPhone(phone),
         namePendingReview: acc.pendingReview,
+        // C4：受限态随登录下发（与后端 _token_payload 同形状）
+        mustChangePassword: acc.mustChangePassword === true,
       },
     });
   }
@@ -1751,6 +1786,8 @@ const server = createServer(async (req, res) => {
         phone,
         isAdmin: isAdminPhone(phone),
         namePendingReview: acc.pendingReview,
+        // C4：受限态随登录下发（与后端 _token_payload 同形状）
+        mustChangePassword: acc.mustChangePassword === true,
       },
     });
   }
@@ -1762,8 +1799,8 @@ const server = createServer(async (req, res) => {
     if (!phone) return fail(res, 401, 40100, '未登录或登录已过期');
     const body = await readBody(req);
     const fails = (stepUpFails.get(phone) ?? 0) + 1;
-    // 演示口令与登录一致（mock 只有一套口令）；失败计数同后端：5 次即锁
-    if (String(body.password ?? '') !== '123456') {
+    // C4：代重置后账号密码已变，校验必须走账号当前密码
+    if (String(body.password ?? '') !== accountOf(phone).password) {
       stepUpFails.set(phone, fails);
       if (fails >= 5) {
         return fail(res, 429, 42902, '二次校验失败次数过多，请约 15 分钟后再试');
@@ -1774,6 +1811,109 @@ const server = createServer(async (req, res) => {
     const stepUpToken = `su_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     stepUpTokens.set(stepUpToken, { phone });
     return ok(res, { stepUpToken, expiresIn: 300 }, '二次校验通过');
+  }
+
+  // PUT /auth/password —— 自助改密（C4）
+  if (head === 'auth' && a === 'password' && method === 'PUT') {
+    const t = requireAuth(req, res);
+    if (!t) return;
+    if (!requireStepUp(req, res)) return;
+    const phone = tokens.get(t)?.phone;
+    const acc = accountOf(phone);
+    const body = await readBody(req);
+    const oldPassword = String(body.oldPassword ?? '');
+    const newPassword = String(body.newPassword ?? '');
+    if (oldPassword !== acc.password) {
+      return fail(res, 401, 40101, '原密码不正确');
+    }
+    if (newPassword.length < 6 || newPassword.length > 64) {
+      return fail(res, 422, 42200, '参数校验失败：newPassword 长度需为 6~64');
+    }
+    if (newPassword === oldPassword) {
+      return fail(res, 422, 42205, '新密码不能与原密码相同');
+    }
+    acc.password = newPassword;
+    acc.mustChangePassword = false;
+    // 与后端 token_version 自增同效果：吊销该账号全部已签发令牌
+    for (const key of [...tokens.keys()]) {
+      if (tokens.get(key)?.phone === phone) {
+        tokens.delete(key);
+        refreshTokens.delete(key);
+      }
+    }
+    for (const key of [...refreshTokens.keys()]) {
+      if (refreshTokens.get(key)?.phone === phone) refreshTokens.delete(key);
+    }
+    const pair = issueTokenPair(phone);
+    return ok(
+      res,
+      {
+        ...pair,
+        expiresIn: 1800,
+        user: {
+          id: acc.id,
+          name: acc.name,
+          phone,
+          isAdmin: isAdminPhone(phone),
+          namePendingReview: acc.pendingReview,
+          mustChangePassword: false,
+        },
+      },
+      '密码已更新',
+    );
+  }
+
+  // POST /auth/register
+  //
+  // mock 此前**没有注册端点**（账号在登录时懒创建），C4 的改密闭环需要一个
+  // 已知密码的账号，故补上——它同时让契约脚本能在双端跑同一条改密链路。
+  // 昵称校验与后端同链（形状 → 引擎 → 命中留痕），不在这里另造一套规则。
+  if (head === 'auth' && a === 'register' && method === 'POST') {
+    const body = await readBody(req);
+    const phone = String(body.phone ?? '');
+    const password = String(body.password ?? '');
+    const clean = String(body.name ?? '').trim();
+    if (!/^1\d{10}$/.test(phone)) {
+      return fail(res, 400, 40001, '请输入正确的 11 位手机号');
+    }
+    if (password.length < 6 || password.length > 64) {
+      return fail(res, 422, 42200, '参数校验失败：password 长度需为 6~64');
+    }
+    const existing = accounts.get(phone);
+    if (existing?.registered === true) {
+      return fail(res, 409, 40901, '该手机号已注册，请直接登录');
+    }
+    let verdict = null;
+    if (clean) {
+      const [valid, msg] = validateNicknameShape(clean);
+      if (!valid) return fail(res, 422, 42203, msg);
+      verdict = nicknameCheck(clean);
+      if (verdict.result === 'block') {
+        // 与后端一致：拦注册而不是悄悄换成默认名（静默替换会让用户以为成功了）
+        return fail(res, 400, 40006, verdict.message);
+      }
+    }
+    const acc = accountOf(phone);
+    acc.password = password;
+    acc.registered = true;
+    if (clean) {
+      acc.name = clean;
+      acc.pendingReview = verdict?.result === 'review';
+    }
+    const pair = issueTokenPair(phone);
+    seenPhones.add(phone);
+    return ok(res, {
+      ...pair,
+      expiresIn: 1800,
+      user: {
+        id: acc.id,
+        name: acc.name,
+        phone,
+        isAdmin: isAdminPhone(phone),
+        namePendingReview: acc.pendingReview,
+        mustChangePassword: false,
+      },
+    });
   }
 
   // POST /auth/logout
@@ -1916,7 +2056,10 @@ const server = createServer(async (req, res) => {
 
   // POST /news/:id/comments（需登录；parentId 非空时为回复——二级评论）
   if (head === 'news' && a && b === 'comments' && !c && method === 'POST') {
-    if (!requireAuth(req, res)) return;
+    const t = requireAuth(req, res);
+    if (!t) return;
+    // C4：受限账号（刚被代重置密码）不得发言
+    if (!requirePasswordCurrent(req, res, tokens.get(t)?.phone)) return;
     // P1-20：已下架资讯不能发评论（与后端 _get_news_or_404 一致）
     const target = news.find((n) => n.id === a);
     if (!target || target.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
@@ -1983,7 +2126,10 @@ const server = createServer(async (req, res) => {
 
   // PATCH /news/:id/comments/:cid（需登录；点赞幂等；主评论与回复通用）
   if (head === 'news' && a && b === 'comments' && c && method === 'PATCH') {
-    if (!requireAuth(req, res)) return;
+    const t = requireAuth(req, res);
+    if (!t) return;
+    // C4：受限账号不得点赞（与后端 comments.set_like 同口径）
+    if (!requirePasswordCurrent(req, res, tokens.get(t)?.phone)) return;
     const { liked } = await readBody(req);
     const list = comments[a] ?? [];
     const target = list.find((x) => x.id === c);
@@ -2017,6 +2163,8 @@ const server = createServer(async (req, res) => {
     const t = requireAuth(req, res);
     if (!t) return;
     const store = marksOf(tokens.get(t)?.phone ?? 'unknown');
+    // C4：读不受限，写受限（与后端 deps.require_password_current 同口径）
+    if (method !== 'GET' && !requirePasswordCurrent(req, res, tokens.get(t)?.phone)) return;
     const listKey = a;
     const payload = () => ({
       ids: [...store[listKey]],
@@ -2080,6 +2228,8 @@ const server = createServer(async (req, res) => {
     // C10：改名是用户侧唯一改身份的操作，需二次校验（与后端同序：先登录态，
     // 再二次校验——顺序反了会把「未登录」暴露成 40304）
     if (!requireStepUp(req, res)) return;
+    // C4：受限账号先改密
+    if (!requirePasswordCurrent(req, res, tokens.get(t)?.phone)) return;
     const account = accountOf(tokens.get(t)?.phone ?? 'unknown');
     const body = await readBody(req);
     const clean = String(body.name ?? '').trim();
@@ -3110,6 +3260,41 @@ const server = createServer(async (req, res) => {
     audit(operator, 'admin.remove', b, { note: adminWhitelist.get(b)?.note || '' });
     adminWhitelist.delete(b);
     return ok(res, { phone: b }, '已移除管理员');
+  }
+
+  // POST /admin/users/:phone/reset-password —— 管理员代重置密码（C4）
+  if (head === 'admin' && a === 'users' && b && c === 'reset-password' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    // C10：代重置 = 替别人换锁，权限最高的一类动作
+    if (!requireStepUp(req, res)) return;
+    if (b === operator) {
+      return fail(res, 400, 40007, '不能重置自己的密码，请使用「修改密码」');
+    }
+    if (!accounts.has(b)) {
+      // 与后端同码：不靠错误码区分「手机号是否已注册」
+      return fail(res, 404, 40400, '用户不存在');
+    }
+    const acc = accountOf(b);
+    const temp = tempPassword();
+    acc.password = temp;
+    acc.mustChangePassword = true;
+    // 吊销该账号全部令牌（与后端 token_version 自增同效果）
+    for (const [key, rec] of tokens) {
+      if (rec.phone === b) tokens.delete(key);
+    }
+    for (const [key, rec] of refreshTokens) {
+      if (rec.phone === b) refreshTokens.delete(key);
+    }
+    for (const [key, rec] of stepUpTokens) {
+      if (rec.phone === b) stepUpTokens.delete(key);
+    }
+    audit(operator, 'user.password.reset', b, { forced: true });
+    return ok(
+      res,
+      { phone: b, tempPassword: temp, mustChangePassword: true },
+      '临时密码仅显示一次，请立即转交本人并提醒其登录后修改',
+    );
   }
 
   /* --------------------- 管理端：运营审计（P1-15） --------------------- */

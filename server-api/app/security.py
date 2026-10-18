@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import os
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -35,6 +36,20 @@ _DEFAULT_MINUTES = {
     TOKEN_TYPE_REFRESH: JWT_REFRESH_EXPIRE_MINUTES,
     TOKEN_TYPE_STEP_UP: STEP_UP_TOKEN_MINUTES,
 }
+
+
+#: 临时密码字符集（C4 管理员代重置）。刻意剔除易混字符（0/O、1/l/I）与标点：
+#: 这个密码靠**口头或手写**转交给本人，抄错率必须压到最低。
+TEMP_PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+
+
+def generate_temp_password(length: int = 12) -> str:
+    """生成一次性临时密码（管理员代重置用，C4）。
+
+    `secrets.choice` 而非 `random.choice`：临时密码是凭据，
+    走 `random` 的可预测序列等于把可猜测性留给攻击者。
+    """
+    return "".join(secrets.choice(TEMP_PASSWORD_ALPHABET) for _ in range(length))
 
 
 def hash_password(password: str) -> str:

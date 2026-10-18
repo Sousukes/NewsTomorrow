@@ -54,6 +54,19 @@ class StepUpIn(BaseModel):
     password: str = Field(min_length=1)
 
 
+class PasswordChangeIn(BaseModel):
+    """自助改密入参（C4）。
+
+    `oldPassword` 必填：改密本身是「证明你还在」的动作，且接口已被
+    `require_step_up` 保护过一轮；两道证明都过仍要旧密码，是为了让
+    「令牌被偷 + 弹窗被诱导」也拿不到永久凭证。
+    """
+
+    oldPassword: str = Field(min_length=1)
+    # 与注册同一条长度口径（6~64），避免出现「注册能过、改密不能过」
+    newPassword: str = Field(min_length=6, max_length=64)
+
+
 class CommentCreateIn(BaseModel):
     content: str = Field(min_length=1, max_length=500)
     # 回复某条评论时传其 id；不传表示发表主评论。

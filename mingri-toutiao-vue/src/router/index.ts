@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router';
+import { useUserStore } from '@/stores/user';
 
 const router = createRouter({
   history: createWebHistory(),
@@ -35,6 +36,12 @@ const router = createRouter({
     },
     { path: '/news/:id/gallery', name: 'gallery', component: () => import('@/views/Gallery.vue') },
     { path: '/login', name: 'login', component: () => import('@/views/Login.vue') },
+    // 修改密码（C4）：受限账号的**唯一出口**——路由守卫只放它过去
+    {
+      path: '/change-password',
+      name: 'change-password',
+      component: () => import('@/views/ChangePassword.vue'),
+    },
     { path: '/search', name: 'search', component: () => import('@/views/Search.vue') },
     {
       path: '/search/results',
@@ -93,6 +100,21 @@ const router = createRouter({
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
+});
+
+/**
+ * C4 路由守卫：受限账号（管理员刚代其重置过密码）只能去改密页。
+ *
+ * 为什么不在组件里各自判断：受限期有 20 多个页面，逐个加判断必然漏；
+ * 漏掉的那个页面会让用户以为"改了就行"，然后在某个操作上撞 40305——
+ * 比一开始就被拦住更让人困惑。
+ */
+router.beforeEach((to) => {
+  // Pinia 在应用启动时已激活；守卫运行在路由解析阶段，此时 store 可用
+  const user = useUserStore();
+  if (!user.mustChangePassword) return true;
+  if (to.name === 'change-password' || to.name === 'login') return true;
+  return { name: 'change-password' };
 });
 
 export default router;

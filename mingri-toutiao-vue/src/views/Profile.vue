@@ -26,6 +26,13 @@ const menu = computed(() => {
   const items = [
     { key: 'favorites', label: '我的收藏', desc: '查看你保存的内容', to: '/favorites' },
     { key: 'history', label: '浏览历史', desc: '回顾你看过的资讯', to: '/history' },
+    // C4：主动改密入口。与「被强制改密」共用同一个页面。
+    {
+      key: 'password',
+      label: '修改密码',
+      desc: '定期更换，或管理员重置后在此设置新密码',
+      to: '/change-password',
+    },
   ];
   if (showAdminEntry.value) {
     items.push({
