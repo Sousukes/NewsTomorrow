@@ -306,6 +306,30 @@ curl -H "X-Ops-Token: $OPS_TOKEN" http://127.0.0.1:8000/api/health
 > 与指标同属「内部可观测面」。若探针不便带令牌，请改由内网独占该路径，
 > 或改用不含内部状态的独立存活探针。
 
+## 安全响应头（C9）
+
+C9 分两半落：**前端文档**（承载 `localStorage` 令牌的那个 HTML）的 CSP 由构建期
+注入 `index.html`（见前端 README），**后端响应**由 `app/security_headers.py` 处理。
+
+| 响应头 | 值 | 作用 |
+| --- | --- | --- |
+| `X-Content-Type-Options` | `nosniff` | 关闭 MIME 嗅探：否则一个"看起来像 HTML"的 JSON 响应可能被当页面解析 |
+| `Referrer-Policy` | `no-referrer` | 不外泄来源 URL（接口路径本身带业务语义） |
+| `X-Frame-Options` | `DENY` | 禁止被嵌套；与 CSP `frame-ancestors` 互补（覆盖老浏览器） |
+| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'; base-uri 'none'` | **仅 `/api/*`** |
+
+- **为什么 API 的 CSP 是 `default-src 'none'`**：JSON 响应没有文档上下文，
+  就没有任何资源需要加载——任何加载都是异常。即便某响应被塞进注入内容，
+  浏览器也不会执行其中的脚本或外链（"本不该有"正是策略要兜住的那类事）。
+- **为什么只给 `/api/*`**：`/docs`（Swagger UI）依赖 CDN 脚本与内联脚本，
+  套上 `default-src 'none'` 会直接打不开。docs 只在 development 暴露
+  （`DOCS_URL` 生产为 `None`），不为它放宽策略即可；非 `/api` 路径仍拿基础头。
+- **注册顺序是有意的**：Starlette 的 `add_middleware` 往栈头插，**后注册者在最外层**，
+  所以本中间件写在限流之后——限流直接返回的 429 也带得上这些头
+  （`tests/test_security_headers.py` 用源码顺序断言守住这一点）。
+- **开关**：`SECURITY_HEADERS_ENABLED`（默认开）。关闭仅用于前置网关已统一发这些头时，
+  避免重复或冲突。
+
 ## 新闻抓取（RSS）
 
 内置**免费公开 RSS 抓取**，无需任何 API Key，默认每 30 分钟自动执行。

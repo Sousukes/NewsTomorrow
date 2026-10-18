@@ -50,6 +50,7 @@ from app.hit_logs import prune_hit_logs
 from app.models import User
 from app.ratelimit import build_limiter
 from app.routers import admin, auth, comments, me, messages, news
+from app.security_headers import apply_security_headers
 from app.scheduler import hot_status, start_scheduler, stop_scheduler
 from app.seed import init_db
 
@@ -263,6 +264,19 @@ async def rate_limit_middleware(request: Request, call_next):
 
     response = await call_next(request)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
+    return response
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """安全响应头（C9）：nosniff / Referrer-Policy / X-Frame-Options + API 的 CSP。
+
+    **刻意注册在限流之后**：Starlette 的 `add_middleware` 是往栈头插，后注册者
+    在最外层——这样限流直接返回的 429、以及各中间件制造的响应**也都带得上**
+    这些头（内层提前 return 的分支同样被覆盖）。
+    """
+    response = await call_next(request)
+    apply_security_headers(response, request.url.path)
     return response
 
 

@@ -68,6 +68,16 @@ CORS_ORIGINS: list[str] = [o.strip() for o in _env("CORS_ORIGINS").split(",") if
     [] if IS_PRODUCTION else ["*"]
 )
 
+# 安全响应头（C9）：nosniff / Referrer-Policy / X-Frame-Options，
+# 以及 `/api/*` 的 CSP（JSON 响应不需要加载任何资源，故 default-src 'none'）。
+# 默认开启；关闭仅用于「前面已有网关统一发这些头」时避免重复/冲突。
+SECURITY_HEADERS_ENABLED = _env("SECURITY_HEADERS_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # 接口文档：生产默认关闭
 DOCS_URL = None if IS_PRODUCTION else "/docs"
 REDOC_URL = None if IS_PRODUCTION else "/redoc"

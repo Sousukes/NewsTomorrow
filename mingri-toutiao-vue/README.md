@@ -556,6 +556,38 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 ---
 
+## 内容安全策略 CSP（C9）
+
+登录令牌存 `localStorage`，一次 XSS 就等于令牌泄露（access 已收窄到 30 分钟，
+但"窗口短"不等于"不发生"）。CSP 是这一层兜底。
+
+**策略来源**：`src/security/csp.ts` 的 `buildCsp()`，**构建期**由 `vite.config.ts`
+的插件注入 `index.html` 的 `<meta http-equiv="Content-Security-Policy">`。
+
+- **为什么写进 HTML 而不是只靠响应头**：前端是静态托管（后端不托管 SPA），
+  响应头由谁下发取决于部署方；写进 HTML 则 nginx / OSS / Pages / CDN 都生效，
+  不需要改基础设施。能控制响应头时建议搬过去——
+  `frame-ancestors`、`report-uri`、`sandbox` 在 `<meta>` 里**被规范忽略**，
+  `buildCsp({ transport: 'header' })` 就是为那条路径准备的。
+- **为什么是构建期生成**：`connect-src` 取决于 `VITE_API_BASE`
+  （生产 https 域名 / 开发 `http://127.0.0.1:8000` / 演示态留空走 mock）。
+  写死要么生产连不上后端，要么开发把 API 挡掉。开发态额外放行 `ws:` 与 localhost（HMR）。
+
+| 指令 | 值 | 说明 |
+| --- | --- | --- |
+| `script-src` | `'self'` | **不放行** `unsafe-inline` / `unsafe-eval`——这是策略的核心价值 |
+| `style-src` | `'self' 'unsafe-inline' …` | Vue 作用域样式与组件内联 `style` 属性必须放开 |
+| `img-src` / `media-src` | `… https:` | 资讯配图与视频来自任意外站 |
+| `connect-src` | `'self'` + 后端源（+ 开发态 localhost/ws） | 由 `VITE_API_BASE` 推导 |
+| `object-src` / `base-uri` / `form-action` | `'none'` / `'self'` / `'self'` | 禁插件、禁 base 劫持、禁表单外投 |
+
+**诚实边界**：配图与视频必须放行 `https:`，因此 CSP **挡不住**
+`<img src=https://evil/x>` 这类外泄型载荷；真正收紧它们要等图片代理（B4）把
+外链收敛到自源。本策略的实际收益是：禁内联脚本、禁 eval、禁非自源脚本、
+禁插件、禁嵌套、禁 base 劫持——绝大多数注入载荷就此失效。
+
+后端那半（`/api/*` 的 `default-src 'none'`）见 `server-api/README.md`。
+
 ## 后端联调
 
 项目配套后端在 `../server-api/`（**FastAPI + SQLite + JWT**）。两种后端形态均可用：
