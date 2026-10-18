@@ -1,23 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import { addAdminUser, fetchAdminUsers, removeAdminUser, resetUserPassword } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
+import { messageOf as message, useAdminGuard } from '@/composables/useAdminPage';
 import type { AdminUserItem } from '@/types';
 
 const router = useRouter();
 const user = useUserStore();
+// D3：鉴权守卫抽到 composable（手敲网址 / 登录态过期 / 令牌已失效三种情况）
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
 const list = ref<AdminUserItem[]>([]);
 /** 环境变量来源的管理员数量（只下发了计数，未下发号码） */
 const envAdminCount = ref(0);
 const loading = ref(false);
 const error = ref('');
-/** 403：当前账号不在任何白名单来源中（入口被隐藏后仍可能手敲网址到达） */
-const denied = ref(false);
 
 const draft = reactive({ phone: '', note: '' });
 const formError = ref('');
@@ -41,25 +42,18 @@ function showToast(msg: string) {
  * 除了接口真的返回 403，**未登录 / 非管理员**也要一眼看出问题——
  * 否则页面会退化成"白名单是空的"，把权限问题伪装成数据问题。
  */
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
-
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
 
 async function load() {
   if (!user.isAdmin) return;
   loading.value = true;
   error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
     const data = await fetchAdminUsers();
     list.value = data.list;
     envAdminCount.value = data.envAdminCount;
   } catch (e) {
-    const msg = message(e, '加载白名单失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
+    error.value = handleError(e, '加载白名单失败');
   } finally {
     loading.value = false;
   }

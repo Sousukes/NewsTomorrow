@@ -6,24 +6,28 @@ import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import { fetchAdminComments, hideComment, restoreComment, reviewComment } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
+import { messageOf as message, useAdminGuard, useAdminList } from '@/composables/useAdminPage';
 import type { AdminCommentItem } from '@/types';
 
 const router = useRouter();
 const user = useUserStore();
+// D3：鉴权守卫抽到 composable
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
 const PAGE_SIZE = 20;
 
-const list = ref<AdminCommentItem[]>([]);
-/** 当前筛选条件下的总条数（后端 COUNT，与翻页无关） */
-const total = ref(0);
-const hasMore = ref(false);
-const nextCursor = ref<string | null>(null);
-const loading = ref(false);
-const loadingMore = ref(false);
-const error = ref('');
-/** 403：当前账号不具备管理能力（入口被隐藏后仍可能手敲网址到达） */
-const denied = ref(false);
+// D3：列表状态机抽到 composable（游标分页契约：服务端 nextCursor + hasMore）
 
+const {
+  list,
+  total,
+  hasMore,
+  loading,
+  loadingMore,
+  error,
+  reload,
+  loadMore: loadMorePage,
+} = useAdminList<AdminCommentItem>();
 // ------------------------------ 筛选（P1-22） ------------------------------
 
 // pending（P1-23）：命中敏感词被脱敏、等人工看一眼的评论
@@ -94,61 +98,40 @@ function showToast(msg: string) {
   }, 3000);
 }
 
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
-
 /**
  * 是否不具备访问资格。
  * 除了接口真的返回 403，**未登录 / 非管理员**也要一眼看出问题——
  * 否则页面会退化成"没有评论"，把权限问题伪装成数据问题。
  */
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
 
 async function load() {
   if (!user.isAdmin) return;
-  loading.value = true;
-  error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
-    const page = await fetchAdminComments({
-      status: status.value,
-      keyword: keyword.value.trim(),
-      newsId: newsId.value ?? undefined,
-      limit: PAGE_SIZE,
-    });
-    list.value = page.list;
-    total.value = page.total;
-    hasMore.value = page.hasMore;
-    nextCursor.value = page.nextCursor;
+    await reload(() =>
+      fetchAdminComments({
+        status: status.value,
+        keyword: keyword.value.trim(),
+        newsId: newsId.value ?? undefined,
+        limit: PAGE_SIZE,
+      }),
+    );
   } catch (e) {
-    const msg = message(e, '加载评论列表失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
-  } finally {
-    loading.value = false;
+    // 权限问题由 handleError 转成 denied 并返回空串（顺带清掉 error）
+    error.value = handleError(e, '加载评论列表失败');
   }
 }
 
 async function loadMore() {
-  if (!hasMore.value || loadingMore.value || !nextCursor.value) return;
-  loadingMore.value = true;
-  try {
-    const page = await fetchAdminComments({
+  await loadMorePage((cursor) =>
+    fetchAdminComments({
       status: status.value,
       keyword: keyword.value.trim(),
       newsId: newsId.value ?? undefined,
       limit: PAGE_SIZE,
-      cursor: nextCursor.value,
-    });
-    list.value = [...list.value, ...page.list];
-    hasMore.value = page.hasMore;
-    nextCursor.value = page.nextCursor;
-  } catch (e) {
-    error.value = message(e, '加载更多失败');
-  } finally {
-    loadingMore.value = false;
-  }
+      cursor,
+    }),
+  );
 }
 
 onMounted(load);

@@ -1,26 +1,31 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import { fetchAuditPage } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
+import { useAdminGuard, useAdminList } from '@/composables/useAdminPage';
 import type { AdminAuditItem } from '@/types';
 
 const router = useRouter();
 const route = useRoute();
 const user = useUserStore();
+// D3：鉴权守卫抽到 composable
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
-const list = ref<AdminAuditItem[]>([]);
-const cursor = ref<string | null>(null);
-const hasMore = ref(false);
-const loading = ref(false);
-const loadingMore = ref(false);
-const error = ref('');
-/** 403：当前账号不具备管理能力（入口被隐藏后仍可能手敲网址到达） */
-const denied = ref(false);
+// D3：列表状态机抽到 composable（游标分页；审计接口不返 total，故此处 total 为空）
 
+const {
+  list,
+  hasMore,
+  loading,
+  loadingMore,
+  error,
+  reload,
+  loadMore: loadMorePage,
+} = useAdminList<AdminAuditItem>();
 const PAGE_SIZE = 20;
 
 /**
@@ -118,55 +123,34 @@ function changeTexts(item: AdminAuditItem): string[] {
   return [];
 }
 
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
 /** 从源管理/管理员页带 ?target= 进入时，只看该对象的历史 */
 const filterTarget = computed(() =>
   typeof route.query.target === 'string' ? route.query.target : '',
 );
 
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
-
 async function load() {
   if (!user.isAdmin) return;
-  loading.value = true;
-  error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
-    const page = await fetchAuditPage({
-      limit: PAGE_SIZE,
-      target: filterTarget.value || undefined,
-    });
-    list.value = page.list;
-    cursor.value = page.nextCursor;
-    hasMore.value = page.hasMore;
+    await reload(() =>
+      fetchAuditPage({
+        limit: PAGE_SIZE,
+        target: filterTarget.value || undefined,
+      }),
+    );
   } catch (e) {
-    const msg = message(e, '加载审计记录失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
-  } finally {
-    loading.value = false;
+    error.value = handleError(e, '加载审计记录失败');
   }
 }
 
 async function loadMore() {
-  if (!hasMore.value || loadingMore.value || !cursor.value) return;
-  loadingMore.value = true;
-  try {
-    const page = await fetchAuditPage({
+  await loadMorePage((c) =>
+    fetchAuditPage({
       limit: PAGE_SIZE,
-      cursor: cursor.value,
+      cursor: c,
       target: filterTarget.value || undefined,
-    });
-    list.value = [...list.value, ...page.list];
-    cursor.value = page.nextCursor;
-    hasMore.value = page.hasMore;
-  } catch (e) {
-    error.value = message(e, '加载更多失败');
-  } finally {
-    loadingMore.value = false;
-  }
+    }),
+  );
 }
 
 onMounted(load);

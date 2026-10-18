@@ -15,18 +15,19 @@ import {
 } from '@/api/admin';
 import SourceHealthTrend from '@/components/SourceHealthTrend.vue';
 import { useUserStore } from '@/stores/user';
+import { messageOf as message, useAdminGuard } from '@/composables/useAdminPage';
 import type { RssSourceItem, SourceHealth } from '@/types';
 
 const router = useRouter();
 const user = useUserStore();
+// D3：鉴权守卫抽到 composable（手敲网址 / 登录态过期 / 令牌已失效三种情况）
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
 const list = ref<RssSourceItem[]>([]);
 /** 列表摘要的统计窗口（P1-19，由后端下发） */
 const healthDays = ref(7);
 const loading = ref(false);
 const error = ref('');
-/** 403：当前账号不在白名单内（入口被隐藏后仍可能手敲网址到达） */
-const denied = ref(false);
 
 type FormMode = { kind: 'closed' } | { kind: 'create' } | { kind: 'edit'; key: string };
 const formMode = ref<FormMode>({ kind: 'closed' });
@@ -219,17 +220,12 @@ async function doBatchDelete() {
  * 除了接口真的返回 403，**未登录 / 非管理员**也要一眼看出问题——
  * 否则页面会退化成"还没有配置任何源"，把权限问题伪装成数据问题。
  */
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
-
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
 
 async function load() {
   if (!user.isAdmin) return;
   loading.value = true;
   error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
     const page = await fetchSources();
     const rows = page.list;
@@ -242,9 +238,7 @@ async function load() {
       selected.value = new Set([...selected.value].filter((k) => alive.has(k)));
     }
   } catch (e) {
-    const msg = message(e, '加载源列表失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
+    error.value = handleError(e, '加载源列表失败');
   } finally {
     loading.value = false;
   }

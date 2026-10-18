@@ -21,10 +21,13 @@ import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import { fetchNicknameReviews, reviewNickname } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
+import { messageOf as message, useAdminGuard } from '@/composables/useAdminPage';
 import type { NicknameReviewItem } from '@/types';
 
 const router = useRouter();
 const user = useUserStore();
+// D3：鉴权守卫抽到 composable（手敲网址 / 登录态过期 / 令牌已失效三种情况）
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
 const PAGE_SIZE = 20;
 
@@ -36,8 +39,6 @@ const hasMore = computed(() => list.value.length < total.value);
 const loading = ref(false);
 const loadingMore = ref(false);
 const error = ref('');
-/** 403：当前账号不具备管理能力（入口被隐藏后仍可能手敲网址到达） */
-const denied = ref(false);
 
 // ------------------------------ 筛选 ------------------------------
 
@@ -69,22 +70,17 @@ function showToast(msg: string) {
   }, 3000);
 }
 
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
-
 /**
  * 是否不具备访问资格。
  * 除了接口真的返回 403，**未登录 / 非管理员**也要一眼看出问题——
  * 否则页面会退化成「没有待复核的昵称」，把权限问题伪装成数据问题。
  */
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
 
 async function load() {
   if (!user.isAdmin) return;
   loading.value = true;
   error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
     const page = await fetchNicknameReviews({
       keyword: keyword.value.trim(),
@@ -93,9 +89,7 @@ async function load() {
     list.value = page.list;
     total.value = page.total;
   } catch (e) {
-    const msg = message(e, '加载复核队列失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
+    error.value = handleError(e, '加载复核队列失败');
   } finally {
     loading.value = false;
   }

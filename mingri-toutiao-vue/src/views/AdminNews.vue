@@ -7,6 +7,7 @@ import EmptyState from '@/components/EmptyState.vue';
 import { channelLabel } from '@/constants/channels';
 import { fetchAdminNews, hideNews, restoreNews, updateNewsTop } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
+import { messageOf as message, useAdminGuard, useAdminList } from '@/composables/useAdminPage';
 import type { AdminNewsItem } from '@/types';
 
 const router = useRouter();
@@ -14,17 +15,20 @@ const user = useUserStore();
 
 const PAGE_SIZE = 20;
 
-const list = ref<AdminNewsItem[]>([]);
-/** 当前筛选条件下的总条数（后端 COUNT，与翻页无关） */
-const total = ref(0);
-const hasMore = ref(false);
-const nextCursor = ref<string | null>(null);
-const loading = ref(false);
-const loadingMore = ref(false);
-const error = ref('');
-/** 403：当前账号不具备管理能力（入口被隐藏后仍可能手敲网址到达） */
-const denied = ref(false);
+// D3：守卫与列表状态机抽到 composable（8 个管理页共用）。
+// 分页契约：服务端 `nextCursor` + `hasMore`（本页不适用 offset，故可共用）。
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
+const {
+  list,
+  total,
+  hasMore,
+  loading,
+  loadingMore,
+  error,
+  reload,
+  loadMore: loadMorePage,
+} = useAdminList<AdminNewsItem>();
 // ------------------------------ 筛选（P1-20） ------------------------------
 
 type StatusFilter = 'all' | 'visible' | 'hidden';
@@ -69,59 +73,39 @@ function showToast(msg: string) {
   }, 3000);
 }
 
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
-
 /**
  * 是否不具备访问资格。
  * 除了接口真的返回 403，**未登录 / 非管理员**也要一眼看出问题——
  * 否则页面会退化成"没有资讯"，把权限问题伪装成数据问题。
  */
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
 
 async function load() {
   if (!user.isAdmin) return;
-  loading.value = true;
-  error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
-    const page = await fetchAdminNews({
-      status: status.value,
-      keyword: keyword.value.trim(),
-      limit: PAGE_SIZE,
-    });
-    list.value = page.list;
-    total.value = page.total;
-    hasMore.value = page.hasMore;
-    nextCursor.value = page.nextCursor;
+    await reload(() =>
+      fetchAdminNews({
+        status: status.value,
+        keyword: keyword.value.trim(),
+        limit: PAGE_SIZE,
+      }),
+    );
   } catch (e) {
-    const msg = message(e, '加载资讯列表失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
-  } finally {
-    loading.value = false;
+    // 权限问题由 handleError 转成 denied 并返回空串（顺带清掉 error，
+    // 否则页面上会同时出现「无权限」和一段错误文案）；其余原样落到 error
+    error.value = handleError(e, '加载资讯列表失败');
   }
 }
 
 async function loadMore() {
-  if (!hasMore.value || loadingMore.value || !nextCursor.value) return;
-  loadingMore.value = true;
-  try {
-    const page = await fetchAdminNews({
+  await loadMorePage((cursor) =>
+    fetchAdminNews({
       status: status.value,
       keyword: keyword.value.trim(),
       limit: PAGE_SIZE,
-      cursor: nextCursor.value,
-    });
-    list.value = [...list.value, ...page.list];
-    hasMore.value = page.hasMore;
-    nextCursor.value = page.nextCursor;
-  } catch (e) {
-    error.value = message(e, '加载更多失败');
-  } finally {
-    loadingMore.value = false;
-  }
+      cursor,
+    }),
+  );
 }
 
 onMounted(load);

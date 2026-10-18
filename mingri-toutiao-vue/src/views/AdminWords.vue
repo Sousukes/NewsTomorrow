@@ -24,10 +24,13 @@ import {
   updateWord,
 } from '@/api/admin';
 import { useUserStore } from '@/stores/user';
+import { messageOf as message, useAdminGuard } from '@/composables/useAdminPage';
 import type { SensitiveHitItem, SensitiveWordItem, WordAction } from '@/types';
 
 const router = useRouter();
 const user = useUserStore();
+// D3：鉴权守卫抽到 composable（手敲网址 / 登录态过期 / 令牌已失效三种情况）
+const { noAccess, handleError, resetDenied } = useAdminGuard();
 
 const WORD_LIMIT = 200;
 const HIT_PAGE_SIZE = 20;
@@ -48,13 +51,10 @@ const words = ref<SensitiveWordItem[]>([]);
 const wordTotal = ref(0);
 const loading = ref(false);
 const error = ref('');
-const denied = ref(false);
 
 const keyword = ref('');
 const actionFilter = ref<WordAction | ''>('');
 const onlyEnabled = ref(false);
-
-const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
 
 // 新增表单
 const newWord = ref('');
@@ -74,15 +74,11 @@ function showToast(msg: string) {
   }, 3000);
 }
 
-function message(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
-}
-
 async function load() {
   if (!user.isAdmin) return;
   loading.value = true;
   error.value = '';
-  denied.value = false;
+  resetDenied();
   try {
     const page = await fetchWords({
       keyword: keyword.value.trim(),
@@ -93,9 +89,7 @@ async function load() {
     words.value = page.list;
     wordTotal.value = page.total;
   } catch (e) {
-    const msg = message(e, '加载词库失败');
-    if (/403|无权限/.test(msg)) denied.value = true;
-    else error.value = msg;
+    error.value = handleError(e, '加载词库失败');
   } finally {
     loading.value = false;
   }
