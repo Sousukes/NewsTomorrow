@@ -17,7 +17,7 @@
 | POST | `/api/auth/logout` | ✅ | 退出（无状态 JWT，前端清本地 token） |
 | GET | `/api/news?channel=&sort=&page=&pageSize=&cursor=` | — | 资讯列表。**推荐游标分页**：传 `cursor` 走 keyset，返回 `{ list, nextCursor, hasMore }`；不传则 offset 分页并附 `total`。`sort` 取 `latest`（默认）/ `hot` / `for-you`（见「排序与个性化」），非法值 422 |
 | GET | `/api/news/{id}` | — | 资讯详情。比列表多返回 `content`（正文，按段落以 `\n` 分隔；无正文为 `null`，前端显示「暂无正文」而非占位文案）——**列表接口刻意不带正文**，见「资讯正文（E1）」 |
-| GET | `/api/news/{id}/comments?limit=&cursor=` | —（可选带token） | **主评论**列表（`root_id IS NULL`，游标分页，**新的在前**）；每条附 `replyCount` 与最早 2 条回复预览；带 token 时 `liked` 按当前用户计算 |
+| GET | `/api/news/{id}/comments?limit=&cursor=&sort=` | —（可选带token） | **主评论**列表（`root_id IS NULL`，游标分页）；`sort=latest`（默认，`created_at` 倒序，**新的在前**）/ `sort=hot`（`likes` 倒序，时间 + id 兜底），非法值 422/42201；每条附 `replyCount` 与最早 2 条回复预览；带 token 时 `liked` 按当前用户计算。**游标不透明且携带 sort**：跨排序误用会被作废（退回第一页），不会错位续接；v1 裸 id 游标仍按 latest 兼容 |
 | GET | `/api/news/{id}/comments/{cid}/replies?limit=&cursor=` | —（可选带token） | 某条主评论的**回复**列表（时间**正序**，游标分页；root 已软删除时返回空列表——主评论消失后失去语境的回复不再裸露） |
 | POST | `/api/news/{id}/comments` | ✅ | 发表评论；带 `parentId` 时为**回复**（被回复评论须存在且未删除，否则 40003；回复的回复拍平到同一 root，`parentId` 仅用于展示「回复 @谁」） |
 | PATCH | `/api/news/{id}/comments/{cid}` | ✅ | 点赞 / 取消点赞（`comment_likes` 关系表按用户去重，幂等） |

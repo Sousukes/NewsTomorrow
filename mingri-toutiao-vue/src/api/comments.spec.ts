@@ -27,6 +27,7 @@ import {
   listCommentsPage,
   listRepliesPage,
   setCommentLike,
+  sortCommentsLocal,
 } from '@/api/comments';
 
 /** 后端返回的一条评论（字段名与前端不同，靠 normalize 映射） */
@@ -69,12 +70,19 @@ describe('listCommentsPage', () => {
     expect(page.nextCursor).toBeNull();
   });
 
-  it('把游标与条数传给后端（默认 20）', async () => {
+  it('把游标、条数与排序传给后端（默认 20 / latest）', async () => {
     request.mockResolvedValueOnce({ list: [] });
     await listCommentsPage('n1', 'cur');
     const [path, opts] = request.mock.calls[0] as [string, { query: Record<string, unknown> }];
     expect(path).toBe('/news/n1/comments');
-    expect(opts.query).toEqual({ cursor: 'cur', limit: 20 });
+    expect(opts.query).toEqual({ cursor: 'cur', limit: 20, sort: 'latest' });
+  });
+
+  it('sort 透传（hot 才让服务端按点赞数排）', async () => {
+    request.mockResolvedValueOnce({ list: [] });
+    await listCommentsPage('n1', undefined, 20, 'hot');
+    const [, opts] = request.mock.calls[0] as [string, { query: Record<string, unknown> }];
+    expect(opts.query.sort).toBe('hot');
   });
 
   it('逐条过 normalize（字段映射漏一条，列表就崩一半）', async () => {
@@ -96,6 +104,30 @@ describe('listComments', () => {
     request.mockResolvedValueOnce({ list: [raw] });
     const list = await listComments('n1');
     expect(list).toHaveLength(1);
+  });
+
+  it('sort 一路透传到 query（否则切换排序只会重拉同一份数据）', async () => {
+    request.mockResolvedValueOnce({ list: [raw] });
+    await listComments('n1', 'hot');
+    const [, opts] = request.mock.calls[0] as [string, { query: Record<string, unknown> }];
+    expect(opts.query.sort).toBe('hot');
+  });
+});
+
+describe('sortCommentsLocal（mock 专用排序）', () => {
+  const mk = (id: string, likes: number) =>
+    ({ ...raw, id, likes }) as unknown as Parameters<typeof sortCommentsLocal>[0][number];
+
+  it('hot 按点赞数倒序，且不改原数组（本地列表是 store 的状态，原地排序会让视图错乱）', () => {
+    const list = [mk('a', 1), mk('b', 9), mk('c', 5)];
+    const sorted = sortCommentsLocal(list, 'hot');
+    expect(sorted.map((c) => c.id)).toEqual(['b', 'c', 'a']);
+    expect(list.map((c) => c.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('latest 原样返回（mock 无绝对时间，保持既有顺序）', () => {
+    const list = [mk('a', 1), mk('b', 9)];
+    expect(sortCommentsLocal(list, 'latest')).toBe(list);
   });
 });
 

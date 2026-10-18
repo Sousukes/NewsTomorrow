@@ -1,5 +1,6 @@
 import { SEED_COMMENTS } from '@/data/mockComments';
 import type { Comment } from '@/types';
+import { DEFAULT_COMMENT_SORT, type CommentSort } from '@/constants/comments';
 import { mockDelay, request } from './http';
 import { USE_MOCK } from './config';
 import { VALIDATE_RESPONSES, validateComment, warnIssues } from './validate';
@@ -55,15 +56,32 @@ export interface CommentPage {
   nextCursor: string | null;
 }
 
+/**
+ * 本地排序（mock 专用）：镜像后端 `_order_for` 的两条规则。
+ *
+ * 后端 `latest` = `created_at` 倒序 + `id` 倒序；`hot` = `likes` 倒序 + 时间 + id。
+ * mock 数据没有 `created_at`，只有 `time` 展示文案，故只能按 `likes` 与 id 近似——
+ * **这是 mock 的诚实边界**：排序结果与真后端在"同赞不同时"的细分上可能不同，
+ * 但"赞多的在前"这条用户能感知的规则一致。
+ */
+export function sortCommentsLocal(list: Comment[], sort: CommentSort): Comment[] {
+  if (sort !== 'hot') return list;
+  return [...list].sort((a, b) => b.likes - a.likes);
+}
+
 /** GET /news/:id/comments —— 主评论列表（游标分页；P1-12 起只返回主评论） */
 export async function listCommentsPage(
   newsId: string,
   cursor?: string,
   limit = 20,
+  sort: CommentSort = DEFAULT_COMMENT_SORT,
 ): Promise<CommentPage> {
   if (USE_MOCK) {
     return mockDelay({
-      list: (SEED_COMMENTS[newsId] ?? []).map((c) => ({ ...c })),
+      list: sortCommentsLocal(
+        (SEED_COMMENTS[newsId] ?? []).map((c) => ({ ...c })),
+        sort,
+      ),
       hasMore: false,
       nextCursor: null,
     });
@@ -72,7 +90,7 @@ export async function listCommentsPage(
     list?: unknown[];
     hasMore?: boolean;
     nextCursor?: string | null;
-  }>(`/news/${newsId}/comments`, { query: { cursor, limit } });
+  }>(`/news/${newsId}/comments`, { query: { cursor, limit, sort } });
   const arr = Array.isArray(data) ? data : (data?.list ?? []);
   return {
     list: (arr as Record<string, unknown>[]).map(normalize),
@@ -82,8 +100,11 @@ export async function listCommentsPage(
 }
 
 /** 便捷封装：只取列表 */
-export async function listComments(newsId: string): Promise<Comment[]> {
-  return (await listCommentsPage(newsId)).list;
+export async function listComments(
+  newsId: string,
+  sort: CommentSort = DEFAULT_COMMENT_SORT,
+): Promise<Comment[]> {
+  return (await listCommentsPage(newsId, undefined, 20, sort)).list;
 }
 
 /**

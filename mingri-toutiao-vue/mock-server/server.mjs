@@ -1717,6 +1717,13 @@ function requireAuth(req, res) {
 
 /* ----------------------------- 路由 ----------------------------- */
 
+/**
+ * E5：举报理由白名单，与后端 `app/config.py::REPORT_REASONS` 逐字一致。
+ * 前端 `src/constants/reports.ts` 是第三份拷贝——三处必须同字，
+ * 契约检查脚本会拿列表里的值打一次真实接口，漂移在 CI 暴露。
+ */
+const REPORT_REASONS = ['色情低俗', '政治敏感', '广告营销', '侵权', '谣言不实', '其他'];
+
 const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     send(res, 204, {});
@@ -2054,11 +2061,20 @@ const server = createServer(async (req, res) => {
     // P1-20：已下架资讯的评论一并不可见（与后端 _get_news_or_404 一致）
     const target = news.find((n) => n.id === a);
     if (!target || target.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
+    // E6 排序：latest（默认，新的在前）/ hot（赞多的在前）
+    const sort = url.searchParams.get('sort') || 'latest';
+    if (sort !== 'latest' && sort !== 'hot') {
+      return fail(res, 422, 42201, `排序方式不支持：${sort}`);
+    }
     const all = comments[a] ?? [];
     // P1-22：已隐藏的评论对公开侧与已删除同构——实时过滤，无需等定时任务
     const roots = all
       .filter((x) => !x.rootId && !x.isDeleted && !x.hidden)
-      .sort((x, y) => y._seq - x._seq);
+      // mock 无 created_at（只有展示文案 time），用写入序号 _seq 近似"时间倒序"；
+      // 与后端一致的是「同赞时新的在前」，差别只在真实时间精度——诚实边界。
+      .sort((x, y) =>
+        sort === 'hot' ? (y.likes ?? 0) - (x.likes ?? 0) || y._seq - x._seq : y._seq - x._seq,
+      );
     // mock 不做真游标：一次返回全部主评论（与既有行为一致）
     return ok(res, {
       list: roots.map((r) => commentOut(r, all)),
@@ -2191,6 +2207,35 @@ const server = createServer(async (req, res) => {
     target.deletedAt = new Date().toISOString();
     const parents = new Map(list.map((x) => [x.id, x]));
     return ok(res, target.rootId ? replyOut(target, parents) : commentOut(target, list));
+  }
+
+  // POST /reports（E5，需登录）：用户举报评论/资讯
+  //
+  // 只复刻**契约形状与校验顺序**（401 → 422 类型 → 422 理由 → 404 目标 → 200），
+  // 不模拟阈值自动处置：真实处置需要 3 个不同账号，mock 没有真实账号体系，
+  // 假装会隐藏反而让前端以为链路已验。autoHidden 恒为 false。
+  if (head === 'reports' && !a && method === 'POST') {
+    const t = requireAuth(req, res);
+    if (!t) return;
+    if (!requirePasswordCurrent(req, res, tokens.get(t)?.phone)) return;
+    const body = await readBody(req);
+    const targetType = String(body.targetType ?? '');
+    const targetId = String(body.targetId ?? '');
+    const reason = String(body.reason ?? '');
+    if (targetType !== 'comment' && targetType !== 'news') {
+      return fail(res, 422, 42206, '举报对象类型不合法');
+    }
+    if (!REPORT_REASONS.includes(reason)) {
+      return fail(res, 422, 42206, '举报理由不合法');
+    }
+    const exists =
+      targetType === 'news'
+        ? news.some((n) => n.id === targetId)
+        : Object.values(comments).some((list) => list.some((c) => c.id === targetId));
+    if (!exists) return fail(res, 404, 40409, '举报对象不存在或已删除');
+    // 幂等：同一用户对同一目标重复举报，服务端只更新理由、不新增行。
+    // mock 无 reporter 维度（单一登录态），直接返回同一结果即为幂等。
+    return ok(res, { status: 'pending', autoHidden: false });
   }
 
   // GET /api/img —— 图片代理（B4）

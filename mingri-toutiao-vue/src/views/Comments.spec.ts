@@ -18,6 +18,9 @@ const reply = vi.fn();
 const remove = vi.fn(async () => true);
 const toggleLike = vi.fn();
 const count = vi.fn(() => 0);
+// E6：排序真相源在 store 里（`sortOf`），切换动作也由 store 承担
+const setSort = vi.fn(async () => true);
+const sortOf = vi.fn(() => 'latest' as const);
 
 vi.mock('@/stores/comments', () => ({
   useCommentsStore: () => ({
@@ -30,6 +33,8 @@ vi.mock('@/stores/comments', () => ({
     remove,
     toggleLike,
     count,
+    setSort,
+    sortOf,
   }),
 }));
 
@@ -48,7 +53,19 @@ vi.mock('vue-router', () => ({
 
 import Comments from './Comments.vue';
 
-const mountPage = () => mount(Comments, { global: { stubs: { AppNav: true } } });
+/**
+ * 举报弹窗用带名字的桩替代（E5）：这里只验**入口接线**（点了哪条评论、传了什么 id），
+ * 弹窗自身的登录态/分类/提交由 `components/ReportDialog.spec.ts` 覆盖。
+ * 桩必须显式命名，否则 `findComponent({ name })` 找不到（默认桩名是 `Xxx-stub`）。
+ */
+const ReportDialogStub = {
+  name: 'ReportDialog',
+  props: ['open', 'targetType', 'targetId'],
+  template: '<div class="report-stub" />',
+};
+
+const mountPage = () =>
+  mount(Comments, { global: { stubs: { AppNav: true, ReportDialog: ReportDialogStub } } });
 const settle = async (w: VueWrapper) => {
   await new Promise((r) => setTimeout(r, 0));
   await w.vm.$nextTick();
@@ -204,5 +221,88 @@ describe('Comments', () => {
     await settle(w);
     vm(w).toggleLike({ id: 'c9' });
     expect(toggleLike).toHaveBeenCalledWith('n1', 'c9');
+  });
+
+  it('举报入口只出现在他人的评论上（自己的评论给的是「删除」）', async () => {
+    byArticle.n1 = [
+      comment('c1', '甲', '他人评论'),
+      { ...comment('c2', '我', '我的评论'), mine: true },
+    ];
+    const w = mountPage();
+    await settle(w);
+
+    const reportBtns = w.findAll('.cmt__report-btn');
+    expect(reportBtns).toHaveLength(1);
+    expect(reportBtns[0].attributes('aria-label')).toContain('他人评论');
+    // 自己的评论不出现举报按钮
+    expect(w.findAll('.cmt__delete')).toHaveLength(1);
+  });
+
+  it('点击举报打开弹窗并带上该条评论 id', async () => {
+    byArticle.n1 = [comment('c7', '甲', '要举报的评论')];
+    const w = mountPage();
+    await settle(w);
+
+    const dialog = () => w.findComponent({ name: 'ReportDialog' });
+    expect(dialog().props('open')).toBe(false);
+
+    await w.find('.cmt__report-btn').trigger('click');
+    await settle(w);
+
+    expect(dialog().props('open')).toBe(true);
+    expect(dialog().props('targetType')).toBe('comment');
+    expect(dialog().props('targetId')).toBe('c7');
+  });
+});
+
+describe('Comments 排序切换（E6）', () => {
+  it('默认「最新」为激活态', async () => {
+    const w = mountPage();
+    await settle(w);
+
+    const tabs = w.findAll('.comments__sort');
+    expect(tabs.map((t) => t.text())).toEqual(['最新', '最热']);
+    expect(tabs[0].classes()).toContain('is-active');
+    expect(tabs[1].classes()).not.toContain('is-active');
+  });
+
+  it('点「最热」把排序交给 store，激活态随之前移', async () => {
+    const w = mountPage();
+    await settle(w);
+
+    await w.findAll('.comments__sort')[1].trigger('click');
+    await settle(w);
+
+    expect(setSort).toHaveBeenCalledWith('n1', 'hot');
+    expect(w.findAll('.comments__sort')[1].classes()).toContain('is-active');
+  });
+
+  it('切换失败时回退激活态并提示（标签不能与列表真实顺序不一致）', async () => {
+    setSort.mockResolvedValueOnce(false);
+    const w = mountPage();
+    await settle(w);
+
+    await w.findAll('.comments__sort')[1].trigger('click');
+    await settle(w);
+
+    // sortOf 仍返回 latest → 激活态回到「最新」
+    expect(w.findAll('.comments__sort')[0].classes()).toContain('is-active');
+    expect(w.text()).toContain('切换排序失败');
+  });
+
+  it('切换排序会收起已展开的回复（列表被整体替换，展开态失去语境）', async () => {
+    // 有回复但未带预览 → 渲染「查看全部」入口
+    byArticle.n1 = [{ ...comment('c1', '甲', '主评论'), replyCount: 2 }];
+    const w = mountPage();
+    await settle(w);
+    const expanded = (w.vm as unknown as { expanded: Set<string> }).expanded;
+
+    await w.find('.cmt__more-btn').trigger('click');
+    await settle(w);
+    expect([...expanded]).toEqual(['c1']);
+
+    await w.findAll('.comments__sort')[1].trigger('click');
+    await settle(w);
+    expect([...expanded]).toEqual([]);
   });
 });

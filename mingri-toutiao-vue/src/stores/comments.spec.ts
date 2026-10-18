@@ -11,6 +11,8 @@ vi.mock('@/api/comments', () => ({
   createComment: vi.fn(),
   setCommentLike: vi.fn(),
   deleteComment: vi.fn(),
+  // mock 分支专用；本文件 USE_MOCK=false 不会走到，但缺了它导入绑定是 undefined
+  sortCommentsLocal: vi.fn((list: unknown[]) => list),
 }));
 
 import * as commentsApi from '@/api/comments';
@@ -297,5 +299,50 @@ describe('stores/comments 两级评论（P1-12）', () => {
     expect(await s.remove('n1', 'r1')).toBe(true);
     expect(s.list('n1').map((c) => c.id)).toEqual(['r2']);
     expect(s.repliesMeta['r1']).toBeUndefined();
+  });
+});
+
+describe('stores/comments 排序切换（E6）', () => {
+  // 本文件前面的 beforeEach 只作用于第一个 describe：这里要自己重置，
+  // 否则上一个用例的 mock 调用记录会让「不该发请求」的断言假失败
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('默认 latest；切到 hot 会重拉并替换列表', async () => {
+    const s = useCommentsStore();
+    s.byArticle['n1'] = [root({ id: 'r1', likes: 1 })];
+    vi.mocked(commentsApi.listComments).mockResolvedValueOnce([root({ id: 'r2', likes: 9 })]);
+
+    expect(s.sortOf('n1')).toBe('latest');
+    expect(await s.setSort('n1', 'hot')).toBe(true);
+    expect(commentsApi.listComments).toHaveBeenCalledWith('n1', 'hot');
+    expect(s.byArticle['n1'].map((c) => c.id)).toEqual(['r2']);
+    expect(s.sortOf('n1')).toBe('hot');
+  });
+
+  it('切到当前排序不重复请求（点两次「最热」不该打两次接口）', async () => {
+    const s = useCommentsStore();
+    await s.setSort('n1', 'latest');
+    expect(commentsApi.listComments).not.toHaveBeenCalled();
+  });
+
+  it('失败时回退排序并保留原列表（标签不能与列表顺序不一致）', async () => {
+    const s = useCommentsStore();
+    s.byArticle['n1'] = [root({ id: 'r1' })];
+    vi.mocked(commentsApi.listComments).mockRejectedValueOnce(new Error('network'));
+
+    expect(await s.setSort('n1', 'hot')).toBe(false);
+    expect(s.sortOf('n1')).toBe('latest');
+    expect(s.byArticle['n1'].map((c) => c.id)).toEqual(['r1']);
+  });
+
+  it('排序按文章独立记录（A 文切 hot 不影响 B 文）', async () => {
+    const s = useCommentsStore();
+    vi.mocked(commentsApi.listComments).mockResolvedValueOnce([root({ id: 'r2' })]);
+    await s.setSort('n1', 'hot');
+    expect(s.sortOf('n1')).toBe('hot');
+    expect(s.sortOf('n2')).toBe('latest');
   });
 });

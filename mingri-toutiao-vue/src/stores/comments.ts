@@ -6,8 +6,10 @@ import {
   listComments,
   listRepliesPage,
   setCommentLike,
+  sortCommentsLocal,
 } from '@/api/comments';
 import { USE_MOCK } from '@/api/config';
+import { DEFAULT_COMMENT_SORT, type CommentSort } from '@/constants/comments';
 import { SEED_COMMENTS } from '@/data/mockComments';
 import type { Comment } from '@/types';
 
@@ -46,6 +48,12 @@ function load(): Record<string, Comment[]> {
 export const useCommentsStore = defineStore('comments', () => {
   const byArticle = ref<Record<string, Comment[]>>(load());
   const repliesMeta = ref<Record<string, RepliesMeta>>({});
+  /** 每篇文章当前的排序（E6）：切换排序要重拉，且"哪个是激活态"必须有个真相源 */
+  const sortByArticle = ref<Record<string, CommentSort>>({});
+
+  function sortOf(newsId: string): CommentSort {
+    return sortByArticle.value[newsId] ?? DEFAULT_COMMENT_SORT;
+  }
 
   function persist() {
     try {
@@ -62,7 +70,8 @@ export const useCommentsStore = defineStore('comments', () => {
     if (!byArticle.value[id]) {
       byArticle.value[id] = (SEED_COMMENTS[id] ?? []).map((c) => ({ ...c }));
       if (!USE_MOCK) {
-        void listComments(id)
+        // 沿用该文章已选的排序：切换排序后重新进页面，不该悄悄退回「最新」
+        void listComments(id, sortOf(id))
           .then((remote) => {
             if (remote.length) byArticle.value[id] = remote;
           })
@@ -70,6 +79,32 @@ export const useCommentsStore = defineStore('comments', () => {
       }
     }
     return byArticle.value[id];
+  }
+
+  /**
+   * 切换排序（E6）：`hot` 需服务端按点赞数重排，`latest` 回到时间倒序。
+   *
+   * 失败时**回退到原排序并返回 false**：只换标签不换内容（或反之）都是撒谎——
+   * 界面上的激活态必须与列表里真实的顺序一致。
+   */
+  async function setSort(newsId: string, sort: CommentSort): Promise<boolean> {
+    const prev = sortOf(newsId);
+    if (prev === sort) return true;
+    sortByArticle.value[newsId] = sort;
+
+    if (USE_MOCK) {
+      byArticle.value[newsId] = sortCommentsLocal(byArticle.value[newsId] ?? [], sort);
+      return true;
+    }
+
+    try {
+      const list = await listComments(newsId, sort);
+      byArticle.value[newsId] = list;
+      return true;
+    } catch {
+      sortByArticle.value[newsId] = prev;
+      return false;
+    }
   }
 
   function list(id: string): Comment[] {
@@ -276,7 +311,10 @@ export const useCommentsStore = defineStore('comments', () => {
   return {
     byArticle,
     repliesMeta,
+    sortByArticle,
+    sortOf,
     ensure,
+    setSort,
     list,
     count,
     countOf,

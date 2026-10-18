@@ -8,7 +8,7 @@
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
  * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）、
  * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）、令牌双轨与续期（P1-38/C1）、
- * 高敏操作二次校验（P1-40/C10）。
+ * 高敏操作二次校验（P1-40/C10）、用户举报（P1-65/E5）、评论排序（E6）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -496,6 +496,104 @@ const run = async () => {
     check('删除主评论后 replies 返回空', (afterDel.list ?? []).length === 0);
     const main3 = await request('/news/n4/comments', { token });
     check('删除后主列表不含该主评论', !(main3.list ?? []).some((c) => c.id === created.id));
+
+    // 8.2) 评论排序（E6）：latest（默认）/ hot；游标携带 sort（否则跨排序续页会静默错位）
+    const latestPage = await request('/news/n4/comments?sort=latest', { token });
+    check('sort=latest 返回列表', Array.isArray(latestPage.list));
+    const hotPage = await request('/news/n4/comments?sort=hot', { token });
+    const hotLikes = (hotPage.list ?? []).map((c) => Number(c.likes ?? 0));
+    check(
+      'sort=hot 按点赞数不增',
+      hotLikes.every((n, i) => i === 0 || hotLikes[i - 1] >= n),
+      hotLikes.join(','),
+    );
+    let badSort = '';
+    try {
+      await request('/news/n4/comments?sort=bogus', { token });
+    } catch (e) {
+      badSort = e.message;
+    }
+    check('非法 sort → 42201 提示', badSort.includes('排序方式不支持'), badSort);
+    const onePage = await request('/news/n4/comments?sort=hot&limit=1', { token });
+    if (onePage.hasMore && onePage.nextCursor) {
+      let payload = null;
+      try {
+        payload = JSON.parse(Buffer.from(onePage.nextCursor, 'base64').toString('utf8'));
+      } catch {
+        /* 非 base64 → 下面断言失败即可 */
+      }
+      check(
+        '游标为 v2 且携带 sort',
+        Array.isArray(payload) && payload[0] === 2 && payload[1] === 'hot',
+        JSON.stringify(payload),
+      );
+    }
+  }
+
+  // 8.9) 用户举报（E5 / P1-65）：前端只依赖 POST /reports 的 `{ status, autoHidden }`
+  //
+  // 刻意举报**演示资讯 n4**，而不是每轮新建的评论：举报没有用户侧删除接口，
+  // 固定目标才能让每次运行落在同一行（同一用户同一目标幂等），不累积垃圾数据。
+  // 阈值默认 3 且按**不同举报人**去重，单账号重复举报不会误隐藏演示内容。
+  let reportUnauthorized = false;
+  try {
+    await request('/reports', {
+      method: 'POST',
+      body: { targetType: 'news', targetId: 'n4', reason: '广告营销' },
+    });
+  } catch (e) {
+    reportUnauthorized = e.message === '未登录或登录已过期';
+  }
+  check('无 token 举报 → 401 且透传提示', reportUnauthorized);
+
+  if (token) {
+    const reported = await request('/reports', {
+      method: 'POST',
+      body: { targetType: 'news', targetId: 'n4', reason: '广告营销' },
+      token,
+    });
+    check(
+      '举报成功返回 { status, autoHidden }',
+      reported?.status === 'pending' && reported?.autoHidden === false,
+      `${reported?.status}/${reported?.autoHidden}`,
+    );
+
+    // 幂等：同一用户换理由再报 → 200 且不触发自动处置（不新增行，仍只算 1 人）
+    const reportAgain = await request('/reports', {
+      method: 'POST',
+      body: { targetType: 'news', targetId: 'n4', reason: '其他' },
+      token,
+    });
+    check(
+      '重复举报幂等（不新增行、不触发自动处置）',
+      reportAgain?.status === 'pending' && reportAgain?.autoHidden === false,
+    );
+
+    const expectError = async (body, expected) => {
+      try {
+        await request('/reports', { method: 'POST', body, token });
+        return `未被拒绝（期望「${expected}」）`;
+      } catch (e) {
+        return e.message;
+      }
+    };
+    const badReason = await expectError(
+      { targetType: 'news', targetId: 'n4', reason: '不存在的理由' },
+      '举报理由不合法',
+    );
+    check('非法理由 → 42206 提示', badReason === '举报理由不合法', badReason);
+
+    const badType = await expectError(
+      { targetType: 'user', targetId: 'n4', reason: '其他' },
+      '举报对象类型不合法',
+    );
+    check('非法对象类型 → 42206 提示', badType === '举报对象类型不合法', badType);
+
+    const missingTarget = await expectError(
+      { targetType: 'news', targetId: 'n__not_exist', reason: '其他' },
+      '举报对象不存在或已删除',
+    );
+    check('目标不存在 → 40409 提示', missingTarget === '举报对象不存在或已删除', missingTarget);
   }
 
   // 9) 收藏 / 浏览历史云端同步（/api/me/*）

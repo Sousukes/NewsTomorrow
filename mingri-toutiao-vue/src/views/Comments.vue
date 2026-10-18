@@ -4,8 +4,10 @@ import { useRoute, useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import Button from '@/components/Button.vue';
+import ReportDialog from '@/components/ReportDialog.vue';
 import { useCommentsStore, type Comment } from '@/stores/comments';
 import { useNewsDetail } from '@/composables/useNewsDetail';
+import { COMMENT_SORTS, type CommentSort } from '@/constants/comments';
 
 const route = useRoute();
 const router = useRouter();
@@ -20,7 +22,11 @@ const list = computed<Comment[]>(() => commentsStore.byArticle[articleId.value] 
 const totalCount = computed(() => commentsStore.count(articleId.value));
 
 onMounted(() => commentsStore.ensure(articleId.value));
-watch(articleId, (id) => commentsStore.ensure(id));
+watch(articleId, (id) => {
+  commentsStore.ensure(id);
+  // 换文章：排序跟该文章已选的走（不把上一篇的选择带过去）
+  sort.value = commentsStore.sortOf(id);
+});
 
 const draft = ref('');
 
@@ -30,6 +36,25 @@ const expanded = ref<Set<string>>(new Set());
 // 回复目标：主评论或其下某条回复（回复的回复拍平到同一主评论下）
 const replyTarget = ref<{ id: string; name: string } | null>(null);
 const replyDraft = ref('');
+
+/** 排序切换（E6）：latest / hot。列表整体被替换，展开态一并失效 */
+const sort = ref<CommentSort>(commentsStore.sortOf(articleId.value));
+const sortError = ref('');
+
+async function changeSort(next: CommentSort) {
+  if (next === sort.value) return;
+  sortError.value = '';
+  sort.value = next;
+  // 排序变了，列表被整体替换，旧的展开态与回复目标都失去语境
+  expanded.value.clear();
+  replyTarget.value = null;
+  const ok = await commentsStore.setSort(articleId.value, next);
+  if (!ok) {
+    // 回退：标签必须与列表的真实顺序一致，不能只换个高亮
+    sort.value = commentsStore.sortOf(articleId.value);
+    sortError.value = '切换排序失败，请稍后重试';
+  }
+}
 
 /** 展平后的渲染行：主评论 + 其可见回复；最后一条可见回复行携带「查看更多」入口 */
 interface Row {
@@ -118,13 +143,42 @@ function send() {
   commentsStore.add(articleId.value, '我', text);
   draft.value = '';
 }
+
+/**
+ * 举报入口（E5）：只对**他人**的评论显示。
+ * 举报自己既无意义，又会让服务端多一条必然被驳回的记录（还会占复核队列）。
+ */
+const reportOpen = ref(false);
+const reportTargetId = ref('');
+
+function openReport(c: Comment) {
+  reportTargetId.value = c.id;
+  reportOpen.value = true;
+}
 </script>
 
 <template>
   <div v-if="item" class="comments">
     <AppNav variant="title" title="评论" show-back @back="router.back()" />
 
-    <div v-if="totalCount" class="comments__count">共 {{ totalCount }} 条评论</div>
+    <div class="comments__head">
+      <span v-if="totalCount" class="comments__count">共 {{ totalCount }} 条评论</span>
+      <span v-else class="comments__count" />
+      <div class="comments__sorts" role="tablist" aria-label="评论排序">
+        <button
+          v-for="s in COMMENT_SORTS"
+          :key="s.key"
+          class="comments__sort"
+          :class="{ 'is-active': sort === s.key }"
+          role="tab"
+          :aria-selected="sort === s.key"
+          @click="changeSort(s.key)"
+        >
+          {{ s.label }}
+        </button>
+      </div>
+    </div>
+    <div v-if="sortError" class="comments__error" role="alert">{{ sortError }}</div>
     <div v-if="deleteError" class="comments__error" role="alert">{{ deleteError }}</div>
 
     <div class="comments__list">
@@ -174,6 +228,15 @@ function send() {
                 <span>{{ row.c.likes }}</span>
               </button>
               <button class="cmt__reply-btn" @click="startReply(row.c)">回复</button>
+              <!-- 举报他人评论（E5）：自己的评论不显示（删掉即可，不需要举报自己） -->
+              <button
+                v-if="!row.c.mine"
+                class="cmt__report-btn"
+                :aria-label="`举报评论：${row.c.content.slice(0, 10)}`"
+                @click="openReport(row.c)"
+              >
+                举报
+              </button>
             </div>
 
             <!-- 回复输入框：跟随当前回复目标（主评论或其下某条回复） -->
@@ -242,6 +305,9 @@ function send() {
       />
       <Button variant="primary" label="发送" :disabled="!draft.trim()" @click="send" />
     </div>
+
+    <!-- 举报弹窗（E5）：目标 id 随点击的评论切换，弹窗内部自己处理登录/提交 -->
+    <ReportDialog v-model:open="reportOpen" target-type="comment" :target-id="reportTargetId" />
   </div>
 
   <div v-else-if="resolving" class="comments-loading">加载中…</div>
@@ -272,6 +338,44 @@ function send() {
   color: var(--color-text-secondary);
   background: var(--color-card-bg);
   border-bottom: 1px solid var(--color-divider);
+}
+
+/* 计数 + 排序同一行：排序是列表的视图选项，应该贴着列表而不是浮在页头 */
+.comments__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--color-card-bg);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.comments__head .comments__count {
+  border-bottom: none;
+  background: transparent;
+}
+
+.comments__sorts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 12px;
+  flex-shrink: 0;
+}
+
+.comments__sort {
+  border: none;
+  background: transparent;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 12px;
+}
+
+.comments__sort.is-active {
+  color: var(--color-primary);
+  font-weight: 600;
 }
 
 .comments__list {
@@ -395,7 +499,8 @@ function send() {
   color: var(--color-error);
 }
 
-.cmt__reply-btn {
+.cmt__reply-btn,
+.cmt__report-btn {
   border: none;
   background: transparent;
   padding: 0;
@@ -406,6 +511,11 @@ function send() {
 
 .cmt__reply-btn:hover {
   color: var(--color-brand, #3b6cff);
+}
+
+/* 举报是负向操作：hover 用警示色，与「回复」区分开 */
+.cmt__report-btn:hover {
+  color: var(--color-error);
 }
 
 /* 回复输入框 */

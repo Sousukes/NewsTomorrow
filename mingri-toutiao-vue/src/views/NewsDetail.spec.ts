@@ -15,7 +15,9 @@ const addHistory = vi.fn();
 const isFavorite = vi.fn(() => false);
 const toggleFavorite = vi.fn();
 vi.mock('@/stores/user', () => ({
-  useUserStore: () => ({ addHistory, isFavorite, toggleFavorite }),
+  // isLoggedIn 供举报弹窗判断登录态（E5）：本文件按「已登录」跑，
+  // 未登录分支由 components/ReportDialog.spec.ts 单独覆盖
+  useUserStore: () => ({ addHistory, isFavorite, toggleFavorite, isLoggedIn: true }),
 }));
 
 const countOf = vi.fn(() => 0);
@@ -100,5 +102,30 @@ describe('views/NewsDetail 正文渲染（E1）', () => {
     expect(w.text()).toContain('测试源');
     expect(w.text()).toContain('3评论');
     expect(addHistory).toHaveBeenCalledWith('t_body');
+  });
+});
+
+describe('views/NewsDetail 举报入口（E5）', () => {
+  it('默认不显示举报弹窗', async () => {
+    item.value = detailItem();
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.find('.mask').exists()).toBe(false);
+  });
+
+  it('点击导航「更多」打开举报弹窗，目标为当前资讯', async () => {
+    // 修复前：「更多」是个只有图标、没有处理函数的死按钮
+    item.value = detailItem({ id: 'n_report' });
+    const w = mountPage();
+    await settle(w);
+
+    await w.find('button[aria-label="更多"]').trigger('click');
+    await settle(w);
+
+    expect(w.find('.mask').exists()).toBe(true);
+    expect(w.text()).toContain('举报该资讯');
+    // 弹窗内理由列表就绪 → 目标 id 已透传（未传会被后端 40409）
+    expect(w.findAll('.reason').length).toBeGreaterThan(0);
   });
 });

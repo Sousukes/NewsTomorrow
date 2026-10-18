@@ -23,14 +23,23 @@
     区别只在治理语义——删除不可逆（作者自主），隐藏可恢复（运营处置，
     理由留痕）。过滤条件实时生效，恢复无需等任何定时任务。
 
-排序契约（H2）：
-    主评论按绝对时间 `created_at` 倒序（新的在前），`id` 兜底保证稳定。
-    历史实现按展示文案 `time`（"1小时前" / ISO 混排）排序，字典序与真实
-    时间不一致，会得到错误顺序。回复按时间正序 + `id` 兜底。
+排序契约（H2 / E6）：
+    主评论支持 `sort=latest`（默认，`created_at` 倒序）与 `sort=hot`
+    （`likes` 倒序，`created_at` + `id` 兜底）。两者都用**绝对时间字段**，
+    不用展示文案 `time`（"1小时前" / ISO 混排的字典序与真实时间不一致）。
+    回复恒按时间正序 + `id` 兜底——讨论先后是回复的唯一合理顺序。
+
+    **游标携带 sort（v2）**：`latest` 与 `hot` 的排序键不同，若游标只存 id，
+    用 `hot` 的游标去续 `latest` 会静默错位（news 列表在 P1-7 踩过同一个坑）。
+    旧格式（裸 id，v1）仍按 latest 兼容解析——它只可能由 latest 产生。
+    另需注意：`hot` 的分页天然不稳定——分页途中某条评论被点赞，
+    它就会跨过游标位置，可能重复或漏掉一条。列表页一次取完（UI 不分页）时无影响。
 
 分页契约（M2）：
     支持 `cursor` + `limit`（keyset），缺省返回前 N 条；同时返回 `hasMore`。
 """
+import base64
+import json
 import logging
 import uuid
 from typing import Optional
@@ -68,6 +77,13 @@ logger = logging.getLogger("toutiao.comments")
 DEFAULT_LIMIT = 20
 # 主评论在列表里附带的回复预览条数（完整列表走 replies 接口）
 REPLY_PREVIEW_COUNT = 2
+
+# 主评论排序模式（E6）：最新 / 最热
+SORT_LATEST = "latest"
+SORT_HOT = "hot"
+COMMENT_SORTS = (SORT_LATEST, SORT_HOT)
+# 游标版本：v2 起携带 sort 与排序键（v1 是裸 id，仅 latest 语义）
+_CURSOR_V = 2
 
 
 def _liked_ids(db: Session, comment_ids: list[str], current: Optional[User]) -> set[str]:
@@ -215,6 +231,68 @@ def _order_desc(q):
     return q.order_by(Comment.created_at.desc(), Comment.id.desc())
 
 
+def _likes_expr():
+    """点赞数的排序表达式：`likes` 允许为 NULL（历史行），NULL 必须当 0 参与比较。
+
+    直接用 `Comment.likes` 会让 NULL 行在 `likes < x` 条件里被整体排除——
+    表现为「翻到第二页，零赞评论凭空消失」。
+    """
+    return func.coalesce(Comment.likes, 0)
+
+
+def _order_for(q, sort: str):
+    """主评论排序：`hot` 先按点赞数，`latest` 先按时间；都以 id 兜底保证稳定。"""
+    if sort == SORT_HOT:
+        return q.order_by(_likes_expr().desc(), Comment.created_at.desc(), Comment.id.desc())
+    return _order_desc(q)
+
+
+def _encode_cursor(c: Comment, sort: str) -> str:
+    """游标 = base64(JSON)，对客户端不透明；**携带 sort 与排序键**。"""
+    payload = [_CURSOR_V, sort, int(c.likes or 0), c.created_at, c.id]
+    raw = json.dumps(payload, ensure_ascii=False).encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_cursor(raw: str) -> Optional[tuple[str, int, str, str]]:
+    """→ `(sort, likes, created_at, id)`；非 v2 游标（v1 裸 id / 损坏值）返回 None。"""
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+    except Exception:
+        return None
+    if not isinstance(payload, list) or len(payload) != 5 or payload[0] != _CURSOR_V:
+        return None
+    _, sort, likes, created_at, cid = payload
+    if sort not in COMMENT_SORTS:
+        return None
+    try:
+        return str(sort), int(likes), str(created_at), str(cid)
+    except (TypeError, ValueError):
+        return None
+
+
+def _keyset_filter(q, sort: str, likes: int, created_at: str, cid: str):
+    """keyset 条件：严格「排在锚点之后」，排序键与 `_order_for` 一一对应。"""
+    if sort == SORT_HOT:
+        return q.filter(
+            or_(
+                _likes_expr() < likes,
+                and_(_likes_expr() == likes, Comment.created_at < created_at),
+                and_(
+                    _likes_expr() == likes,
+                    Comment.created_at == created_at,
+                    Comment.id < cid,
+                ),
+            )
+        )
+    return q.filter(
+        or_(
+            Comment.created_at < created_at,
+            and_(Comment.created_at == created_at, Comment.id < cid),
+        )
+    )
+
+
 def _record_hits(
     db: Session,
     hits: list,
@@ -263,16 +341,22 @@ def _record_hits(
 def list_comments(
     news_id: str,
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=100),
-    cursor: Optional[str] = Query(None, description="上一页末条的 id"),
+    cursor: Optional[str] = Query(None, description="上一页末条的游标（对客户端不透明）"),
+    sort: str = Query(SORT_LATEST, description="latest（默认）| hot"),
     db: Session = Depends(get_db),
     current: Optional[User] = Depends(get_current_user_optional),
 ):
-    """主评论列表：按时间倒序（新的在前），游标为上一页末条 id。
+    """主评论列表：`sort=latest`（默认，新的在前）/ `sort=hot`（赞多的在前）。
 
     只返回**主评论**（root_id IS NULL）；每条附回复数与最早 2 条回复预览，
     完整回复走 replies 接口。已删除（is_deleted）、已隐藏（hidden，P1-22）
     的评论不返回——两者对公开侧同构：实时过滤，无需等任何定时任务。
     """
+    if sort not in COMMENT_SORTS:
+        raise HTTPException(
+            status_code=422, detail={"code": 42201, "message": f"排序方式不支持：{sort}"}
+        )
+
     _get_news_or_404(db, news_id)
     q = db.query(Comment).filter(
         Comment.news_id == news_id,
@@ -281,26 +365,33 @@ def list_comments(
         Comment.root_id.is_(None),
     )
 
+    key: Optional[tuple[int, str, str]] = None
     if cursor:
-        anchor = db.query(Comment).filter(Comment.id == cursor).first()
-        if anchor is not None:
-            # (created_at, id) < (anchor.created_at, anchor.id)
-            q = q.filter(
-                or_(
-                    Comment.created_at < anchor.created_at,
-                    and_(Comment.created_at == anchor.created_at, Comment.id < anchor.id),
-                )
-            )
+        decoded = _decode_cursor(cursor)
+        if decoded is not None:
+            c_sort, c_likes, c_at, c_id = decoded
+            # 排序变了 → 游标作废，从头取第一页。拿旧排序的键去续新排序，
+            # 只会得到一页「看起来正常但缺几条」的数据——错得没有声响。
+            if c_sort == sort:
+                key = (c_likes, c_at, c_id)
+        else:
+            # v1 兼容：裸 id（只可能由 latest 产生），回表取它的排序键
+            anchor = db.query(Comment).filter(Comment.id == cursor).first()
+            if anchor is not None:
+                key = (int(anchor.likes or 0), anchor.created_at, anchor.id)
+
+    if key is not None:
+        q = _keyset_filter(q, sort, *key)
 
     # 多取 1 条用于判断是否还有下一页
-    rows = _order_desc(q).limit(limit + 1).all()
+    rows = _order_for(q, sort).limit(limit + 1).all()
     has_more = len(rows) > limit
     items = rows[:limit]
     return ok(
         {
             "list": _decorate_roots(db, items, current),
             "hasMore": has_more,
-            "nextCursor": items[-1].id if has_more and items else None,
+            "nextCursor": _encode_cursor(items[-1], sort) if has_more and items else None,
         }
     )
 

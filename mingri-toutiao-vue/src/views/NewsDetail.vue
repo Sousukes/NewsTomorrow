@@ -5,6 +5,7 @@ import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import NewsCard from '@/components/NewsCard.vue';
+import ReportDialog from '@/components/ReportDialog.vue';
 import { useUserStore } from '@/stores/user';
 import { useCommentsStore } from '@/stores/comments';
 import { useNewsDetail } from '@/composables/useNewsDetail';
@@ -78,11 +79,26 @@ function openRelated(id: string) {
 function onFavorite() {
   if (item.value) user.toggleFavorite(item.value.id);
 }
+
+/**
+ * 举报入口（E5）：挂在导航「更多」上。
+ *
+ * 为什么不放进底部操作区：举报是低频负向操作，与「收藏/评论」并排会抬高误触率，
+ * 也让正向操作被稀释。新闻类 App 的惯例也是「更多 → 举报」。
+ */
+const reportOpen = ref(false);
 </script>
 
 <template>
   <div v-if="item" class="detail">
-    <AppNav variant="detail" :author="author" show-back show-more @back="router.back()" />
+    <AppNav
+      variant="detail"
+      :author="author"
+      show-back
+      show-more
+      @back="router.back()"
+      @more="reportOpen = true"
+    />
     <div class="detail__scroll">
       <h1 class="detail__title">{{ item.title }}</h1>
       <div class="detail__meta">
@@ -152,6 +168,9 @@ function onFavorite() {
       </div>
       <Button variant="primary" block label="返回首页" @click="router.push('/')" />
     </div>
+
+    <!-- 举报弹窗（E5）：目标固定为当前资讯；登录态与提交由弹窗内部处理 -->
+    <ReportDialog v-model:open="reportOpen" target-type="news" :target-id="item.id" />
   </div>
 
   <!-- 深链加载中：先显示骨架，避免误判为「内容不存在」 -->
