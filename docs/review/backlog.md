@@ -41,7 +41,7 @@
 | --- | --- | --- | --- | --- |
 | ~~D1-a~~ | ~~低风险列改 TIMESTAMP~~ | — | **P1-51 已证伪，不做**：逐列核实后发现几乎没有"只排序"的列（`published_at` 参与保留期清理、`comments.created_at` 是 keyset 游标、`hot_score_at` 参与衰减筛选、命中日志参与保留期清理）。剩下的只写入列收益仅"类型诚实"，却要引入 `now_dt()`/`now_str()` 两套写入口径——A3 刚消除的那种漂移 | P1-51 结论 |
 | ~~D1-0~~ | ~~时间列存量数据清洗~~ | — | ✅ P1-52 已完成（迁移 0029）：`''`→NULL，展示列不在白名单，行为等价已用三种方式验证 |
-| D1-1（原 D1-b） | 时间列改 `TIMESTAMP`：**参与 SQL 范围过滤 / keyset 游标**的列 | L | **前置：D1-0 数据清洗**（实测空串与展示文案会让迁移直接失败）。cutoff 一律参数绑定；`coalesce(x,'')` 换 `NULLS LAST`；SQLite 无原生时间类型 → 迁移脚本分方言、downgrade 空操作 | 需先决定 cutoff 走参数绑定还是表达式；注意 `coalesce(x,'')` 改类型后会类型错（换 `NULLS LAST`），SQLite 无原生时间类型 → 迁移脚本必须分方言、downgrade 空操作 |
+| D1-1（进行中） | 其余时间列改 `TIMESTAMP`（`rss_source_health_events.at` **已在 P1-53 完成**） | L | 前置已就绪（D1-0 清洗 + 首列 0030 跑通）。**SQLite 禁用 `batch_alter_table`**——它用 CAST 会把 ISO 时间截成年份（P1-53 实测），必须显式重建 + Python 逐行转换；出响应一律过 `models.iso_utc()`（SQLite 读回不带时区）；cutoff 一律参数绑定 | 需先决定 cutoff 走参数绑定还是表达式；注意 `coalesce(x,'')` 改类型后会类型错（换 `NULLS LAST`），SQLite 无原生时间类型 → 迁移脚本必须分方言、downgrade 空操作 |
 
 ### P2 · 能力扩展
 
@@ -93,6 +93,7 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-53 | D1-1 首列迁移（0030，`rss_source_health_events.at` → DateTime）：确立 `now_dt`/`iso_utc` 双入口、cutoff 参数绑定；**踩中并修复 SQLite `batch_alter_table` 的 CAST 毁数据陷阱**（重建路径 + 外键/索引/ondelete 逐项补齐）；pytest 831 → 838 |
 | P1-52 | D1-0 时间列数据清洗（迁移 0029）：`''`→NULL；**行为等价性用「可见集合/排序位置/衰减分支」三维度验证**，另跑通 downgrade→注入脏数据→upgrade 的真实链路；downgrade 空操作 |
 | P1-51 | D1 计划证伪：迁移实验 4 项（`tests/test_time_migration_spike.py`）证明空串/展示文案会让迁移失败，且几乎没有"只排序"的列 → D1-a 取消，改为 D1-0（数据清洗）→ D1-1（类型迁移） |
 | P1-50 | D1 决策准备（不改 schema）：产出 `docs/后端/时间字段盘点与D1决策.md` + 时间格式护栏 14 项；并修掉「新建评论显示原始 ISO 串」的用户可见 bug（展示文案改为由绝对时间推导） |

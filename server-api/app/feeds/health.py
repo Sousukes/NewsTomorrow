@@ -23,7 +23,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from ..config import FEED_HEALTH_KEEP_DAYS
-from ..models import RssSourceHealthEvent, now_str
+from ..models import RssSourceHealthEvent, iso_utc, now_dt, now_str
 
 logger = logging.getLogger("toutiao.feeds.health")
 
@@ -58,7 +58,7 @@ def record_event(
                 # strip 后再截断：纯空白不是错误，存进去前端 `v-if="error"` 会渲染空条
                 error=(error or "").strip()[:300] or None,
                 kind=kind,
-                at=now_str(),
+                at=now_dt(),
             )
         )
         db.commit()
@@ -96,9 +96,15 @@ def prune(db: Session, keep_days: int | None = None) -> int:
         return 0
 
 
-def _since(days: int) -> str:
-    """N 天前的 UTC aware 锚点串（与 `at` 列同口径，供字符串比较）。"""
-    return (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat(timespec="seconds")
+def _since(days: int) -> datetime:
+    """N 天前的 UTC aware 锚点（`DateTime` 列的**参数绑定值**，不是字符串）。
+
+    D1-1：`at` 列改成 `DateTime` 后，这里返回 datetime 对象由 SQLAlchemy
+    参数绑定。此前返回 ISO 串、让数据库做**字符串比较**——那依赖"同格式
+    字典序 == 时间序"这条契约；列有了真实类型后，继续拼字符串等于主动放弃
+    类型带来的好处，还多一层隐式转换的出错面。
+    """
+    return datetime.now(timezone.utc) - timedelta(days=max(1, days))
 
 
 def _rate(ok: int, total: int) -> float | None:
@@ -142,8 +148,10 @@ def summarize(db: Session, key: str, days: int) -> dict:
         "items": items,
         # 成功轮次的平均条数：看"源是不是在变空"用的就是这个
         "avgItems": round(items / ok, 1) if ok else None,
-        "lastOkAt": (row[3] if row else None),
-        "lastFailAt": (row[4] if row else None),
+        # 必须经 iso_utc：SQLite 的 DateTime 读回不带时区，直接出响应会
+        # 让双端格式不一致（PG 带 +00:00、SQLite 裸串）。
+        "lastOkAt": iso_utc(row[3] if row else None),
+        "lastFailAt": iso_utc(row[4] if row else None),
     }
 
 
@@ -247,7 +255,7 @@ def recent_failures(db: Session, key: str, days: int, limit: int = 20) -> list[d
     )
     return [
         {
-            "at": r.at,
+            "at": iso_utc(r.at),
             "error": r.error,
             "kind": r.kind,
             "items": r.item_count,

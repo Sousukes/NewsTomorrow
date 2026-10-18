@@ -14,7 +14,7 @@ os.environ["SEED_SAMPLE_DATA"] = "false"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["FEED_CRON_ENABLED"] = "false"
 
-from datetime import datetime, timedelta  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -24,7 +24,12 @@ import main  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
 from app.feeds import health as health_mod  # noqa: E402
 from app.feeds import ingest as ingest_mod  # noqa: E402
-from app.models import RssSource, RssSourceHealthEvent, now_str  # noqa: E402
+from app.models import (  # noqa: E402
+    RssSource,
+    RssSourceHealthEvent,
+    iso_utc,
+    now_str,
+)
 from app.config import FEED_HEALTH_LIST_DAYS  # noqa: E402
 from app.routers import admin as admin_mod  # noqa: E402
 
@@ -33,7 +38,7 @@ ADMIN_PHONE = "13800138000"
 # 整点锚点：**5 天前的零点**。凡是涉及"按天分桶"的用例都从这个锚点往后推，
 # 而不是"相对现在往前推 N 小时"——后者在跨午夜时（例如测试跑在 00:30）
 # 会把事件甩到相邻日期上，同一天的两条记录被算成两天，凌晨跑就红。
-BASE = (datetime.now() - timedelta(days=5)).replace(
+BASE = (datetime.now(timezone.utc) - timedelta(days=5)).replace(
     hour=0, minute=0, second=0, microsecond=0
 )
 
@@ -62,19 +67,24 @@ def client():
 # ---------------------------------------------------------------- 工具
 
 
-def _stamp(day: int = 4, hour: int = 0) -> str:
-    """锚点起第 `day` 天的 `hour` 点（0..4，全部落在保留期内且必定早于现在）。"""
-    return (BASE + timedelta(days=day, hours=hour)).isoformat(timespec="seconds")
+def _stamp(day: int = 4, hour: int = 0) -> datetime:
+    """锚点起第 `day` 天的 `hour` 点（0..4，全部落在保留期内且必定早于现在）。
+
+    D1-1：`at` 是 `DateTime`，**必须传 datetime 对象**——塞 ISO 串会被
+    SQLite 直接拒（`DateTime type only accepts Python datetime`），PG 则是
+    按会话时区隐式解释，两端行为都不一样。
+    """
+    return BASE + timedelta(days=day, hours=hour)
 
 
 def _stamp_day(day: int = 4) -> str:
-    """`_stamp` 所属的日期——分桶键就是 `at` 的前 10 位。"""
-    return _stamp(day)[:10]
+    """`_stamp` 所属的日期——分桶键就是 `at` 的前 10 位（UTC 日期）。"""
+    return iso_utc(_stamp(day))[:10]
 
 
-def _ago(days: float = 0, hours: float = 0) -> str:
-    """N 天（+M 小时）前。只用于**不涉及按天分桶**的用例。"""
-    return (datetime.now() - timedelta(days=days, hours=hours)).isoformat(timespec="seconds")
+def _ago(days: float = 0, hours: float = 0) -> datetime:
+    """N 天（+M 小时）前（aware UTC）。只用于**不涉及按天分桶**的用例。"""
+    return datetime.now(timezone.utc) - timedelta(days=days, hours=hours)
 
 
 def _event(db, key: str, ok: bool, count: int, *, at=None, days=0, hours=0,
@@ -255,8 +265,8 @@ class TestSummarize:
             _event(db, "s1", True, 5, days=2)
             _event(db, "s1", False, 0, days=1, error="HTTP 503")
             s = health_mod.summarize(db, "s1", 7)
-            assert s["lastOkAt"] == _ago(2)
-            assert s["lastFailAt"] == _ago(1)
+            assert s["lastOkAt"] == iso_utc(_ago(2))
+            assert s["lastFailAt"] == iso_utc(_ago(1))
 
     def test_events_outside_window_are_excluded(self):
         with SessionLocal() as db:
@@ -514,7 +524,7 @@ class TestIngestWritesHistory:
     def test_circuit_skipped_source_writes_nothing(self, monkeypatch):
         """熔断期内的源本轮没发请求——记它就是在伪造失败。"""
         monkeypatch.setattr(ingest_mod, "FEED_MIN_INTERVAL_MINUTES", 0)
-        future = (datetime.now() + timedelta(minutes=30)).isoformat(timespec="seconds")
+        future = datetime.now(timezone.utc) + timedelta(minutes=30)
         with SessionLocal() as db:
             _source(
                 db, "burnt", url="https://x.com/ok.xml",

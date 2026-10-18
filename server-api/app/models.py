@@ -5,6 +5,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     Column,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -57,6 +58,34 @@ def parse_dt(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def now_dt() -> datetime:
+    """当前 UTC 时间（**aware** datetime）——`DateTime` 列的唯一写入口。
+
+    为什么要有它（而不是继续用 `now_str()`）：D1-1 起部分列改成 `DateTime`，
+    写入口跟着分成两种就是 A3 刚消除的那种漂移。所以这里明确：
+    **字符串列用 `now_str()`，datetime 列用 `now_dt()`**，两者同源同口径，
+    不允许在 datetime 列上写字符串。
+
+    SQLite 的 `DateTime` 读回**不带时区**（PG 的 timestamptz 带），所以读出的
+    值必须经 `iso_utc()` 再进响应，否则双端格式不一致：前端拿到的串有时是
+    `...+00:00`、有时是裸 `...`，`new Date()` 的解释会随环境变化。
+    """
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime | None) -> str | None:
+    """datetime → ISO 串，**无条件带 `+00:00`**（统一 SQLite 读回的裸值）。
+
+    没有时区信息时按 UTC 解释——与 `parse_dt` 的口径一致（0027 回填也是把
+    naive 当 UTC）。宁可显式多带偏移，也不要让下游猜本地时区。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def display_time(stored: str | None, absolute: str | None = None, *, now: datetime | None = None) -> str:
@@ -468,7 +497,10 @@ class RssSourceHealthEvent(Base):
     # 失败性质（transient / permanent），与 P1-18 `failure_kind` 同义，成功时为空
     kind = Column(String(20))
     # 绝对 ISO 时间（与其它表的字符串时间口径一致）
-    at = Column(String(30), nullable=False, default=now_str)
+    # D1-1：`DateTime(timezone=True)`。它是**唯一**参与 SQL 侧范围过滤的列
+    # （窗口查询 `at >= cutoff`），改类型后 cutoff 走参数绑定而非拼字符串。
+    # 读回经 `iso_utc()` 出响应（SQLite 不带时区，见 `now_dt` 文档）。
+    at = Column(DateTime(timezone=True), nullable=False, default=now_dt)
 
     __table_args__ = (
         # 主查询是「某源最近 N 天」，复合索引让范围扫描落在索引上

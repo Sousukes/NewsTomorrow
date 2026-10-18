@@ -30,7 +30,15 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
 from app.database import Base, engine  # noqa: E402
-from app.models import Comment, News, display_time, now_str, parse_dt  # noqa: E402
+from app.models import (  # noqa: E402
+    Comment,
+    News,
+    display_time,
+    iso_utc,
+    now_dt,
+    now_str,
+    parse_dt,
+)
 
 NOW = datetime(2026, 10, 18, 14, 0, 0, tzinfo=timezone.utc)
 
@@ -203,3 +211,72 @@ class TestUserVisibleFix:
         assert "前" in row["time"] or row["time"] == "刚刚"
         assert row["createdAt"] == ts
         assert row["createdAt"].endswith("+00:00")
+
+
+class TestDateTimeColumnBoundary:
+    """D1-1（`rss_source_health_events.at` 改 `DateTime`）的边界约定。
+
+    核心风险是**双端格式不一致**：PG 的 timestamptz 读回带时区，
+    SQLite 的 DateTime 读回**不带**——同一个值出响应时前者是
+    `...+00:00`、后者是裸 `...`，前端 `new Date()` 的解释会随部署环境变化。
+    所以出响应的最后一律过 `iso_utc()`，这里把这件事钉住。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _schema(self):
+        """本类需要真实表（fixture 是类内作用域，不能借用别的类的）。"""
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        yield
+        Base.metadata.drop_all(bind=engine)
+
+    def test_iso_utc_always_carries_offset(self):
+        from datetime import timezone as _tz
+
+        naive = datetime(2026, 10, 18, 14, 0, 0)          # SQLite 读回就是这样
+        aware = datetime(2026, 10, 18, 14, 0, 0, tzinfo=_tz.utc)  # PG 读回
+        assert iso_utc(naive).endswith("+00:00")
+        assert iso_utc(aware).endswith("+00:00")
+        assert iso_utc(naive) == iso_utc(aware), "两端同一时刻应给出同一个串"
+
+    def test_iso_utc_passes_none_through(self):
+        assert iso_utc(None) is None
+
+    def test_non_utc_datetime_is_converted_not_dropped(self):
+        """带 +08:00 的值必须转成 UTC，而不是原样带着 +08:00 出响应——
+        那会让同一批数据在不同部署下显示不同的本地时间。"""
+        from datetime import timedelta as _td
+        from datetime import timezone as _tz
+
+        # tzinfo 必须是 timezone 实例，不能直接塞 timedelta
+        shanghai = datetime(2026, 10, 18, 22, 0, 0, tzinfo=_tz(_td(hours=8)))
+        out = iso_utc(shanghai)
+        assert out == "2026-10-18T14:00:00+00:00"
+
+    def test_health_summary_time_fields_always_have_offset(self):
+        """走真实数据路径（`summarize` 直接读库），出参必须带偏移。
+
+        不用管理端点做这层验证：它需要鉴权令牌，而这批要验的是**时间格式**，
+        引入 token 只会让失败原因变模糊。
+        """
+        from app.database import SessionLocal
+        from app.feeds import health as health_mod
+        from app.models import RssSourceHealthEvent, now_dt
+
+        with SessionLocal() as db:
+            db.add(RssSourceHealthEvent(source_key="k", ok=True, item_count=1, at=now_dt()))
+            db.commit()
+            summary = health_mod.summarize(db, "k", 7)
+        assert summary["lastOkAt"].endswith("+00:00"), summary["lastOkAt"]
+        assert summary["lastFailAt"] is None
+
+    def test_window_filter_accepts_datetime_parameter(self):
+        """窗口查询必须以 **datetime 参数**比较（cutoff 不再拼字符串）。"""
+        import inspect
+
+        from app.feeds import health as health_mod
+
+        assert inspect.isfunction(health_mod._since)
+        anchor = health_mod._since(3)
+        assert isinstance(anchor, datetime), f"cutoff 应是 datetime，实际 {type(anchor)}"
+        assert anchor.tzinfo is not None, "cutoff 必须是 aware（naive 在 PG 里按会话时区解释）"
