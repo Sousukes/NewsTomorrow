@@ -297,6 +297,52 @@ POST /api/auth/step-up   { password }        →  { stepUpToken, expiresIn }
 （在后），未授权者拿到的是 **40301**（权限不足）而不是 40304——不向外透露
 站内有哪类操作需要二次校验。
 
+## 资讯列表的两处性能债（B2 / B3）
+
+### B2：默认走 keyset 分页，首页不再全表 `count()`
+
+`GET /api/news` 的 `page` 参数现在是**可选**的：
+
+| 请求 | 行为 |
+| --- | --- |
+| 不传 `page`（默认） | keyset 分页：首页与续页同一套查询，**不做全表 count**，`total`/`page` 返回 `null` |
+| 传 `page`（兼容） | 旧的 offset 分页：`total` 有意义，深分页仍 O(offset) |
+
+此前首页（还没拿到 cursor 时）落在 offset 分支里，于是**每次打开页面都做一次
+全表 `count()`**——那条路径上的用户占比是 100%。现在前端不再发 `page`
+（`src/api/news.ts` 有断言守住），首页与翻页都走 keyset。
+
+保留 offset 分支是刻意的：仍需要「第 N 页 / 共多少条」语义的调用方存在，
+而且改掉会让老客户端直接崩。
+
+`total` 为 `null` 时前端回落 `res.total ?? res.list.length`——用户侧界面本来
+就不消费列表的 `total`（只有管理端与搜索页在用），所以没有可见影响。
+
+**测试断言的是"不出现 COUNT 语句"，不是响应形状**：
+只把 `total` 改成 `null` 而底下照样 `count()`，契约看不出差别，债还留着。
+`tests/test_list_perf.py` 用 SQLAlchemy 事件抓真实执行的 SQL 来守这条。
+
+### B3：频道偏好（`for-you`）缓存
+
+`ranking.channel_preferences()` 原本是 `for-you` 每请求两次 JOIN + GROUP BY，
+而一次列表翻页可能打十几个请求——同一秒里算十几次完全相同的聚合。
+
+- 缓存 5 分钟（`CHANNEL_PREF_TTL_SECONDS`），实现在 `app/cache.py`；
+- **失效优先于过期**：收藏 / 浏览历史的任一写入路径都会
+  `invalidate_channel_preferences(user.id)`（键的拼法只在这一个函数里，
+  散开写迟早拼错，而"拼错"的后果是缓存永不失效且**没有任何报错**）；
+- **空偏好不缓存**：那是"还没产生行为"的多数访客，缓存它只在缓存里堆一堆
+  永不命中的键。
+
+`app/cache.py` 与 `ratelimit` 同一套口径：进程内 / Redis 双实现、Redis 探活失败
+降级到进程内并只告警一次、**任何缓存异常都不许冒泡**（读失败 = 未命中，
+写失败 = 不缓存）。缓存是这个系统里唯一可以随时失效的组件，它出错必须无感。
+
+键前缀 `cache:` 与限流的 `rl:` 分开——两个组件共用同一个 Redis 键空间，
+撞了会互相污染。`CACHE_ENABLED` 在**调用时**读 `config` 的模块属性，
+测试环境在 `conftest.py` 里钉 false（否则跨文件的进程内缓存会串味：
+每个测试文件都重建 sqlite，`user_id` 又从 1 开始重新分配）。
+
 ## 修改密码与管理员代重置（C4）
 
 此前**没有任何改密通道**：用户忘记密码只能无解，管理员也只能新建账号

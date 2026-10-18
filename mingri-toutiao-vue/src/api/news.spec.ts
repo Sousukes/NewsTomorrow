@@ -125,6 +125,46 @@ describe('fetchNewsPage 排序参数', () => {
     expect(url).toContain('sort=latest');
     expect(url).not.toContain('bogus');
   });
+
+  it('**不传 page**（B2：传了服务端就切回 offset 并顺手 count 一次）', async () => {
+    await fetchNewsPage({ channel: 'tech' });
+    const url = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(url).not.toContain('page=');
+  });
+
+  it('即便调用方传了 page 也不发给后端（keyset 才是默认路径）', async () => {
+    await fetchNewsPage({ channel: 'tech', page: 3 });
+    const url = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(url).not.toContain('page=');
+  });
+
+  it('有游标时按游标请求', async () => {
+    await fetchNewsPage({ channel: 'tech', cursor: 'abc' });
+    const url = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(url).toContain('cursor=abc');
+  });
+
+  it('total 为 null 时如实透出（keyset 首屏没有总数）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        respond({
+          list: [{ id: 'n1', title: 't', variant: 'left-right', commentCount: 0 }],
+          total: null,
+          page: null,
+          pageSize: 20,
+          nextCursor: 'next',
+          hasMore: true,
+          sort: 'latest',
+        }),
+      ),
+    );
+    const res = await fetchNewsPage({ channel: 'tech' });
+    expect(res.total).toBeNull();
+    expect(res.page).toBeNull();
+    expect(res.nextCursor).toBe('next');
+    expect(res.hasMore).toBe(true);
+  });
 });
 
 describe('fetchHotTerms', () => {

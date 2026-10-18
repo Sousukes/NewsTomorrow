@@ -14,9 +14,14 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from .cache import build_cache
+from .config import CHANNEL_PREF_TTL_SECONDS, REDIS_URL
 from .models import News, UserFavorite, UserHistory, now_str
 
 logger = logging.getLogger("toutiao.ranking")
+
+# 频道偏好缓存（B3）。进程内 / Redis 由 `cache.build_cache` 按 REDIS_URL 选。
+_pref_cache = build_cache(CHANNEL_PREF_TTL_SECONDS, REDIS_URL)
 
 # ---- 热度权重（可解释、可调；改动需同步 README 与测试）----
 W_COMMENT = 3.0  # 评论：最强互动信号
@@ -199,7 +204,20 @@ def channel_preferences(db: Session, user_id: int) -> dict[str, float]:
 
     收藏信号强于浏览信号（收藏权重 3、浏览 1）。归一化用最大计数而非总数，
     使"只看一个频道"的用户该频道权重为 1，而不是被总浏览数摊薄。
+
+    **B3：带缓存**。这里原本是 `for-you` 每请求两次 JOIN + GROUP BY——
+    一次列表翻页十几个请求，同一秒里算十几次完全相同的聚合。缓存 5 分钟，
+    并在收藏/浏览写入时主动失效（失效优先于过期：用户刚收藏完却看到
+    for-you 排序没变，比多花一次聚合更让人困惑）。
+
+    空结果**不缓存**：那是"还没产生行为"的多数访客，缓存它只会在
+    缓存里堆一堆永不命中的键。
     """
+    key = f"chanpref:{user_id}"
+    cached = _pref_cache.get(key)
+    if cached is not None:
+        return {str(k): float(v) for k, v in cached.items()}
+
     fav_rows = (
         db.query(News.channel, func.count(News.channel))
         .join(UserFavorite, UserFavorite.news_id == News.id)
@@ -224,7 +242,19 @@ def channel_preferences(db: Session, user_id: int) -> dict[str, float]:
     top = max(scores.values())
     if top <= 0:
         return {}
-    return {ch: round(v / top, 4) for ch, v in scores.items()}
+    weights = {ch: round(v / top, 4) for ch, v in scores.items()}
+    _pref_cache.set(key, weights)
+    return weights
+
+
+def invalidate_channel_preferences(user_id: int) -> None:
+    """行为发生变化（收藏/浏览写入）后丢掉该用户的偏好缓存。
+
+    抽成一个函数而不是让每个调用点自己拼键：键的拼法只有这一处，
+    散开写迟早有一处拼错——而"拼错"的后果是缓存永不失效（用户行为
+    变了但排序不变），这种 bug 没有任何报错。
+    """
+    _pref_cache.delete(f"chanpref:{user_id}")
 
 
 def channel_boost_expr(weights: dict[str, float]):

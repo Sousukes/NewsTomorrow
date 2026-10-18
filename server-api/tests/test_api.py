@@ -182,8 +182,16 @@ class TestAuth:
 
 class TestNews:
     def test_list(self, client):
+        """B2：默认走 keyset → 不返回 total（首页不该为此做全表 count）。"""
         d = client.get("/api/news").json()["data"]
+        assert d["total"] is None
+        assert d["list"][0]["id"]
+
+    def test_list_legacy_page_still_counts(self, client):
+        """显式传 `page` 走兼容的 offset 路径，此时 total 才有意义。"""
+        d = client.get("/api/news?page=1").json()["data"]
         assert d["total"] >= 3
+        assert d["page"] == 1
         assert d["list"][0]["id"]
 
     def test_feed_order_top_then_time_desc(self, client):

@@ -130,7 +130,7 @@ export const useNewsStore = defineStore('news', () => {
     bucket.channel = channel;
     bucket.sort = sort;
     try {
-      const res = await apiFetchNewsPage({ channel, page: 1, pageSize: PAGE_SIZE, sort });
+      const res = await apiFetchNewsPage({ channel, pageSize: PAGE_SIZE, sort });
       if (gen !== bucket.generation) return bucket.list; // 已被更新的一次请求取代
       bucket.list = res.list;
       bucket.page = 1;
@@ -172,9 +172,7 @@ export const useNewsStore = defineStore('news', () => {
         // 关键：排序必须与首请求一致。服务端游标自带 sort 并按该排序键做 keyset 比较，
         // 若续接时换了排序，比较基准就失效了（表现为重复或漏项）。
         sort,
-        // 有游标优先走 keyset；否则回退 offset
         cursor: bucket.cursor ?? undefined,
-        page: bucket.cursor ? undefined : nextPage,
       });
 
       if (gen !== bucket.generation) return 0; // 过期响应：绝不写入新列表/覆盖游标

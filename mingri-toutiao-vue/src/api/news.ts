@@ -108,7 +108,10 @@ export async function fetchNewsPage(params: FetchNewsParams = {}): Promise<NewsP
     nextCursor?: string | null;
     hasMore?: boolean;
   }>('/news', {
-    query: { channel, page: cursor ? undefined : page, pageSize, cursor, sort: toSort(sort) },
+    // B2：**不传 `page`**——服务端据此走 keyset 游标分页，首页不再做全表 count。
+    // `page` 仍保留在参数类型里（mock 模式与调试需要），真后端调用一律不传：
+    // 一旦传了，服务端会切回 offset 分支并顺手 count 一次。
+    query: { channel, pageSize, cursor, sort: toSort(sort) },
   });
 
   const arr = Array.isArray(data) ? data : (data?.list ?? []);

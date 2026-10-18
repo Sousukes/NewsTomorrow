@@ -28,7 +28,7 @@ from ..nickname_moderation import (
     record_hits,
     validate_nickname_shape,
 )
-from ..ranking import bump_hot_score, recompute_hot_scores
+from ..ranking import bump_hot_score, invalidate_channel_preferences, recompute_hot_scores
 from ..response import ok
 from ..schemas import MarkBulkIn, MarkIn, NicknameUpdateIn
 from ..step_up import require_step_up
@@ -158,6 +158,9 @@ def _merge(db: Session, user: User, model, time_col, ids: list[str]) -> int:
         ts = (base - timedelta(seconds=k)).isoformat(timespec="seconds")
         db.add(model(user_id=user.id, news_id=nid, **{time_col.key: ts}))
     db.commit()
+    # B3：行为变了 → 该用户的频道偏好缓存立即作废（合并路径同样要失效，
+    # 登录时的那次并集就是最典型的"用户刚收藏完却看不到排序变化")
+    invalidate_channel_preferences(user.id)
     return len(candidates)
 
 
@@ -182,6 +185,8 @@ def add_favorite(
         db.commit()
         # 收藏数是热度分的组成项，即时重算使"刚被收藏"立刻反映到热榜
         bump_hot_score(db, body.newsId)
+        # B3：收藏是权重最高的偏好信号 → 立即作废该用户的偏好缓存
+        invalidate_channel_preferences(user.id)
     return ok(_favorites_payload(db, user), message="已收藏")
 
 
@@ -195,6 +200,7 @@ def remove_favorite(
         db.delete(row)
         db.commit()
         bump_hot_score(db, news_id)
+        invalidate_channel_preferences(user.id)
     return ok(_favorites_payload(db, user), message="已取消收藏")
 
 
@@ -241,6 +247,8 @@ def record_history(
         row.viewed_at = ts
     db.commit()
     _trim_history(db, user)
+    # B3：浏览是偏好信号之一（权重低于收藏）→ 同样要作废
+    invalidate_channel_preferences(user.id)
     return ok(_history_payload(db, user))
 
 
@@ -249,6 +257,7 @@ def clear_history(db: Session = Depends(get_db), user: User = Depends(require_pa
     """清空浏览历史。"""
     db.execute(UserHistory.__table__.delete().where(UserHistory.user_id == user.id))
     db.commit()
+    invalidate_channel_preferences(user.id)
     return ok({"ids": [], "list": []}, message="已清空浏览历史")
 
 

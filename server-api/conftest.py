@@ -22,6 +22,12 @@ os.environ["TRUSTED_PROXIES"] = ""
 # 关掉限流：多数文件会反复登录，同一 testclient IP 很快触顶，
 # 表现为 login 返回 data=None，报错栈指向莫名其妙的取值行
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# 关掉缓存（B3）：否则跨文件的进程内缓存会串味——每个测试文件都从
+# sqlite 重建表，user_id 又从 1 开始重新分配，上一个文件为「用户 1」算的
+# 频道偏好会被下一个文件的另一个「用户 1」直接命中（症状：for-you 排序
+# 断言随机失败，且只在全量跑时出现）。需要验证缓存本身的用例在
+# tests/test_channel_pref_cache.py 里显式打开。
+os.environ["CACHE_ENABLED"] = "false"
 os.environ["SEED_SAMPLE_DATA"] = "false"
 # 关掉定时抓取：TestClient 触发 lifespan → 启动调度 → **真的去抓网络**
 os.environ["FEED_CRON_ENABLED"] = "false"

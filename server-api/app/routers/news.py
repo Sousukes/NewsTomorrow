@@ -280,7 +280,9 @@ def _page_payload(
 def list_news(
     channel: str = Query("recommend"),
     sort: str = Query(SORT_LATEST),
-    page: int = Query(1, ge=1),
+    page: Optional[int] = Query(
+        None, ge=1, description="offset 分页页码；**不传即走 keyset 游标分页**（推荐）"
+    ),
     pageSize: int = Query(20, ge=1, le=100),
     cursor: Optional[str] = Query(None, description="游标分页；优先于 page"),
     db: Session = Depends(get_db),
@@ -292,7 +294,9 @@ def list_news(
     - 其他 channel：精确过滤；
     - `sort`：`latest`（默认，时间）/ `hot`（热度）/ `for-you`（热度 + 频道偏好）；
       `for-you` 在未登录或无行为数据时退化为 `hot`（偏好权重为空，加分恒为 0）；
-    - 传 `cursor` 走 keyset 分页（性能更好），否则回退 offset 分页。
+    - **默认走 keyset 分页**（B2）：不传 `page` 即按游标语义取一页，
+      首页也不再全表 `count()`；显式传 `page` 才走旧的 offset 分页
+      （深分页 O(offset)，仅留给需要「第 N 页」语义的调用方）。
 
 下架过滤（P1-20）：
     软下架的资讯（`hidden`）对所有公开查询不可见：列表 / 详情 / 搜索 /
@@ -314,18 +318,25 @@ def list_news(
     # P1-20：已下架内容不进公开信息流（游标分页同样生效——过滤加在 keyset 之前）
     q = q.filter(News.hidden.is_(False))
 
-    if cursor:
-        decoded = _decode_cursor(cursor)
-        if decoded is None:
-            raise HTTPException(status_code=400, detail={"code": 40003, "message": "分页游标无效"})
-        c_sort, top, key, nid = decoded
-        # 游标自带 sort：续接必须沿用首请求时的排序键，否则 keyset 比较无意义
-        q = q.filter(_keyset_filter(c_sort, top, key, nid, weights))
+    # B2：**默认**走 keyset。只有显式传了 `page` 才回退 offset 分页。
+    # 此前首页（还没 cursor 时）落在 offset 分支里，于是每次打开页面都做一次
+    # 全表 `count()`——那条路径上的用户占比是 100%。
+    if cursor or page is None:
+        c_sort = sort
+        if cursor:
+            decoded = _decode_cursor(cursor)
+            if decoded is None:
+                raise HTTPException(
+                    status_code=400, detail={"code": 40003, "message": "分页游标无效"}
+                )
+            c_sort, top, key, nid = decoded
+            # 游标自带 sort：续接必须沿用首请求时的排序键，否则 keyset 比较无意义
+            q = q.filter(_keyset_filter(c_sort, top, key, nid, weights))
         items = _order_by(q, c_sort, weights).limit(pageSize).all()
         return ok(
             {
                 "list": [to_out(n) for n in items],
-                # 游标模式不做全表 count（正是性能收益来源）；total 交给客户端累计
+                # keyset 模式不做全表 count（正是性能收益来源）；total 交给客户端累计
                 "total": None,
                 "page": None,
                 "pageSize": pageSize,
@@ -337,6 +348,7 @@ def list_news(
             }
         )
 
+    # 兼容路径：显式 page 才走 offset（此时 total 有意义）
     total = q.count()
     items = _order_by(q, sort, weights).offset((page - 1) * pageSize).limit(pageSize).all()
     return ok(_page_payload(items, total, page, pageSize, sort, weights))

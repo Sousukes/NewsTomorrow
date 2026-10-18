@@ -325,10 +325,14 @@ class TestPublicFiltering:
         )
         h = _admin(client)
         _hide(client, h, "n2")
-        # offset 模式：total 也必须是过滤后的
-        data = client.get("/api/news?channel=tech").json()["data"]
+        # offset 兼容模式（B2 起需显式传 page 才走这条）：total 也必须是过滤后的
+        data = client.get("/api/news?channel=tech&page=1").json()["data"]
         assert data["total"] == 3
         assert all(n["id"] != "n2" for n in data["list"])
+        # 默认路径（keyset）：列表同样不得出现已下架；total 按约定为 null
+        default_page = client.get("/api/news?channel=tech").json()["data"]
+        assert default_page["total"] is None
+        assert all(n["id"] != "n2" for n in default_page["list"])
         # 游标模式：翻完全部也不应出现已下架
         seen: list[str] = []
         cursor = None

@@ -115,6 +115,33 @@ const run = async () => {
     (listData.list ?? []).every((n) => n.content === undefined),
   );
 
+  // 1.1) 分页形态（B2）：默认 keyset（不做全表 count），显式 page 才走兼容分支
+  check(
+    '默认不传 page → total 为 null、page 为 null（B2：首页不 count）',
+    listData.total === null && listData.page === null,
+    `total=${String(listData.total)}`,
+  );
+  check(
+    '默认响应带 hasMore / nextCursor 游标字段',
+    'hasMore' in listData && 'nextCursor' in listData,
+  );
+  const legacyPage = await request('/news?channel=tech&page=1&pageSize=3');
+  check(
+    '显式传 page → 走 offset 兼容分支且 total 有值',
+    typeof legacyPage.total === 'number' && legacyPage.total > 0 && legacyPage.page === 1,
+    `${legacyPage.total} 条`,
+  );
+  if (listData.nextCursor) {
+    const second = await request(
+      `/news?channel=tech&cursor=${encodeURIComponent(listData.nextCursor)}`,
+    );
+    check(
+      '游标续页返回数据且 total 仍为 null（B2）',
+      Array.isArray(second.list) && second.total === null,
+      `${(second.list ?? []).length} 条`,
+    );
+  }
+
   // 2) 资讯详情
   const detail = normalize(await request(`/news/${items[0].id}`));
   check('GET /news/:id 详情', detail.id === items[0].id);

@@ -1961,10 +1961,46 @@ const server = createServer(async (req, res) => {
     if (sort !== 'latest') {
       list = [...list].sort((x, y) => (y.commentCount ?? 0) - (x.commentCount ?? 0));
     }
+
+    // B2：与后端 list_news 同口径——**默认走 keyset**（不传 page 即不 count，
+    // total 为 null，由客户端累计）；显式传 page 才走兼容的 offset 分支。
+    // mock 用「偏移游标」实现 keyset：游标语义与字段形状一致即可，
+    // 这里要验证的是契约，不是 keyset 本身的效率（真后端是真正的 keyset）。
+    const pageParam = url.searchParams.get('page');
+    const cursorParam = url.searchParams.get('cursor');
+    if (pageParam === null && !cursorParam) {
+      const slice = list.slice(0, pageSize);
+      const hasMore = list.length > pageSize;
+      return ok(res, {
+        list: slice.map(listOut),
+        total: null,
+        page: null,
+        pageSize,
+        sort,
+        nextCursor: hasMore ? String(pageSize) : null,
+        hasMore,
+      });
+    }
+    if (cursorParam) {
+      const from = Number(cursorParam) || 0;
+      const slice = list.slice(from, from + pageSize);
+      const hasMore = list.length > from + pageSize;
+      return ok(res, {
+        list: slice.map(listOut),
+        total: null,
+        page: null,
+        pageSize,
+        sort,
+        nextCursor: hasMore ? String(from + pageSize) : null,
+        hasMore,
+      });
+    }
+    const page = Number(pageParam || 1);
     return ok(res, {
-      list: list.slice(0, pageSize).map(listOut),
+      list: list.slice((page - 1) * pageSize, page * pageSize).map(listOut),
       total: list.length,
-      page: Number(url.searchParams.get('page') || 1),
+      page,
+      pageSize,
       sort,
     });
   }

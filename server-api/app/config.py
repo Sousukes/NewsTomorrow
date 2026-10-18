@@ -102,6 +102,13 @@ LOGIN_FAIL_LIMIT = int(_env("LOGIN_FAIL_LIMIT", "5"))
 LOGIN_FAIL_WINDOW_SECONDS = int(_env("LOGIN_FAIL_WINDOW_SECONDS", "900"))
 # Redis 连接串：设置后限流改用 Redis 共享计数（多实例/多 worker 正确）；留空用进程内实现
 REDIS_URL = _env("REDIS_URL")
+# ---- 缓存（B3）----
+# 总开关：缓存是唯一「失效只影响性能」的组件，故留一个能整体关掉的开关
+# （测试环境在 conftest 里钉 false，让用例每次都真算一遍）。
+CACHE_ENABLED = _env("CACHE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+# 频道偏好（for-you 排序）的缓存时长。失效优先于过期：收藏/浏览写入时
+# 会主动删键，所以这个值只兜「用户行为变了但没走写入路径」的漏网情况。
+CHANNEL_PREF_TTL_SECONDS = max(30, int(_env("CHANNEL_PREF_TTL_SECONDS", "300")))
 
 # 种子演示账号
 DEMO_PHONE = _env("DEMO_PHONE", "13800138000")
