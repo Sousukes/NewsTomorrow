@@ -78,6 +78,13 @@ def _headers(client, phone: str, name: str = "用户") -> dict:
     return {"Authorization": f"Bearer {r.json()['data']['token']}"}
 
 
+def _step_up(client, headers: dict) -> dict:
+    """二次校验（C10）：改名端点要求 `X-Step-Up-Token`，测试先换一张。"""
+    r = client.post("/api/auth/step-up", json={"password": PASSWORD}, headers=headers)
+    assert r.status_code == 200, r.text
+    return {**headers, "X-Step-Up-Token": r.json()["data"]["stepUpToken"]}
+
+
 def _admin(client) -> dict:
     return _headers(client, ADMIN_PHONE, "管理员")
 
@@ -114,7 +121,7 @@ def _add_word(
 
 
 def _change(client, headers: dict, name: str):
-    return client.put("/api/me/nickname", json={"name": name}, headers=headers)
+    return client.put("/api/me/nickname", json={"name": name}, headers=_step_up(client, headers))
 
 
 def _code(r) -> int:
@@ -358,6 +365,27 @@ def test_reset_same_name_allowed(client):
     admin = _admin(client)
     # 两次提交各记一行（日志是事件，不是状态）
     assert client.get("/api/admin/nickname-hits", headers=admin).json()["data"]["total"] == 2
+
+
+def test_change_requires_step_up(client):
+    """C10：改名要二次校验。缺令牌 → 403 + 40304（不是 401：会话是好的）。"""
+    h = _headers(client, USER_PHONE)
+    r = client.put("/api/me/nickname", json={"name": "新名字"}, headers=h)
+    assert r.status_code == 403
+    assert r.json()["code"] == 40304
+    # 名字没被改掉
+    me = client.get("/api/me/favorites", headers=h)
+    assert me.status_code == 200
+    # 换取令牌后同一请求即通过（证明不是接口坏了）
+    assert _change(client, h, "新名字").json()["code"] == 0
+
+
+def test_step_up_token_is_single_purpose(client):
+    """C10：step-up 令牌不能当 access 用（类型隔离，与 C1 同款）。"""
+    h = _headers(client, USER_PHONE)
+    su = _step_up(client, h)
+    r = client.get("/api/me/favorites", headers={"Authorization": f"Bearer {su['X-Step-Up-Token']}"})
+    assert r.status_code == 401
 
 
 # ---------------------------------------------------------------- 4. 注册接入

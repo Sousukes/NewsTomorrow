@@ -79,6 +79,7 @@ from ..schemas import (
     WordIn,
     WordUpdateIn,
 )
+from ..step_up import require_step_up
 # ILIKE 转义只保留一份实现：规则虽短，但漏转义 `%` 等于把通配符交给用户输入
 # （既是错误结果，也是潜在的信息收集面），不允许两边各写一遍后悄悄漂移。
 from .news import _escape_like
@@ -351,7 +352,12 @@ def update_source(
 
 @router.delete("/sources/{key}", response_model=None)
 def delete_source(
-    key: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
+    key: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    # C10：删源影响全站抓取（源没了，该渠道的资讯从此断供），不可逆
+    # （要恢复得凭审计快照手工重建），故要求二次校验。
+    step: User = Depends(require_step_up),
 ):
     """删除源。删除后若表空了，下次读取会重新播种内置源。"""
     ensure_seeded(db)  # 同上：避免删除内置源时因尚未播种而 404
@@ -366,7 +372,12 @@ def delete_source(
 
 
 @router.post("/sources/reset", response_model=None)
-def reset_sources(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def reset_sources(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    # C10：重置会丢弃全部自定义源（恢复出厂），同上属不可逆的全局变更。
+    step: User = Depends(require_step_up),
+):
     """重置为内置源：删除库中全部源并重新播种。
 
     用于把运营改坏的配置恢复出厂。会丢弃自定义源，故单独一个端点而非复用删除。
@@ -1515,6 +1526,9 @@ def add_admin_user(
     body: AdminIn,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    # C10：授权管理员是最敏感的操作——一次误操作就是把管理后台交出去，
+    # 且回收要靠另一个人（末位保护只兜「一个都不剩」）。必须二次校验。
+    step: User = Depends(require_step_up),
 ):
     """添加管理员。
 
@@ -1541,7 +1555,11 @@ def add_admin_user(
 
 @router.delete("/users/{phone}", response_model=None)
 def remove_admin_user(
-    phone: str, db: Session = Depends(get_db), user: User = Depends(require_admin)
+    phone: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    # C10：回收管理员同样敏感（把人踢出后台），且与授权一样影响面在「人」而不在数据。
+    step: User = Depends(require_step_up),
 ):
     """移除管理员。
 

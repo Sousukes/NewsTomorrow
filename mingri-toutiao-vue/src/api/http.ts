@@ -110,6 +110,67 @@ export function clearSession(): void {
   setToken('');
   setRefreshToken('');
   setExpiresAt(0);
+  // 二次校验令牌一并清：它绑定在本次会话上，留着等于给下一个用这台设备的人
+  // 留了一张 5 分钟的高敏操作通行证
+  clearStepUpToken();
+}
+
+/* ---------------- 高敏操作二次校验（C10） ---------------- */
+
+/** 40304 = 缺少/无效的二次校验令牌。广播后由全局密码对话框接管 */
+export const STEP_UP_REQUIRED_EVENT = 'mingri:step-up-required';
+export const STEP_UP_REQUIRED_CODE = 40304;
+
+/**
+ * step-up 令牌只存**内存**（不落 localStorage）：刷新页面即失效，需再验一次。
+ * 对高敏操作这是合理的安全姿态——5 分钟的凭证不值得为省一次输入而持久化。
+ */
+let stepUpToken = '';
+let stepUpExpiresAt = 0;
+
+export function setStepUpToken(token: string, expiresIn = 300): void {
+  stepUpToken = token;
+  // `<=0` 一律按「立即过期」处理：朝安全的方向猜，而不是「永不过期」。
+  // 服务端下发的 seconds 理论上总为正，真拿到非正值说明有问题。
+  stepUpExpiresAt = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 1;
+}
+
+export function getStepUpToken(): string {
+  if (!stepUpToken) return '';
+  if (stepUpExpiresAt && Date.now() >= stepUpExpiresAt) {
+    clearStepUpToken();
+    return '';
+  }
+  return stepUpToken;
+}
+
+export function clearStepUpToken(): void {
+  stepUpToken = '';
+  stepUpExpiresAt = 0;
+}
+
+/** 等待中的二次校验请求（通常同一时刻只有一个） */
+let stepUpWaiters: ((granted: boolean) => void)[] = [];
+
+/**
+ * 请求二次校验：弹出全局对话框并等待结果。
+ *
+ * 由 `request()` 在收到 40304 时调用；对话框验证成功后调 `resolveStepUp(true)`，
+ * 取消/失败调 `resolveStepUp(false)`。
+ */
+export function requestStepUp(): Promise<boolean> {
+  if (typeof window === 'undefined') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    stepUpWaiters.push(resolve);
+    window.dispatchEvent(new CustomEvent(STEP_UP_REQUIRED_EVENT));
+  });
+}
+
+/** 对话框侧回调：granted=true 表示拿到了新令牌，等待中的请求会带上它重试 */
+export function resolveStepUp(granted: boolean): void {
+  const waiters = stepUpWaiters;
+  stepUpWaiters = [];
+  waiters.forEach((w) => w(granted));
 }
 
 type QueryValue = string | number | undefined | null;
@@ -218,6 +279,9 @@ async function doFetch(path: string, options: RequestOptions): Promise<Response>
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
+  // 二次校验令牌（C10）：存在且未过期时才带，避免把过期凭证发给服务端
+  const stepUp = getStepUpToken();
+  if (stepUp) headers['X-Step-Up-Token'] = stepUp;
 
   try {
     return await fetch(buildUrl(path, options.query), {
@@ -240,6 +304,8 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   const maxRetries = options.retries ?? (method === 'GET' ? DEFAULT_RETRIES : 0);
   /** 本次请求是否已因 401 续过期：**一次请求最多续一次**，否则会被服务端循环 401 */
   let renewed = false;
+  /** 是否已因 40304 弹过一次二次校验：同款守卫，防弹窗循环 */
+  let stepped = false;
 
   for (let attempt = 0; ; attempt++) {
     // C1：access 短（默认 30 分钟），快到期就先换一张再发，避免无谓的 401 往返
@@ -268,14 +334,24 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
     // 非 2xx：优先透传后端返回的 message（如登录失败提示），兜底用状态码文案
     if (!res.ok) {
-      let message = `请求失败（${res.status}）`;
-      try {
-        const err = (await res.json()) as { message?: string } | null;
-        if (err?.message) message = err.message;
-      } catch {
-        /* 响应体非 JSON 时沿用兜底文案 */
+      // 错误体只解析一次：40304 的判定与 message 透传都要用它，
+      // 用 `res.clone()` 解析两次既浪费，也会让测试替身必须实现 clone
+      const errBody = (await res.json().catch(() => null)) as {
+        code?: number;
+        message?: string;
+      } | null;
+
+      // C10：高敏操作缺二次校验 → 弹全局密码对话框，拿到令牌后重试一次。
+      // 与 401 续期同款守卫：一次请求最多弹一次，否则「验证成功但仍被拒」
+      // 会变成弹窗循环。
+      if (res.status === 403 && errBody?.code === STEP_UP_REQUIRED_CODE && !stepped) {
+        if (await requestStepUp()) {
+          stepped = true;
+          continue;
+        }
       }
-      throw new ApiError(message, res.status);
+
+      throw new ApiError(errBody?.message ?? `请求失败（${res.status}）`, res.status);
     }
 
     const body = (await res.json().catch(() => null)) as unknown;

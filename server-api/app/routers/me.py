@@ -31,6 +31,7 @@ from ..nickname_moderation import (
 from ..ranking import bump_hot_score, recompute_hot_scores
 from ..response import ok
 from ..schemas import MarkBulkIn, MarkIn, NicknameUpdateIn
+from ..step_up import require_step_up
 from .news import to_out as news_to_out
 
 router = APIRouter(prefix="/api/me", tags=["me"])
@@ -269,6 +270,9 @@ def update_nickname(
     body: NicknameUpdateIn,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    # C10：改名是用户侧唯一改身份的操作，且会触发/清除人工复核状态——
+    # 令牌被偷时最容易被拿去「顶着受害者名字说话」，故要求二次校验。
+    step: User = Depends(require_step_up),
 ):
     """修改昵称：形状校验 → 敏感词校验 → 保存。
 

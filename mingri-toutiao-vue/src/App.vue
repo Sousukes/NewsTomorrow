@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import PhoneFrame from '@/components/PhoneFrame.vue';
 import TabBar from '@/components/TabBar.vue';
 import ErrorBoundary from '@/components/ErrorBoundary.vue';
+import StepUpDialog from '@/components/StepUpDialog.vue';
 import Showcase from '@/views/Showcase.vue';
 import { useMessagesStore } from '@/stores/messages';
 import { useUserStore } from '@/stores/user';
@@ -86,6 +87,8 @@ function onTab(key: string) {
             :badges="badges"
             @update:active="onTab"
           />
+          <!-- 高敏操作二次校验（C10）：由 40304 全局触发，与具体页面解耦 -->
+          <StepUpDialog />
         </div>
       </PhoneFrame>
       <ErrorBoundary title="组件库陈列出了点问题">

@@ -23,7 +23,7 @@ from ..nickname_moderation import (
     validate_nickname_shape,
 )
 from ..response import ok
-from ..schemas import LoginIn, RefreshIn, RegisterIn, TokenOut
+from ..schemas import LoginIn, RefreshIn, RegisterIn, StepUpIn, TokenOut
 from ..security import (
     TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_REFRESH,
@@ -32,6 +32,7 @@ from ..security import (
     hash_password,
     verify_password,
 )
+from ..step_up import issue_step_up_token
 from .admin import is_admin
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -180,6 +181,39 @@ def _user_from_refresh_token(token: str, db: Session) -> User | None:
     if user is None or (user.token_version or 0) != token_version:
         return None
     return user
+
+
+@router.post("/step-up", response_model=None)
+def step_up(
+    body: StepUpIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """高敏操作二次校验（C10）：验密码 → 换一张 5 分钟的 step-up 令牌。
+
+    前置是**已登录**（access 有效）：身份由令牌给出，body 里不再收手机号——
+    否则这个端点就成了「可指定账号的登录端点」，猜密码的人顺带获得账号枚举。
+
+    复用登录的账号维度锁定（scope=`stepup`）：二次校验若不做防爆破，
+    它本身就是密码 oracle——猜对一次即可删源 / 授权管理员。
+    """
+    locked = lock_detail(user.phone, scope="stepup")
+    if locked is not None:
+        logger.warning("二次校验锁定生效 phone=%s", user.phone)
+        raise HTTPException(
+            status_code=429,
+            detail={"code": 42902, "message": locked["message"]},
+            headers={"Retry-After": str(locked["retry_after"])},
+        )
+    if not verify_password(body.password, user.password_hash):
+        if record_failure(user.phone, scope="stepup"):
+            logger.warning("二次校验失败达上限，账号进入锁定 phone=%s", user.phone)
+        # 与登录同文案：不提示「密码错」以外的任何信息
+        raise HTTPException(
+            status_code=401, detail={"code": 40101, "message": "手机号或密码错误，请重新输入"}
+        )
+    record_success(user.phone, scope="stepup")
+    return ok(issue_step_up_token(user), message="二次校验通过")
 
 
 @router.post("/refresh", response_model=None)

@@ -7,7 +7,8 @@
  * 覆盖：资讯列表/详情/排序、搜索与热搜、登录、评论（含二级评论：回复结构 /
  * 正序分页 / 预览 / 删除语境）、点赞、收藏历史、RSS 源管理、管理员白名单、
  * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）、
- * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）、令牌双轨与续期（P1-38/C1）。
+ * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）、令牌双轨与续期（P1-38/C1）、
+ * 高敏操作二次校验（P1-40/C10）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -15,10 +16,29 @@ const BASE = process.env.API_BASE || 'http://127.0.0.1:8000/api';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * C10 受护端点：请求自动带上 step-up 头（与前端 `api/http.ts` 同一套行为——
+ * 客户端不该在每个调用点手工决定"这次要不要二次校验"）。
+ * 需要**故意**验证 40304 的用例传 `stepUp: false` 退出。
+ */
+const STEP_UP_PATTERNS = [
+  /^\/me\/nickname$/,
+  /^\/admin\/users(\/|$)/,
+  /^\/admin\/sources\/[^/]+$/,
+  /^\/admin\/sources\/reset$/,
+];
+
+/** 登录后由 step-up 流程填充（模块级：`request()` 在任何作用域都能读到） */
+let suHeaders = {};
+
 /* ---- 复刻 api/http.ts 的 request() ---- */
-async function request(path, { method = 'GET', body, token } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
+async function request(path, { method = 'GET', body, token, headers: extra = {}, stepUp } = {}) {
+  const headers = { 'Content-Type': 'application/json', ...extra };
   if (token) headers.Authorization = `Bearer ${token}`;
+  const guarded = stepUp ?? STEP_UP_PATTERNS.some((re) => re.test(path));
+  if (guarded && suHeaders['X-Step-Up-Token']) {
+    headers['X-Step-Up-Token'] = suHeaders['X-Step-Up-Token'];
+  }
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -186,6 +206,37 @@ const run = async () => {
       '换发后的 access 可用（是 access 而非 refresh）',
       Array.isArray(renewedMe.ids) && Array.isArray(renewedMe.list),
     );
+
+    // 7) 高敏操作二次校验（C10）：缺令牌 40304，换发后放行
+    let stepUpRequired = false;
+    try {
+      // stepUp: false —— 这一条就是要验证「没带令牌会被拦」
+      await request('/me/nickname', {
+        method: 'PUT',
+        body: { name: '契约校验昵称' },
+        token,
+        stepUp: false,
+      });
+    } catch (e) {
+      stepUpRequired = e.message === '此操作需要二次校验，请先验证身份';
+    }
+    check('改名缺二次校验令牌 → 40304', stepUpRequired);
+
+    const stepUp = await request('/auth/step-up', {
+      method: 'POST',
+      body: { password },
+      token,
+    });
+    check('二次校验换取 step-up 令牌', !!stepUp.stepUpToken && stepUp.expiresIn > 0);
+    suHeaders = { 'X-Step-Up-Token': stepUp.stepUpToken };
+
+    const nicknamed = await request('/me/nickname', {
+      method: 'PUT',
+      body: { name: '契约校验昵称' },
+      token,
+      headers: suHeaders,
+    });
+    check('带 step-up 令牌可改名', nicknamed.result !== undefined);
   }
 
   // 5) 鉴权：无 token 发评论应被拒
@@ -411,7 +462,11 @@ const run = async () => {
     check('PATCH 局部更新（未传字段不清空）', patched.weight === 5 && patched.enabled === false);
     check('PATCH 未传的 url 保持不变', patched.url === 'https://example.com/c.xml');
 
-    const removedSrc = await request(`/admin/sources/${tmpKey}`, { method: 'DELETE', token });
+    const removedSrc = await request(`/admin/sources/${tmpKey}`, {
+      method: 'DELETE',
+      token,
+      headers: suHeaders,
+    });
     check('DELETE /admin/sources/:key 删除成功', removedSrc.key === tmpKey);
 
     let blockedScheme = false;
@@ -459,7 +514,11 @@ const run = async () => {
     const tmpAdmin = '13912345678';
     // 清理上次异常退出可能留下的残留（失败无妨——env 非空时删除本就允许）
     try {
-      await request(`/admin/users/${tmpAdmin}`, { method: 'DELETE', token });
+      await request(`/admin/users/${tmpAdmin}`, {
+        method: 'DELETE',
+        token,
+        headers: suHeaders,
+      });
     } catch {
       /* ignore */
     }
@@ -467,6 +526,7 @@ const run = async () => {
     const added = await request('/admin/users', {
       method: 'POST',
       token,
+      headers: suHeaders,
       body: { phone: tmpAdmin, note: '契约临时管理员' },
     });
     check(
@@ -477,7 +537,12 @@ const run = async () => {
 
     let dupBlocked = false;
     try {
-      await request('/admin/users', { method: 'POST', token, body: { phone: tmpAdmin } });
+      await request('/admin/users', {
+        method: 'POST',
+        token,
+        headers: suHeaders,
+        body: { phone: tmpAdmin },
+      });
     } catch {
       dupBlocked = true;
     }
@@ -486,7 +551,7 @@ const run = async () => {
     // 当前账号自身就在白名单里（CHECK_ADMIN 的前提），再添加自己应被拒
     let selfBlocked = false;
     try {
-      await request('/admin/users', { method: 'POST', token, body: { phone } });
+      await request('/admin/users', { method: 'POST', token, headers: suHeaders, body: { phone } });
     } catch {
       selfBlocked = true;
     }
@@ -506,12 +571,20 @@ const run = async () => {
       (afterAdd.list ?? []).some((a) => a.phone === tmpAdmin),
     );
 
-    const removed = await request(`/admin/users/${tmpAdmin}`, { method: 'DELETE', token });
+    const removed = await request(`/admin/users/${tmpAdmin}`, {
+      method: 'DELETE',
+      token,
+      headers: suHeaders,
+    });
     check('DELETE /admin/users/:phone 移除成功', removed.phone === tmpAdmin);
 
     let removeMissing = false;
     try {
-      await request(`/admin/users/${tmpAdmin}`, { method: 'DELETE', token });
+      await request(`/admin/users/${tmpAdmin}`, {
+        method: 'DELETE',
+        token,
+        headers: suHeaders,
+      });
     } catch {
       removeMissing = true;
     }
@@ -523,7 +596,10 @@ const run = async () => {
   if (process.env.CHECK_ADMIN === '1' && token) {
     const auditKey = '__contract_audit';
     try {
-      await request(`/admin/sources/${auditKey}`, { method: 'DELETE', token });
+      // C10：清理也走受护端点，**必须**带 step-up 头。少了它，这个 DELETE 会被
+      // 40304 挡下，而下面的 `catch { ignore }` 会把失败吞掉——症状是紧接着的
+      // POST 报「该源标识已存在」，与真正的原因隔着两层。
+      await request(`/admin/sources/${auditKey}`, { method: 'DELETE', token, headers: suHeaders });
     } catch {
       /* ignore：本就不存在 */
     }
@@ -576,7 +652,7 @@ const run = async () => {
     );
 
     // 收尾
-    await request(`/admin/sources/${auditKey}`, { method: 'DELETE', token });
+    await request(`/admin/sources/${auditKey}`, { method: 'DELETE', token, headers: suHeaders });
     const afterDelete = await request(`/admin/audit?target=${auditKey}`, { token });
     const acts2 = (afterDelete.list ?? []).map((a) => a.action);
     check('删除源留痕（source.delete）', acts2.includes('source.delete'));

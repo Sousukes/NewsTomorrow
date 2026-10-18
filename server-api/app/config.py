@@ -62,6 +62,9 @@ JWT_REFRESH_EXPIRE_MINUTES = max(
     1,
     int(_env("JWT_REFRESH_EXPIRE_MINUTES", _env("JWT_EXPIRE_MINUTES", str(60 * 24 * 7)))),
 )
+# 高敏操作二次校验令牌（C10）：换取后 5 分钟内可执行受限操作。
+# 刻意很短——它存在的意义是「证明此刻坐在屏幕前的是本人」，不是一张长期通行证。
+STEP_UP_TOKEN_MINUTES = max(1, int(_env("STEP_UP_TOKEN_MINUTES", "5")))
 
 # CORS：开发默认放开；生产默认同源（不跨域），需显式配置 CORS_ORIGINS
 CORS_ORIGINS: list[str] = [o.strip() for o in _env("CORS_ORIGINS").split(",") if o.strip()] or (

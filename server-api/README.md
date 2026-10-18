@@ -254,6 +254,49 @@ psql -c "select pid, state, application_name from pg_stat_activity where applica
 （`token` / `refresh-token` / `token-exp`）、到期前 60 秒主动续期（并发单飞）、
 401 时先续期重试一次、仍失败才清登录态。
 
+## 高敏操作二次校验（C10）
+
+**问题**：会话令牌被偷（XSS / 共享设备 / 日志泄露）后，攻击者拿到的不是
+「只读权限」，而是**与本人同等的能力**——包括把管理后台交出去、删掉 RSS 源、
+顶着别人的名字说话。这些操作的共同点是**不可逆或影响全局**。
+
+**机制**（`app/step_up.py`）：
+
+```
+POST /api/auth/step-up   { password }        →  { stepUpToken, expiresIn }
+受护端点                   + X-Step-Up-Token   →  放行 / 40304
+```
+
+- **前置是已登录**（access 有效）：身份由令牌给出，body 里**不收手机号**——
+  否则这个端点就成了「可指定账号的登录端点」，猜密码的人顺带获得账号枚举。
+- **复用登录的账号维度锁定**（`login_guard`，scope=`stepup`）：二次校验若不做
+  防爆破，它本身就是密码 oracle——猜对一次即可删源。scope 隔离让「二次校验
+  失败」不会把用户的登录也锁掉（两件事），但阈值/窗口共用一套配置。
+- **复用 JWT 类型校验**（`typ=stepup`）：与 access/refresh 同源签发，三者互不
+  通用；有效期按类型取默认（5 分钟）。
+- **复用 `token_version` 吊销**：登出即自增版本号，step-up 令牌同时失效。
+- **403 / 40304 而非 401**：401 在本项目代表「会话失效」（前端会清登录态跳
+  登录页），而这里用户的登录态是好的，只是缺一张二次校验令牌。
+
+**覆盖范围**（按「不可逆或影响全局」这条线划定）：
+
+| 端点 | 为什么算高敏 |
+| --- | --- |
+| `PUT /me/nickname` | 用户侧唯一改身份的操作，且影响人工复核状态 |
+| `POST /api/admin/users` | 授权管理员：一次误操作 = 把管理后台交出去 |
+| `DELETE /api/admin/users/{phone}` | 回收管理员：影响面在「人」不在数据 |
+| `DELETE /api/admin/sources/{key}` | 影响全站抓取，恢复要靠审计快照手工重建 |
+| `POST /api/admin/sources/reset` | 丢弃全部自定义源，恢复出厂 |
+
+**未覆盖的及理由**：内容治理类（资讯/评论的 hide/restore/review、词库增删）
+**可逆且有审计日志**（`admin_audit_logs`）——检测能力已具备，预防的边际收益
+低于「每个页面都要加弹窗」的成本。机制就绪后，纳入一个端点只是加一个
+`Depends(require_step_up)`。
+
+**顺序是有意的**：管理端点同时声明 `require_admin`（在前）与 `require_step_up`
+（在后），未授权者拿到的是 **40301**（权限不足）而不是 40304——不向外透露
+站内有哪类操作需要二次校验。
+
 ## 管理端鉴权（router 级，C6）
 
 管理端鉴权**不在端点函数体里**，而是挂在 router 上：

@@ -67,6 +67,13 @@ def _admin(client) -> dict:
     return {"Authorization": f"Bearer {r.json()['data']['token']}"}
 
 
+def _step_up(client, headers: dict) -> dict:
+    """二次校验（C10）：删源 / 重置 / 管理员增删都要求 `X-Step-Up-Token`。"""
+    r = client.post("/api/auth/step-up", json={"password": "abc123"}, headers=headers)
+    assert r.status_code == 200, r.text
+    return {**headers, "X-Step-Up-Token": r.json()["data"]["stepUpToken"]}
+
+
 def _user(client, phone: str) -> dict:
     client.post("/api/auth/register", json={"phone": phone, "password": "abc123", "name": "路人"})
     r = client.post("/api/auth/login", json={"phone": phone, "password": "abc123"})
@@ -421,13 +428,13 @@ class TestAdminSources:
         assert r.status_code == 404
 
     def test_delete(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         assert client.delete("/api/admin/sources/aihot_picks", headers=h).json()["code"] == 0
         with SessionLocal() as db:
             assert db.get(RssSource, "aihot_picks") is None
 
     def test_delete_missing_is_404(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         assert client.delete("/api/admin/sources/nope", headers=h).status_code == 404
 
     def test_reset_restores_builtins(self, client):
@@ -437,7 +444,7 @@ class TestAdminSources:
         client.post("/api/admin/sources", headers=h,
                     json={"key": "temp", "name": "T", "channel": "tech",
                           "url": "https://example.com/t.xml"})
-        r = client.post("/api/admin/sources/reset", headers=h)
+        r = client.post("/api/admin/sources/reset", headers=_step_up(client, h))
         assert r.json()["code"] == 0
         with SessionLocal() as db:
             assert db.get(RssSource, "temp") is None
@@ -480,7 +487,7 @@ class TestAdminWhitelist:
 
     def test_add_admin_grants_access_via_db(self, client):
         """核心链路：env 管理员把新号加入库白名单 → 该号登录即 isAdmin。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         r = client.post(
             "/api/admin/users", headers=h, json={"phone": "13900000002", "note": "运营-小红"}
         )
@@ -499,7 +506,7 @@ class TestAdminWhitelist:
         assert client.get("/api/admin/users", headers=h2).status_code == 200
 
     def test_add_duplicate_is_409(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         body = {"phone": "13900000003"}
         assert client.post("/api/admin/users", headers=h, json=body).json()["code"] == 0
         r = client.post("/api/admin/users", headers=h, json=body)
@@ -509,14 +516,14 @@ class TestAdminWhitelist:
 
     def test_add_env_admin_phone_is_409(self, client):
         """env 里的号码不能再入库——重复记录在界面上管不了其实也无需管。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         r = client.post("/api/admin/users", headers=h, json={"phone": ADMIN_PHONE})
         assert r.status_code == 409
         assert r.json()["code"] == 40903
 
     def test_invalid_phone_is_422(self, client):
         """手机号形态必须与注册同源，否则会出现「加得进但永远注册不了」的幽灵账号。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         r = client.post("/api/admin/users", headers=h, json={"phone": "12345"})
         assert r.status_code == 422
         body = r.json()
@@ -524,7 +531,7 @@ class TestAdminWhitelist:
         assert isinstance(body["data"]["errors"], list)
 
     def test_registered_flag_flips_after_register(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/users", headers=h, json={"phone": "13900000004"})
         data = client.get("/api/admin/users", headers=h).json()["data"]
         assert data["list"][0]["registered"] is False
@@ -535,7 +542,7 @@ class TestAdminWhitelist:
         assert row["name"] == "路人"  # enriched 用户名，供界面展示
 
     def test_remove_admin(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/users", headers=h, json={"phone": "13900000005"})
         r = client.delete("/api/admin/users/13900000005", headers=h)
         assert r.json()["code"] == 0
@@ -549,7 +556,7 @@ class TestAdminWhitelist:
         assert rr.json()["data"]["user"]["isAdmin"] is False
 
     def test_remove_missing_is_404(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         r = client.delete("/api/admin/users/13900000006", headers=h)
         assert r.status_code == 404
         assert r.json()["code"] == 40403
@@ -561,14 +568,14 @@ class TestAdminWhitelist:
         """
         _user(client, "13900000007")
         h = _admin(client)  # env 管理员（fixture 默认）把新号加入库
-        client.post("/api/admin/users", headers=h, json={"phone": "13900000007"})
+        client.post("/api/admin/users", headers=_step_up(client, h), json={"phone": "13900000007"})
         # env 清空后，唯一的管理员来源就是库中这一条
         monkeypatch.setattr(admin_mod, "ADMIN_PHONES", [])
         login = client.post(
             "/api/auth/login", json={"phone": "13900000007", "password": "abc123"}
         ).json()
         h2 = {"Authorization": f"Bearer {login['data']['token']}"}
-        r = client.delete("/api/admin/users/13900000007", headers=h2)
+        r = client.delete("/api/admin/users/13900000007", headers=_step_up(client, h2))
         assert r.status_code == 409
         assert r.json()["code"] == 40904
         with SessionLocal() as db:
@@ -576,14 +583,14 @@ class TestAdminWhitelist:
 
     def test_can_remove_last_db_admin_when_env_present(self, client):
         """对照面：env 仍有管理员时，库中最后一条可移除（env 是 break-glass）。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/users", headers=h, json={"phone": "13900000008"})
         r = client.delete("/api/admin/users/13900000008", headers=h)
         assert r.json()["code"] == 0
 
     def test_db_admin_can_manage_whitelist(self, client):
         """DB 来源的管理员拥有完整管理权（能加能撤），不只是个标志位。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/users", headers=h, json={"phone": "13900000009"})
         _user(client, "13900000009")
         login = client.post(
@@ -591,11 +598,13 @@ class TestAdminWhitelist:
         ).json()
         h2 = {"Authorization": f"Bearer {login['data']['token']}"}
         # DB 管理员添加第三位
-        r = client.post("/api/admin/users", headers=h2, json={"phone": "13900000010"})
+        r = client.post("/api/admin/users", headers=_step_up(client, h2), json={"phone": "13900000010"})
         assert r.json()["code"] == 0
         assert r.json()["data"]["addedBy"] == "13900000009"
         # 并移除他
-        assert client.delete("/api/admin/users/13900000010", headers=h2).json()["code"] == 0
+        assert client.delete(
+            "/api/admin/users/13900000010", headers=_step_up(client, h2)
+        ).json()["code"] == 0
 
 
 # ------------------------------------------------- 管理能力标志（前端入口用）
@@ -642,7 +651,7 @@ class TestAdminFlagInAuthPayload:
 
     def test_flag_true_for_db_whitelisted_phone(self, client):
         """P1-14：库白名单（非 env）中的号码，登录/续期同样下发 isAdmin。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/users", headers=h, json={"phone": "13900000011"})
         _user(client, "13900000011")
         r = client.post(

@@ -44,6 +44,16 @@ class RefreshIn(BaseModel):
     refreshToken: str = ""
 
 
+class StepUpIn(BaseModel):
+    """二次校验入参（C10）：只带密码，用户身份取自 `Authorization` 里的 access。
+
+    刻意**不**收手机号：那是把二次校验变成登录端点——猜密码的人可以指定
+    任意账号，成了账号枚举 + 爆破的二合一入口。已登录的人不需要再报自己是谁。
+    """
+
+    password: str = Field(min_length=1)
+
+
 class CommentCreateIn(BaseModel):
     content: str = Field(min_length=1, max_length=500)
     # 回复某条评论时传其 id；不传表示发表主评论。

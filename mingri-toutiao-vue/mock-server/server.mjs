@@ -1190,6 +1190,25 @@ function issueTokenPair(phone) {
 }
 
 /**
+ * 高敏操作二次校验（C10）：step-up 令牌 → phone。
+ * 同样与 access **分表**存放（`auth()` 不认它，业务接口天然拒收）。
+ */
+const stepUpTokens = new Map();
+/** 二次校验失败计数（按手机号）：与后端 login_guard 的 stepup scope 同阈值 */
+const stepUpFails = new Map();
+
+/** 校验 `X-Step-Up-Token`；缺失/无效一律 40304（与后端 step_up.require_step_up 同口径） */
+function requireStepUp(req, res) {
+  const header = req.headers['x-step-up-token'] || '';
+  const phone = stepUpTokens.get(String(header))?.phone;
+  if (!phone) {
+    fail(res, 403, 40304, '此操作需要二次校验，请先验证身份');
+    return null;
+  }
+  return phone;
+}
+
+/**
  * 收藏 / 浏览历史（按手机号隔离，进程内存储）。
  * 与真实后端一致：服务端为唯一事实源，写操作返回完整集合 { ids, list }。
  */
@@ -1736,6 +1755,27 @@ const server = createServer(async (req, res) => {
     });
   }
 
+  // POST /auth/step-up（C10）：已登录 + 密码 → 5 分钟的 step-up 令牌
+  if (head === 'auth' && a === 'step-up' && method === 'POST') {
+    const t = auth(req);
+    const phone = t ? (tokens.get(t)?.phone ?? null) : null;
+    if (!phone) return fail(res, 401, 40100, '未登录或登录已过期');
+    const body = await readBody(req);
+    const fails = (stepUpFails.get(phone) ?? 0) + 1;
+    // 演示口令与登录一致（mock 只有一套口令）；失败计数同后端：5 次即锁
+    if (String(body.password ?? '') !== '123456') {
+      stepUpFails.set(phone, fails);
+      if (fails >= 5) {
+        return fail(res, 429, 42902, '二次校验失败次数过多，请约 15 分钟后再试');
+      }
+      return fail(res, 401, 40101, '手机号或密码错误，请重新输入');
+    }
+    stepUpFails.delete(phone);
+    const stepUpToken = `su_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    stepUpTokens.set(stepUpToken, { phone });
+    return ok(res, { stepUpToken, expiresIn: 300 }, '二次校验通过');
+  }
+
   // POST /auth/logout
   if (head === 'auth' && a === 'logout' && method === 'POST') {
     const t = requireAuth(req, res);
@@ -1745,6 +1785,10 @@ const server = createServer(async (req, res) => {
     // 吊销必须**两类同时**：只删 access、留下 refresh，等于登出后仍能换发令牌
     for (const [rt, rec] of refreshTokens) {
       if (rec.phone === phone) refreshTokens.delete(rt);
+    }
+    // C10：step-up 令牌同样作废（否则登出后还留着一张 5 分钟高敏通行证）
+    for (const [su, rec] of stepUpTokens) {
+      if (rec.phone === phone) stepUpTokens.delete(su);
     }
     return ok(res, null);
   }
@@ -2033,6 +2077,9 @@ const server = createServer(async (req, res) => {
   if (head === 'me' && a === 'nickname' && !b && method === 'PUT') {
     const t = requireAuth(req, res);
     if (!t) return;
+    // C10：改名是用户侧唯一改身份的操作，需二次校验（与后端同序：先登录态，
+    // 再二次校验——顺序反了会把「未登录」暴露成 40304）
+    if (!requireStepUp(req, res)) return;
     const account = accountOf(tokens.get(t)?.phone ?? 'unknown');
     const body = await readBody(req);
     const clean = String(body.name ?? '').trim();
@@ -2075,6 +2122,8 @@ const server = createServer(async (req, res) => {
   if (head === 'admin' && a === 'sources' && b === 'reset' && method === 'POST') {
     const operator = requireAdmin(req, res);
     if (!operator) return;
+    // C10：重置丢弃全部自定义源，不可逆，需二次校验
+    if (!requireStepUp(req, res)) return;
     sources = freshSources();
     audit(operator, 'source.reset', '', { seeded: sources.length });
     return ok(res, { seeded: sources.length });
@@ -2184,6 +2233,8 @@ const server = createServer(async (req, res) => {
   if (head === 'admin' && a === 'sources' && b && method === 'DELETE') {
     const operator = requireAdmin(req, res);
     if (!operator) return;
+    // C10：删源影响全站抓取且不可逆，需二次校验
+    if (!requireStepUp(req, res)) return;
     const i = sources.findIndex((s) => s.key === b);
     if (i < 0) return fail(res, 404, 40402, '源不存在');
     // 快照必须在 splice 之前取：删完就没了
@@ -3023,6 +3074,8 @@ const server = createServer(async (req, res) => {
   if (head === 'admin' && a === 'users' && !b && method === 'POST') {
     const operator = requireAdmin(req, res);
     if (!operator) return;
+    // C10：授权管理员最敏感（一次误操作 = 把管理后台交出去），需二次校验
+    if (!requireStepUp(req, res)) return;
     const body = await readBody(req);
     const phone = String(body.phone ?? '');
     if (!/^1\d{10}$/.test(phone)) {
@@ -3047,6 +3100,8 @@ const server = createServer(async (req, res) => {
   if (head === 'admin' && a === 'users' && b && method === 'DELETE') {
     const operator = requireAdmin(req, res);
     if (!operator) return;
+    // C10：回收管理员同样敏感，需二次校验
+    if (!requireStepUp(req, res)) return;
     if (!adminWhitelist.has(b)) return fail(res, 404, 40403, '管理员不存在');
     // 末位保护与后端一致：env 为空且库中仅剩这一条时拒绝
     if (adminWhitelist.size - 1 <= 0 && ADMIN_PHONES.length === 0) {

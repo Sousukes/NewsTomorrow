@@ -588,6 +588,28 @@ npm run contract-check  # 前后端契约检查（需后端已启动）
 
 后端那半（`/api/*` 的 `default-src 'none'`）见 `server-api/README.md`。
 
+## 高敏操作二次校验（C10）
+
+改昵称、删/重置 RSS 源、管理员增删这类**不可逆或影响全局**的操作，要求
+「再证明一次你是本人」——会话令牌被偷时，攻击者拿到的是与本人同等的能力。
+
+**流程**（`src/api/http.ts` + `src/stores/stepUp.ts` + `src/components/StepUpDialog.vue`）：
+
+1. 请求撞上 **40304** → `http.ts` 广播 `STEP_UP_REQUIRED_EVENT` 并挂起；
+2. 全局对话框（挂在 App 根部）弹出，用户输密码 → `POST /auth/step-up`；
+3. 成功 → 令牌存**内存**（5 分钟，刷新页面即失效）→ 原请求带 `X-Step-Up-Token`
+   重试一次；失败/取消 → 按原错误抛出。
+
+三处刻意的设计：
+- **一次请求最多弹一次**：与 401 续期同款守卫，否则「验证成功但仍被拒」
+  会变成弹窗循环；
+- **令牌只存内存、不落 localStorage**：5 分钟的高敏凭证不值得为省一次输入
+  而持久化；`clearSession()`（登出/401 兜底）会一并清掉它；
+- **请求层不碰 UI**：`http.ts` 只广播事件并等待，弹窗与验证在 store/组件里——
+  否则无视图的请求层会被迫依赖组件。
+
+后端那半（端点清单、账号维度锁定、40304 而非 401 的理由）见 `server-api/README.md`。
+
 ## 后端联调
 
 项目配套后端在 `../server-api/`（**FastAPI + SQLite + JWT**）。两种后端形态均可用：

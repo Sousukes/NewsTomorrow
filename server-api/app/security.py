@@ -13,6 +13,7 @@ from .config import (
     JWT_ALG,
     JWT_REFRESH_EXPIRE_MINUTES,
     JWT_SECRET,
+    STEP_UP_TOKEN_MINUTES,
 )
 
 _PBKDF2_ROUNDS = 120_000
@@ -22,6 +23,18 @@ _PBKDF2_ROUNDS = 120_000
 # 「短 access」就完全失去意义。
 TOKEN_TYPE_ACCESS = "access"
 TOKEN_TYPE_REFRESH = "refresh"
+# C10：step-up 令牌只用于「高敏操作二次校验」，5 分钟，且与 access 同源签发
+# （同 `ver`），故登出/吊销对它同样有效。
+TOKEN_TYPE_STEP_UP = "stepup"
+
+#: 各类型的默认有效期（秒级换算在签发处做）。显式传 `expires_minutes` 优先，
+# 但**不传时必须按类型取**——默认成 access 的时长会让 refresh/step-up 被
+# 静默签成短命令牌（见 C1 的教训）。
+_DEFAULT_MINUTES = {
+    TOKEN_TYPE_ACCESS: JWT_ACCESS_EXPIRE_MINUTES,
+    TOKEN_TYPE_REFRESH: JWT_REFRESH_EXPIRE_MINUTES,
+    TOKEN_TYPE_STEP_UP: STEP_UP_TOKEN_MINUTES,
+}
 
 
 def hash_password(password: str) -> str:
@@ -62,10 +75,8 @@ def create_token(
     # 这类"默认值陷阱"只有断言有效期能暴露。
     if expires_minutes is not None:
         minutes = expires_minutes
-    elif token_type == TOKEN_TYPE_REFRESH:
-        minutes = JWT_REFRESH_EXPIRE_MINUTES
     else:
-        minutes = JWT_ACCESS_EXPIRE_MINUTES
+        minutes = _DEFAULT_MINUTES.get(token_type, JWT_ACCESS_EXPIRE_MINUTES)
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),

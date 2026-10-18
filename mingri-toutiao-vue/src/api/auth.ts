@@ -1,4 +1,4 @@
-import { clearSession, mockDelay, request, setSession } from './http';
+import { clearSession, mockDelay, request, setSession, setStepUpToken } from './http';
 import { USE_MOCK } from './config';
 
 export interface LoginParams {
@@ -56,4 +56,20 @@ export async function logout(): Promise<void> {
     // 即使请求失败也要清本地：服务端吊销失败不能留下一张可用的长令牌
     clearSession();
   }
+}
+
+/**
+ * POST /auth/step-up —— 高敏操作二次校验（C10）。
+ *
+ * 验通过后由 `http.ts` 保管 5 分钟；期间高敏请求自动带 `X-Step-Up-Token`。
+ * 失败会抛错（40101 密码错 / 42902 连续失败被锁），由对话框展示。
+ */
+export async function stepUp(password: string): Promise<boolean> {
+  const data = await request<{ stepUpToken: string; expiresIn: number }>('/auth/step-up', {
+    method: 'POST',
+    body: { password },
+  });
+  if (!data?.stepUpToken) return false;
+  setStepUpToken(data.stepUpToken, data.expiresIn);
+  return true;
 }

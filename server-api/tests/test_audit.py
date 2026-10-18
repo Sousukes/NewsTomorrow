@@ -48,6 +48,13 @@ def _admin(client) -> dict:
     return {"Authorization": f"Bearer {r.json()['data']['token']}"}
 
 
+def _step_up(client, headers: dict) -> dict:
+    """二次校验（C10）：删源 / 重置 / 管理员增删都要求 `X-Step-Up-Token`。"""
+    r = client.post("/api/auth/step-up", json={"password": "abc123"}, headers=headers)
+    assert r.status_code == 200, r.text
+    return {**headers, "X-Step-Up-Token": r.json()["data"]["stepUpToken"]}
+
+
 def _user(client, phone: str) -> dict:
     client.post("/api/auth/register", json={"phone": phone, "password": "abc123", "name": "路人"})
     r = client.post("/api/auth/login", json={"phone": phone, "password": "abc123"})
@@ -118,7 +125,7 @@ class TestAuditRecords:
 
     def test_delete_keeps_snapshot(self, client):
         """删除后行就没了，快照必须在删之前取——否则事后无从知道删掉的是什么。"""
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         _add_source(client, h, "audit_src")
         client.delete("/api/admin/sources/audit_src", headers=h)
         top = client.get("/api/admin/audit", headers=h).json()["data"]["list"][0]
@@ -126,7 +133,7 @@ class TestAuditRecords:
         assert top["detail"]["snapshot"]["name"] == "自定义源"
 
     def test_reset_recorded(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/sources/reset", headers=h)
         top = client.get("/api/admin/audit", headers=h).json()["data"]["list"][0]
         assert top["action"] == "source.reset"
@@ -134,7 +141,7 @@ class TestAuditRecords:
         assert top["detail"]["seeded"] > 0
 
     def test_admin_add_and_remove_recorded(self, client):
-        h = _admin(client)
+        h = _step_up(client, _admin(client))
         client.post("/api/admin/users", headers=h, json={"phone": "13900000002", "note": "运营-小红"})
         client.delete("/api/admin/users/13900000002", headers=h)
         actions = [a["action"] for a in client.get("/api/admin/audit", headers=h).json()["data"]["list"]]
