@@ -72,10 +72,10 @@ export default defineConfig(({ mode }) => {
         reporter: ['text-summary', 'json-summary'],
         reportsDirectory: 'coverage',
         thresholds: {
-          statements: 70,
-          branches: 64,
+          statements: 72,
+          branches: 65,
           functions: 60,
-          lines: 73,
+          lines: 75,
         },
       },
     },
