@@ -271,15 +271,23 @@ def channel_boost_expr(weights: dict[str, float]):
     return case(*whens, else_=0.0)
 
 
-def rank_key(sort: str, weights: dict[str, float] | None = None):
+def rank_key(sort: str, weights: dict[str, float] | None = None, penalty: set[str] | None = None):
     """排序键表达式（越大越靠前）。
 
     - latest：不用分值，返回 None（调用方用 published_at 排序）
     - hot：hot_score
-    - for-you：hot_score + 频道偏好加分
+    - for-you：(hot_score + 频道偏好加分) × 来源负反馈衰减
+
+    `penalty`（E3）是被用户「减少该来源」过的来源集合。**乘在整体外面**而不是
+    从加分里扣：扣加分只削弱偏好增益，衰减把该来源的**全部竞争力**按比例压下来，
+    这才是用户表达"少来点"时预期的效果。空集合时系数恒为 1，行为与无负反馈一致。
     """
     if sort == SORT_LATEST:
         return None
     if sort == SORT_FOR_YOU:
-        return News.hot_score + channel_boost_expr(weights or {})
+        # 延迟导入：feedback 依赖 config， 避免循环依赖
+        from .feedback import source_dislike_expr
+
+        base = News.hot_score + channel_boost_expr(weights or {})
+        return base * source_dislike_expr(penalty or set())
     return News.hot_score

@@ -15,7 +15,7 @@
 | POST | `/api/auth/register` | — | 注册（手机号 + 密码 ≥6 位），返回 token |
 | POST | `/api/auth/login` | — | 登录，成功返回 `{ token, user }`；`user` 含 `isAdmin`（布尔值，按 `ADMIN_PHONES` ∪ `admin_users` 表白名单判定后下发，前端据此决定是否展示管理入口，**不下发白名单本身**） |
 | POST | `/api/auth/logout` | ✅ | 退出（无状态 JWT，前端清本地 token） |
-| GET | `/api/news?channel=&sort=&page=&pageSize=&cursor=&feed=` | —（`feed=following` 需 ✅） | 资讯列表。**推荐游标分页**：传 `cursor` 走 keyset，返回 `{ list, nextCursor, hasMore }`；不传则 offset 分页并附 `total`。`sort` 取 `latest`（默认）/ `hot` / `for-you`（见「排序与个性化」），非法值 422。`feed=following` 为**关注流**（E6b）：需登录（否则 401）、**忽略 `channel`**、只返回已关注来源的内容；非法 feed 422/42200。列表项含 `sourceKey`（可空，来源稳定标识） |
+| GET | `/api/news?channel=&sort=&page=&pageSize=&cursor=&feed=` | —（`feed=following` 需 ✅） | 资讯列表。**推荐游标分页**：传 `cursor` 走 keyset，返回 `{ list, nextCursor, hasMore }`；不传则 offset 分页并附 `total`。`sort` 取 `latest`（默认）/ `hot` / `for-you`（见「排序与个性化」），非法值 422。`feed=following` 为**关注流**（E6b）：需登录（否则 401）、**忽略 `channel`**、只返回已关注来源的内容；非法 feed 422/42200。列表项含 `sourceKey`（可空，来源稳定标识）。`sort=for-you` 时**自动排除已曝光内容**（E3，登录态；探底保护触发时回传 `dedupRelaxed: true` 并放弃去重），已登录用户的单条负反馈对所有排序生效 |
 | GET | `/api/news/{id}` | — | 资讯详情。比列表多返回 `content`（正文，按段落以 `\n` 分隔；无正文为 `null`，前端显示「暂无正文」而非占位文案）——**列表接口刻意不带正文**，见「资讯正文（E1）」 |
 | GET | `/api/news/{id}/comments?limit=&cursor=&sort=` | —（可选带token） | **主评论**列表（`root_id IS NULL`，游标分页）；`sort=latest`（默认，`created_at` 倒序，**新的在前**）/ `sort=hot`（`likes` 倒序，时间 + id 兜底），非法值 422/42201；每条附 `replyCount` 与最早 2 条回复预览；带 token 时 `liked` 按当前用户计算。**游标不透明且携带 sort**：跨排序误用会被作废（退回第一页），不会错位续接；v1 裸 id 游标仍按 latest 兼容 |
 | GET | `/api/news/{id}/comments/{cid}/replies?limit=&cursor=` | —（可选带token） | 某条主评论的**回复**列表（时间**正序**，游标分页；root 已软删除时返回空列表——主评论消失后失去语境的回复不再裸露） |
@@ -37,6 +37,10 @@
 | GET | `/api/me/follows` | ✅ | 我关注的来源（按关注时间倒序），返回 `{ keys, list }`；`list[]` 为 `{ key, name, channel, enabled, newsCount }`。源被删除时该行不出现在列表（关注记录保留） |
 | POST | `/api/me/follows` | ✅ | 关注来源（幂等），body `{ sourceKey }`，返回完整集合。来源不存在或已停用 **40410**；空 key / 超过 200 个 **42207** |
 | DELETE | `/api/me/follows/{key}` | ✅ | 取消关注（幂等，返回完整集合） |
+| POST | `/api/me/exposures` | ✅ | **批量上报曝光**（E3，body `{ ids }`，1~50 条）。重复上报幂等（只刷新 `exposed_at`）。用于 `for-you` 去重——**只记进入视口且停留够久的内容**，预渲染未扫到的不算。空批 422、超上限 422（不静默截断） |
+| GET | `/api/me/dislikes` | ✅ | 我的负反馈（E3），返回 `{ newsIds, list, sourceKeys, sources }` |
+| POST | `/api/me/dislikes` | ✅ | 踩一条内容或一个来源（幂等）。body `{ newsId }` 或 `{ sourceKey }` **二选一**；都缺/都给、目标不存在或已停用 → **42207**。单条对所有排序生效，来源在 `for-you` 里按 0.3 衰减 |
+| DELETE | `/api/me/dislikes/news/{id}`、`/api/me/dislikes/sources/{key}` | ✅ | 取消负反馈（幂等） |
 | PUT | `/api/me/nickname` | ✅ | **修改昵称**（P1-24，与注册同一套校验）：形状不合法 **42203**（空/纯空白/越界/非法字符/纯符号，消息即面向用户的提示）；命中 `block` 级词 **40006**（提示**不回显命中词**）；命中 `review` 级词**放行**并置 `name_pending_review` 进人工队列；通过则原样保存并**清除**待复核标志。返回 `{ name, result, reason, pendingReview }` |
 | GET | `/api/admin/sources` | ✅ 管理员 | RSS 源列表（含抓取健康状态、`respectRobots` 开关与**近期健康摘要**），返回 `{ list, total, healthDays }`；读取前自动播种内置源。`list[].health` 为 `{ attempts, rate, avgItems }` 或 `null`（窗口内没抓过），`rate` 为 `null` 表示**没有尝试**而非"全失败" |
 | GET | `/api/admin/sources/{key}/health?days=` | ✅ 管理员 | **单源健康趋势**（P1-19）：返回 `{ key, days, keepDays, summary, points, failures }`。`days` 会被收敛到保留期；`points` 按天分桶且**缺的天不补零**（空白 = 那天没抓它）；`failures` 只列失败并带 `kind` |
@@ -372,7 +376,7 @@ C9 分两半落：**前端文档**（承载 `localStorage` 令牌的那个 HTML�
 | 409 | 40904 | 已是最后一位管理员，不能移除（末位保护） |
 | 409 | 40905 | 该敏感词已存在 |
 | 409 | 40906 | 该昵称敏感词已存在 |
-| 422 | 42200 / 42201 / 42202 / 42203 / 42204 / **42206 / 42207** | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持或频道不存在 / **评论敏感词有效字符不足**（`MODERATION_MIN_WORD_LEN`，空格与标点不计）/ **昵称形状不合法**（空/纯空白/越界/非法字符/纯符号，消息即面向用户的提示）/ **昵称敏感词有效字符不足**（`NICKNAME_MIN_WORD_LEN`，主词与别名都查）/ **举报类型或理由非法** / **关注来源标识为空或超出 200 上限** |
+| 422 | 42200 / 42201 / 42202 / 42203 / 42204 / **42206 / 42207** | 参数校验失败（统一 `{ code, message, data.errors }`）/ 排序方式不支持或频道不存在 / **评论敏感词有效字符不足**（`MODERATION_MIN_WORD_LEN`，空格与标点不计）/ **昵称形状不合法**（空/纯空白/越界/非法字符/纯符号，消息即面向用户的提示）/ **昵称敏感词有效字符不足**（`NICKNAME_MIN_WORD_LEN`，主词与别名都查）/ **举报类型或理由非法** / **关注来源标识为空或超出 200 上限** / **负反馈参数二选一被违反，或目标内容/来源不存在、已停用** |
 | 429 | 42900 / 42901 / 42902 | 触发限流（普通 / 登录 IP / 登录失败锁定·账号维度） |
 
 > 注：`40901`–`40904` 刻意分开——同一错误码承载多种语义会让前端文案错配。

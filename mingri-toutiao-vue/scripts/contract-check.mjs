@@ -2784,6 +2784,112 @@ const run = async () => {
     );
   }
 
+  // 8.99) 负反馈与曝光去重（E3 / P1-72）
+  //
+  // 四条要钉：曝光批量上报幂等、负反馈二选一为 42207、单条负反馈对所有排序生效、
+  // 曝光去重只作用 for-you。收尾取关，不留残留。
+  {
+    // 未登录 → 401（曝光与负反馈都是账号数据）
+    let exp401 = false;
+    try {
+      await request('/me/exposures', { method: 'POST', body: { ids: ['x'] } });
+    } catch (e) {
+      exp401 = e.message === '未登录或登录已过期';
+    }
+    check('无 token 上报曝光 → 401', exp401);
+
+    // 空 ids / 超上限：拒绝而不是静默截断
+    //
+    // 必须断言**文案**而不只是"抛错了"：`token` 缺失/受限态时这里同样会抛错，
+    // 只判抛错会让断言恒真——漏传 DEMO_PASSWORD 时它就是靠这条蒙过去的。
+    // 双端文案都含 `ids`（后端「参数校验失败：ids …」/ mock「参数校验失败：ids 不能为空」）。
+    let emptyRejected = false;
+    let emptyMsg = '';
+    try {
+      await request('/me/exposures', { method: 'POST', body: { ids: [] }, token });
+    } catch (e) {
+      emptyMsg = e.message;
+      emptyRejected = e.message.includes('ids');
+    }
+    check('曝光 ids 为空 → 422（校验拒绝，非鉴权失败）', emptyRejected, emptyMsg);
+    let overRejected = false;
+    let overMsg = '';
+    try {
+      await request('/me/exposures', {
+        method: 'POST',
+        body: { ids: Array.from({ length: 51 }, (_, i) => `x${i}`) },
+        token,
+      });
+    } catch (e) {
+      overMsg = e.message;
+      overRejected = e.message.includes('ids');
+    }
+    check('曝光 ids 超 50 → 422（不静默截断）', overRejected, overMsg);
+
+    // 负反馈：二选一是域规则 → 42207
+    let mutex = false;
+    let mutexMsg = '';
+    try {
+      await request('/me/dislikes', { method: 'POST', body: {}, token });
+    } catch (e) {
+      mutexMsg = e.message;
+      mutex = e.message.includes('newsId') || e.message.includes('只能');
+    }
+    check('负反馈两个都不给 → 42207', mutex, mutexMsg);
+
+    const feedBefore = await request('/news?sort=for-you&pageSize=3', { token });
+    const victim = (feedBefore.list ?? [])[0];
+    if (victim) {
+      const disliked = await request('/me/dislikes', {
+        method: 'POST',
+        body: { newsId: victim.id },
+        token,
+      });
+      check('单条负反馈成功并返回集合', (disliked.newsIds ?? []).includes(victim.id));
+
+      // 单条负反馈是显式表达 → latest 也不该再出现它
+      const latestIds = (await request('/news?sort=latest&pageSize=50', { token })).list ?? [];
+      check(
+        '踩过的内容不在 latest 出现（显式表达对所有排序生效）',
+        latestIds.every((n) => n.id !== victim.id),
+        latestIds.length,
+      );
+
+      const removed = await request(`/me/dislikes/news/${victim.id}`, { method: 'DELETE', token });
+      check(
+        '取消单条负反馈后集合为空（收尾，不留残留）',
+        !(removed.newsIds ?? []).includes(victim.id),
+      );
+    }
+
+    // 曝光：上报后 for-you 不再出现它，而 latest 一字不动
+    const expVictim = ((await request('/news?sort=for-you&pageSize=5', { token })).list ?? [])[0];
+    if (expVictim) {
+      // 基线必须**在上报之前**取：断言的是"latest 不受曝光影响"，
+      // 而不是"那条还在 latest 前 50 里"——for-you 按热度排、latest 按时间排，
+      // 头条未必落在 latest 的前 50，按条断言会随机失败（本批首跑就红在这里）。
+      const latestBefore = ((await request('/news?sort=latest&pageSize=50', { token })).list ?? [])
+        .map((n) => n.id)
+        .join();
+      await request('/me/exposures', { method: 'POST', body: { ids: [expVictim.id] }, token });
+      const after = await request('/news?sort=for-you&pageSize=50', { token });
+      const ids = (after.list ?? []).map((n) => n.id);
+      check(
+        '上报曝光后 for-you 不再出现它（或探底保护放行）',
+        !ids.includes(expVictim.id) || after.dedupRelaxed === true,
+        `dedupRelaxed=${after.dedupRelaxed}`,
+      );
+      const latestAfter = ((await request('/news?sort=latest&pageSize=50', { token })).list ?? [])
+        .map((n) => n.id)
+        .join();
+      check(
+        '曝光不改变 latest（时间流完整）',
+        latestAfter === latestBefore && latestBefore.length > 0,
+        `${latestBefore.split(',').length} → ${latestAfter.split(',').length}`,
+      );
+    }
+  }
+
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);
   process.exit(fail === 0 ? 0 : 1);
 };

@@ -30,6 +30,7 @@ from .feeds.health import prune as prune_health_events
 from .feeds.ingest import FetchReport, prune_old_news, run_ingest
 from .hit_logs import prune_hit_logs
 from .ranking import recompute_hot_scores
+from .feedback import prune_exposures
 from .search_stats import prune_search_logs
 
 logger = logging.getLogger("toutiao.scheduler")
@@ -107,6 +108,11 @@ def _run_once(channel: str | None = None, keyword: str | None = None) -> FetchRe
                 logs = prune_search_logs(db)
                 if logs:
                     logger.info("清理过期搜索日志：%d 条", logs)
+                # E3：曝光记录按保留期清理（默认 7 天），否则表随浏览线性增长。
+                # 只清曝光，**不动负反馈**——那是用户的明确表达，没有"过期"一说
+                exposed = prune_exposures(db)
+                if exposed:
+                    logger.info("清理过期曝光记录：%d 条", exposed)
                 # P1-19：健康历史按时间清理（不设保底条数——"最近 N 天"
                 # 就是它的全部价值，过期即无意义）
                 events = prune_health_events(db)

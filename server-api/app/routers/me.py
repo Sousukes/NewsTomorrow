@@ -19,6 +19,15 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user, require_password_current
 from ..models import News, RssSource, User, UserFavorite, UserFollow, UserHistory
+from ..feedback import (
+    DISLIKE_NEWS,
+    DISLIKE_SOURCE,
+    clear_dislike,
+    disliked_news_ids,
+    disliked_source_keys,
+    record_exposures,
+    set_dislike,
+)
 from ..nickname_moderation import (
     MESSAGE_REVIEW,
     RESULT_BLOCK,
@@ -30,7 +39,14 @@ from ..nickname_moderation import (
 )
 from ..ranking import bump_hot_score, invalidate_channel_preferences, recompute_hot_scores
 from ..response import ok
-from ..schemas import FollowIn, MarkBulkIn, MarkIn, NicknameUpdateIn
+from ..schemas import (
+    DislikeIn,
+    ExposureBatchIn,
+    FollowIn,
+    MarkBulkIn,
+    MarkIn,
+    NicknameUpdateIn,
+)
 from ..step_up import require_step_up
 from .news import to_out as news_to_out
 
@@ -373,6 +389,131 @@ def remove_follow(
         db.delete(row)
         db.commit()
     return ok(_follows_payload(db, user), message="已取消关注")
+
+
+# ------------------------------ 曝光上报与负反馈（E3） ------------------------------
+
+
+@router.post("/exposures", response_model=None)
+def report_exposures(
+    body: ExposureBatchIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_password_current),
+):
+    """批量上报曝光（用户"看过"哪些内容）。
+
+    前端按「进入视口 ≥50% 且停留 ≥500ms」判定后**攒批**上报（10 条或 5 秒），
+    因此这里是批量接口而非逐条——逐条 POST 会把一次信息流浏览变成几十次写请求。
+
+    幂等：重复上报同一批 id 只刷新 `exposed_at`，不累积重复行（复合主键兜底）。
+    失败时 5xx 由前端静默重试一次，仍失败即丢弃：曝光丢失的代价只是
+    "这条可能重复出现一次"，远小于阻塞浏览。
+    """
+    written = record_exposures(db, user.id, body.ids)
+    return ok({"accepted": len(body.ids), "written": written})
+
+
+def _dislikes_payload(db: Session, user: User) -> dict:
+    """负反馈集合：单条与来源分开返回，附带资讯/来源展示信息。
+
+    单条**只返回仍存在的资讯**（与收藏/历史同口径：被清理的目标不该出现在列表里）；
+    来源同理，只返回仍存在的源。
+    """
+    news_ids = sorted(disliked_news_ids(db, user.id))
+    source_keys = sorted(disliked_source_keys(db, user.id))
+
+    news_map = _news_map(db, news_ids) if news_ids else {}
+    src_map: dict[str, tuple[str, str]] = {}
+    if source_keys:
+        src_map = {
+            key: (name, channel)
+            for key, name, channel in db.execute(
+                select(RssSource.key, RssSource.name, RssSource.channel).where(
+                    RssSource.key.in_(source_keys)
+                )
+            ).all()
+        }
+
+    alive_news = [i for i in news_ids if i in news_map]
+    alive_src = [k for k in source_keys if k in src_map]
+    return {
+        "newsIds": alive_news,
+        "list": [news_to_out(news_map[i]) for i in alive_news],
+        "sourceKeys": alive_src,
+        "sources": [
+            {"key": k, "name": src_map[k][0], "channel": src_map[k][1]} for k in alive_src
+        ],
+    }
+
+
+@router.get("/dislikes", response_model=None)
+def list_dislikes(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """我的负反馈（单条 + 来源）。"""
+    return ok(_dislikes_payload(db, user))
+
+
+@router.post("/dislikes", response_model=None)
+def add_dislike(
+    body: DislikeIn, db: Session = Depends(get_db), user: User = Depends(require_password_current)
+):
+    """踩一条内容或一个来源（幂等），返回最新负反馈集合。
+
+    参数校验（二选一、目标存在性）失败统一 **42207**：
+    - `newsId` 与 `sourceKey` 都缺或都给 → 意图不明（域规则，故不用 pydantic
+      互斥：那会被统一处理器收敛成 42200，调用方分不出"字段错"与"意图不明"）；
+    - newsId 对应的资讯不存在 → 同一段号（都是"你给的输入没法用"），
+      但**不泄露存在性之外的信息**；sourceKey 不存在或已停用同理。
+    """
+    news_id = (body.newsId or "").strip()
+    source_key = (body.sourceKey or "").strip()
+    if bool(news_id) == bool(source_key):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": 42207, "message": "newsId 与 sourceKey 必须且只能提供一个"},
+        )
+
+    if news_id:
+        if db.get(News, news_id) is None:
+            raise HTTPException(
+                status_code=422, detail={"code": 42207, "message": "目标内容不存在或已下架"}
+            )
+        set_dislike(db, user.id, DISLIKE_NEWS, news_id)
+    else:
+        src = db.get(RssSource, source_key)
+        if src is None or not src.enabled:
+            raise HTTPException(
+                status_code=422, detail={"code": 42207, "message": "目标来源不存在或已停用"}
+            )
+        set_dislike(db, user.id, DISLIKE_SOURCE, source_key)
+
+    # 负反馈改变了"该给用户看什么"→ for-you 的频道偏好顺带失效（保守但安全：
+    # 偏好缓存里没有"用户不想看什么"这一维，只能整份作废）
+    invalidate_channel_preferences(user.id)
+    return ok(_dislikes_payload(db, user), message="已记录")
+
+
+@router.delete("/dislikes/news/{news_id}", response_model=None)
+def remove_dislike_news(
+    news_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_password_current),
+):
+    """取消单条负反馈（幂等）。"""
+    clear_dislike(db, user.id, DISLIKE_NEWS, news_id)
+    invalidate_channel_preferences(user.id)
+    return ok(_dislikes_payload(db, user), message="已取消")
+
+
+@router.delete("/dislikes/sources/{source_key}", response_model=None)
+def remove_dislike_source(
+    source_key: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_password_current),
+):
+    """取消来源级负反馈（幂等）。"""
+    clear_dislike(db, user.id, DISLIKE_SOURCE, source_key)
+    invalidate_channel_preferences(user.id)
+    return ok(_dislikes_payload(db, user), message="已取消")
 
 
 # ------------------------------ 昵称（P1-24） ------------------------------

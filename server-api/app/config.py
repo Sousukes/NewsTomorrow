@@ -127,6 +127,20 @@ CHANNEL_PREF_TTL_SECONDS = max(30, int(_env("CHANNEL_PREF_TTL_SECONDS", "300")))
 # 往返，收益远小于代价。`now` 显式传入时（测试/回放）**绕过缓存**，见实现。
 HOT_TERMS_TTL_SECONDS = max(10, int(_env("HOT_TERMS_TTL_SECONDS", "60")))
 
+# ---- 负反馈与曝光去重（E3）----
+# 曝光保留天数：超出即允许再次出现。**不当成永久已读**——老内容重新浮现是合理的，
+# 而永久记录会让信息流越用越空（用户没有"重置"手段，那是不可逆的劣化）。
+EXPOSURE_RETENTION_DAYS = max(1, int(_env("EXPOSURE_RETENTION_DAYS", "7")))
+
+# 单次批量上报的条数上限：一次请求最多能推进多少曝光。
+# 上限存在的理由是防"把整库一次性推成已曝光"的滥用，不是防正常翻页。
+EXPOSURE_BATCH_MAX = max(1, int(_env("EXPOSURE_BATCH_MAX", "50")))
+
+# 去重探底阈值：已曝光占可推荐内容的比例超过它时，本次**放弃去重**
+# （响应带 `dedupRelaxed: true`）。否则用户把一个小库刷完之后，
+# for-you 会直接返回空页——那正是「关注流」踩过的坑（E6b）。
+DEDUP_RELAX_RATIO = min(0.95, max(0.1, float(_env("DEDUP_RELAX_RATIO", "0.6"))))
+
 # ---- 用户举报（E5）----
 # 预设分类：结构化、可统计、防滥用。文案是**前端展示与后端校验共用的唯一事实源**，
 # 前端据此渲染单选、后端据此校验（不在集合内 → 42206）。

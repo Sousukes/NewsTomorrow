@@ -760,3 +760,52 @@ class Report(Base):
         # 复核队列按「待处理优先、时间倒序」查
         Index("ix_reports_status_created", "status", "created_at"),
     )
+
+
+class UserExposure(Base):
+    """用户曝光记录（E3）：系统给用户**看过**哪些资讯。
+
+    为什么要与 `user_history` 分开：两者语义相反、生命周期不同、写入模式不同——
+    历史是用户**主动**点击（要展示、可清空、上限 50），曝光是系统**被动**记录
+    （不展示、按保留期清理、批量追加）。混成一张表会让"浏览历史"任意拉长，
+    且清理策略无法分别设定。
+
+    **不建外键到 news**：与 `reports` / `user_follows` 同一处方——资讯被时效清理后
+    曝光记录仍可留存（去重时 LEFT JOIN 自然过滤）。复合主键 `(user_id, news_id)`
+    天然幂等：重复曝光只更新 `exposed_at`，不会累积重复行。
+
+    只记"进入视口且停留够久"的内容（判定在前端，见 E3 设计 D2）：
+    预渲染但未被扫到的内容不算曝光，否则去重后信息流会明显变空。
+    """
+
+    __tablename__ = "user_exposures"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    news_id = Column(String(32), primary_key=True)
+    # 绝对 ISO 时间：保留期过滤（`exposed_at >= cutoff`）的唯一依据
+    exposed_at = Column(String(30), default=now_str, nullable=False)
+
+    __table_args__ = (Index("ix_user_exposures_user_at", "user_id", "exposed_at"),)
+
+
+class UserDislike(Base):
+    """用户负反馈（E3）：单条「不感兴趣」+ 来源「减少该来源」。
+
+    `target_type`：`news`（单条，硬过滤）/ `source`（来源，for-you 里衰减）。
+    为什么来源用衰减而不是硬过滤：硬过滤后用户感知不到"被屏蔽了多少"，
+    误操作也不可恢复——他只会觉得"内容怎么变少了"。衰减让该来源仍以小概率
+    出现，效果可持续验证、随时可取消（见 E3 设计 D1）。
+
+    **负反馈 ≠ 举报**（E5）：这是"我不爱看"，不是"这内容违规"。
+    两者入口、存储、处置全程分离，混在一起运营侧就无法区分。
+
+    复合主键 `(user_id, target_type, target_id)` 幂等：重复踩同一目标
+    只更新时间，不新增行——与 `user_follows` 同一处方。
+    """
+
+    __tablename__ = "user_dislikes"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    target_type = Column(String(10), primary_key=True)  # news | source
+    target_id = Column(String(64), primary_key=True)
+    created_at = Column(String(30), default=now_str, nullable=False)

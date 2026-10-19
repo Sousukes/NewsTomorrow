@@ -38,6 +38,13 @@ from ..ranking import (
     channel_preferences,
     rank_key,
 )
+from ..config import DEDUP_RELAX_RATIO
+from ..feedback import (
+    disliked_news_ids,
+    disliked_source_keys,
+    exposed_news_ids,
+    visible_news_count,
+)
 from ..search_stats import HOT_WINDOW_DAYS, hot_terms, record_search
 from ..response import ok
 from ..schemas import NewsOut
@@ -208,35 +215,57 @@ def to_out(n: News) -> dict:
     }
 
 
-def _order_by(q, sort: str = SORT_LATEST, weights: Optional[dict] = None):
+def _order_by(
+    q, sort: str = SORT_LATEST, weights: Optional[dict] = None, penalty: Optional[set] = None
+):
     """统一排序：置顶 → 排序键倒序 → id 倒序（稳定）。
 
     `latest` 用 `published_at`，其余模式用 `ranking.rank_key()` 得到的分值表达式。
+    `penalty`（E3）是被用户踩过来的来源集合，只在 for-you 生效（衰减而非硬过滤）。
     """
     if sort == SORT_LATEST:
         return q.order_by(News.is_top.desc(), _PUB.desc(), News.id.desc())
-    return q.order_by(News.is_top.desc(), rank_key(sort, weights).desc(), News.id.desc())
+    return q.order_by(
+        News.is_top.desc(), rank_key(sort, weights, penalty).desc(), News.id.desc()
+    )
 
 
-def _cursor_key(n: News, sort: str, weights: Optional[dict]) -> str | float:
-    """游标携带的排序键值：与 `_order_by` 的排序键必须逐一对应。"""
+def _cursor_key(
+    n: News, sort: str, weights: Optional[dict], penalty: Optional[set] = None
+) -> str | float:
+    """游标携带的排序键值：与 `_order_by` 的排序键必须**逐字符一致**。
+
+    这里踩过的坑（P1-72 实测）：SQL 侧 `rank_key` 对 for-you 是把
+    `(hot_score + 加分) × 衰减` **整体相乘**，而 Python 侧若只给"加分"乘衰减，
+    在**用户没有任何频道偏好**（weights 为空、加分为 0）时两者必然分叉：
+    游标存 55、SQL 比 16.5，续页把本该翻过去的内容又翻回来，且**永不终止**。
+
+    因此 Python 侧复算整串表达式，而不是复算"加分那一项"。
+    """
     if sort == SORT_LATEST:
         return n.published_at or ""
-    # 分值模式：取整到 6 位，避免 JSON 序列化浮点噪声导致游标比对失败
-    return round(float(n.hot_score or 0.0) + _boost_of(n, sort, weights), 6)
+    if sort != SORT_FOR_YOU:
+        return round(float(n.hot_score or 0.0), 6)
 
-
-def _boost_of(n: News, sort: str, weights: Optional[dict]) -> float:
-    """频道偏好加分（仅 for-you 生效；与 rank_key 的表达式保持一致）。"""
-    if sort != SORT_FOR_YOU or not weights:
-        return 0.0
+    from ..feedback import SOURCE_DISLIKE_FACTOR
     from ..ranking import CHANNEL_BOOST_MAX
 
-    return float(weights.get(n.channel, 0.0)) * CHANNEL_BOOST_MAX
+    boost = float(weights.get(n.channel, 0.0)) * CHANNEL_BOOST_MAX if weights else 0.0
+    factor = SOURCE_DISLIKE_FACTOR if (penalty and n.source_key in penalty) else 1.0
+    # 取整到 6 位：避免 JSON 序列化浮点噪声导致游标比对失败
+    return round((float(n.hot_score or 0.0) + boost) * factor, 6)
 
 
-def _encode_cursor(n: News, sort: str = SORT_LATEST, weights: Optional[dict] = None) -> str:
-    payload = [_CURSOR_V2, sort, 1 if n.is_top else 0, _cursor_key(n, sort, weights), n.id]
+def _encode_cursor(
+    n: News, sort: str = SORT_LATEST, weights: Optional[dict] = None, penalty: Optional[set] = None
+) -> str:
+    payload = [
+        _CURSOR_V2,
+        sort,
+        1 if n.is_top else 0,
+        _cursor_key(n, sort, weights, penalty),
+        n.id,
+    ]
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
@@ -265,7 +294,9 @@ def _decode_cursor(cursor: str) -> Optional[tuple[str, int, object, str]]:
     return None
 
 
-def _keyset_filter(sort: str, top: int, key, nid: str, weights: Optional[dict] = None):
+def _keyset_filter(
+    sort: str, top: int, key, nid: str, weights: Optional[dict] = None, penalty: Optional[set] = None
+):
     """游标之后（严格更小）的记录。
 
     排序为 `is_top DESC, <排序键> DESC, id DESC`：
@@ -276,7 +307,7 @@ def _keyset_filter(sort: str, top: int, key, nid: str, weights: Optional[dict] =
     if sort == SORT_LATEST:
         col, k = _PUB, str(key)
     else:
-        col, k = rank_key(sort, weights), float(key)
+        col, k = rank_key(sort, weights, penalty), float(key)
     after = or_(col < k, and_(col == k, News.id < nid))
     if top:
         return or_(and_(News.is_top.is_(True), after), News.is_top.is_(False))
@@ -290,6 +321,8 @@ def _page_payload(
     page_size: int,
     sort: str = SORT_LATEST,
     weights: Optional[dict] = None,
+    penalty: Optional[set] = None,
+    dedup_relaxed: bool = False,
 ) -> dict:
     last = items[-1] if items else None
     return {
@@ -298,9 +331,11 @@ def _page_payload(
         "page": page,
         "pageSize": page_size,
         "sort": sort,
+        # E3：本次是否因探底保护而放弃了曝光去重（客户端可提示，也可忽略）
+        "dedupRelaxed": dedup_relaxed,
         # 取满一页才可能有下一页（游标续接用）
         "nextCursor": (
-            _encode_cursor(last, sort, weights) if last and len(items) >= page_size else None
+            _encode_cursor(last, sort, weights, penalty) if last and len(items) >= page_size else None
         ),
         "hasMore": len(items) >= page_size,
     }
@@ -349,6 +384,18 @@ def list_news(
     # 频道偏好只服务 for-you；未登录时为空 → 自然退化为纯热度排序
     weights = channel_preferences(db, current.id) if (current and sort == SORT_FOR_YOU) else {}
 
+    # E3：负反馈。**已登录才生效**——未登录没有账号可挂载，前端走本地匿名作用域
+    # （与 marks / follows 同一处方），服务端不猜。
+    disliked_news: set[str] = set()
+    penalty: set[str] = set()
+    if current is not None:
+        disliked_news = disliked_news_ids(db, current.id)
+        penalty = disliked_source_keys(db, current.id) if sort == SORT_FOR_YOU else set()
+    if disliked_news:
+        # 单条负反馈是**显式**的"别给我看这个"，因此对所有排序生效（含 latest）：
+        # 用户点过「不感兴趣」的那条还出现在最新里，比少一条更难解释。
+        q_block = News.id.notin_(disliked_news)
+
     q = db.query(News)
     if feed == FEED_FOLLOWING:
         # 关注流（E6b）：必须登录——未登录没有关注关系，静默返回空列表会让客户端
@@ -372,6 +419,7 @@ def list_news(
                     "page": None,
                     "pageSize": pageSize,
                     "sort": sort,
+                    "dedupRelaxed": False,
                     "nextCursor": None,
                     "hasMore": False,
                 }
@@ -381,6 +429,22 @@ def list_news(
         q = q.filter(News.channel == channel)
     # P1-20：已下架内容不进公开信息流（游标分页同样生效——过滤加在 keyset 之前）
     q = q.filter(News.hidden.is_(False))
+    if disliked_news:
+        q = q.filter(q_block)
+
+    # E3：曝光去重。**只对 for-you**——latest / hot 是时间流与观察窗口，
+    # 过滤会让"最新"漏内容，而缺一条比重复一条更难解释。
+    dedup_relaxed = False
+    if sort == SORT_FOR_YOU and current is not None:
+        seen = exposed_news_ids(db, current.id)
+        if seen:
+            total_visible = visible_news_count(db)
+            # 探底保护：已曝光占比过高时当次**放弃去重**。否则小库 / 重度用户
+            # 会拿到空页——那正是「关注流」踩过的坑（E6b，无关注时返回空页）。
+            if total_visible and len(seen) / total_visible <= DEDUP_RELAX_RATIO:
+                q = q.filter(News.id.notin_(seen))
+            else:
+                dedup_relaxed = True
 
     # B2：**默认**走 keyset。只有显式传了 `page` 才回退 offset 分页。
     # 此前首页（还没 cursor 时）落在 offset 分支里，于是每次打开页面都做一次
@@ -395,8 +459,8 @@ def list_news(
                 )
             c_sort, top, key, nid = decoded
             # 游标自带 sort：续接必须沿用首请求时的排序键，否则 keyset 比较无意义
-            q = q.filter(_keyset_filter(c_sort, top, key, nid, weights))
-        items = _order_by(q, c_sort, weights).limit(pageSize).all()
+            q = q.filter(_keyset_filter(c_sort, top, key, nid, weights, penalty))
+        items = _order_by(q, c_sort, weights, penalty).limit(pageSize).all()
         return ok(
             {
                 "list": [to_out(n) for n in items],
@@ -405,8 +469,11 @@ def list_news(
                 "page": None,
                 "pageSize": pageSize,
                 "sort": c_sort,
+                "dedupRelaxed": dedup_relaxed,
                 "nextCursor": (
-                    _encode_cursor(items[-1], c_sort, weights) if len(items) >= pageSize else None
+                    _encode_cursor(items[-1], c_sort, weights, penalty)
+                    if len(items) >= pageSize
+                    else None
                 ),
                 "hasMore": len(items) >= pageSize,
             }
@@ -414,8 +481,8 @@ def list_news(
 
     # 兼容路径：显式 page 才走 offset（此时 total 有意义）
     total = q.count()
-    items = _order_by(q, sort, weights).offset((page - 1) * pageSize).limit(pageSize).all()
-    return ok(_page_payload(items, total, page, pageSize, sort, weights))
+    items = _order_by(q, sort, weights, penalty).offset((page - 1) * pageSize).limit(pageSize).all()
+    return ok(_page_payload(items, total, page, pageSize, sort, weights, dedup_relaxed))
 
 
 # 注意：静态路径 /search 必须声明在 /{news_id} 之前，否则会被当成 news_id 匹配

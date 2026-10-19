@@ -1,4 +1,6 @@
 """Pydantic 请求/响应模型。"""
+from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 from .nickname_moderation import MAX_ALIAS_LENGTH, MAX_ALIASES_PER_WORD
@@ -368,3 +370,27 @@ class ReportResolveIn(BaseModel):
     """举报处置入参（E5）：`hidden` 确认隐藏 / `kept` 驳回并恢复。"""
 
     resolution: str = Field(pattern="^(hidden|kept)$")
+
+
+class ExposureBatchIn(BaseModel):
+    """曝光批量上报入参（E3）。
+
+    `ids` 上限与单次上限一致（`EXPOSURE_BATCH_MAX`），防"把整库一次推成已曝光"。
+    此处做**长度**校验而非夹取：夹取会让调用方以为 50 条都成功了，
+    而实际上静默丢了后半——批量接口的静默截断比报错更难排查。
+    """
+
+    ids: list[str] = Field(min_length=1, max_length=50)
+
+
+class DislikeIn(BaseModel):
+    """负反馈入参（E3）：`newsId` 与 `sourceKey` **二选一**。
+
+    注意这里**故意不做互斥校验**：互斥是域规则（违反它该回 42207，
+    与 E5 的"理由不合法"同一性质），而 pydantic 的校验错误会被统一处理器
+    收敛成 42200。把域规则塞进 model_validator 会让它拿不到专属错误码，
+    调用方也就无法区分"字段写错"与"意图不明"。互斥在路由里判。
+    """
+
+    newsId: Optional[str] = Field(default=None, max_length=32)
+    sourceKey: Optional[str] = Field(default=None, max_length=64)

@@ -1251,6 +1251,35 @@ function followsOf(phone) {
   return follows.get(phone);
 }
 
+/* E3：负反馈与曝光。与后端 user_dislikes / user_exposures 同语义。
+   曝光记 Map<phone, Map<news_id, ts>>（幂等：重复上报只更新时间）；
+   负反馈分 news / source 两档，单条硬过滤、来源在 for-you 里衰减。
+   两者都按账号隔离（token → phone），与 marks / follows 一致。 */
+const exposures = new Map();
+const dislikes = new Map(); // phone → { news:Set, source:Set }
+const EXPOSURE_RETENTION_DAYS = 7;
+/** 单次批量上报上限（与后端 EXPOSURE_BATCH_MAX 对齐） */
+const EXPOSURE_BATCH_MAX = 50;
+/** 来源负反馈衰减系数（与后端 feedback.SOURCE_DISLIKE_FACTOR 对齐） */
+const SOURCE_DISLIKE_FACTOR = 0.3;
+/** 去重探底阈值（与后端 config.DEDUP_RELAX_RATIO 对齐） */
+const DEDUP_RELAX_RATIO = 0.6;
+function exposuresOf(phone) {
+  if (!exposures.has(phone)) exposures.set(phone, new Map());
+  return exposures.get(phone);
+}
+function dislikesOf(phone) {
+  if (!dislikes.has(phone)) dislikes.set(phone, { news: new Set(), source: new Set() });
+  return dislikes.get(phone);
+}
+/** 保留期内的曝光集合（mock 用启动时长近似：进程重启即视为过期） */
+function liveExposures(phone) {
+  const cutoff = Date.now() - EXPOSURE_RETENTION_DAYS * 86400 * 1000;
+  const map = exposuresOf(phone);
+  for (const [id, ts] of map) if (ts < cutoff) map.delete(id);
+  return new Set(map.keys());
+}
+
 /**
  * 账号注册表（P1-24）：phone → { id, name, pendingReview, reviewedAt }。
  * mock 无注册端点，账号在**登录时懒创建**（默认名与后端新用户一致），改名走
@@ -1746,6 +1775,16 @@ function requireAuth(req, res) {
   return t;
 }
 
+/**
+ * token → phone，**取不到返回 null 而不回响应**。
+ * 用于"登录了就生效、没登录就跳过"的可选路径（如列表的负反馈/去重）：
+ * 这里不能用 requireAuth——未登录是正常状态，不是错误。
+ */
+function phoneOf(req) {
+  const t = auth(req);
+  return t ? (tokens.get(t)?.phone ?? null) : null;
+}
+
 /* ---------------------- 搜索联想（E2 / P1-70）---------------------- */
 
 /**
@@ -2070,6 +2109,39 @@ const server = createServer(async (req, res) => {
     }
     // P1-20：公开列表实时过滤已下架（软下架，与后端 list_news 同口径）
     list = list.filter((n) => n.hidden !== true);
+
+    // E3：负反馈与曝光去重。与后端同口径——
+    // ① 单条负反馈是显式表达，**对所有排序**生效（含 latest）；
+    // ② 来源负反馈只作用 for-you（衰减，不是硬过滤）；
+    // ③ 曝光去重只作用 for-you，且带探底保护。
+    const who = phoneOf(req);
+    let dedupRelaxed = false;
+    if (who) {
+      const dislike = dislikesOf(who);
+      if (dislike.news.size) list = list.filter((n) => !dislike.news.has(n.id));
+      if (sort === 'for-you' && dislike.source.size) {
+        const seenAll = list.filter((n) => dislike.source.has(n.sourceKey));
+        const rest = list.filter((n) => !dislike.source.has(n.sourceKey));
+        // 衰减实现：把命中来源的等价分数打到三成再参与排序。这里没有真分数，
+        // 用「评论数 × 衰减」近似，效果是"该来源沉到后面"。
+        const decayed = seenAll
+          .map((n) => ({ n, s: (n.commentCount ?? 0) * SOURCE_DISLIKE_FACTOR }))
+          .sort((x, y) => y.s - x.s)
+          .map((x) => x.n);
+        list = [...rest.sort((x, y) => (y.commentCount ?? 0) - (x.commentCount ?? 0)), ...decayed];
+      }
+      if (sort === 'for-you') {
+        const live = liveExposures(who);
+        if (live.size) {
+          const visible = news.filter((n) => n.hidden !== true).length;
+          const deduped = list.filter((n) => !live.has(n.id));
+          // 探底保护：几乎全看过了就放弃去重（否则小库用户拿空页）
+          if (visible && live.size / visible > DEDUP_RELAX_RATIO) dedupRelaxed = true;
+          else list = deduped;
+        }
+      }
+    }
+
     // 热度模式：无服务端时用评论数近似（离线演示也能看出差异）
     if (sort !== 'latest') {
       list = [...list].sort((x, y) => (y.commentCount ?? 0) - (x.commentCount ?? 0));
@@ -2090,6 +2162,7 @@ const server = createServer(async (req, res) => {
         page: null,
         pageSize,
         sort,
+        dedupRelaxed,
         nextCursor: hasMore ? String(pageSize) : null,
         hasMore,
       });
@@ -2104,6 +2177,7 @@ const server = createServer(async (req, res) => {
         page: null,
         pageSize,
         sort,
+        dedupRelaxed,
         nextCursor: hasMore ? String(from + pageSize) : null,
         hasMore,
       });
@@ -2519,6 +2593,85 @@ const server = createServer(async (req, res) => {
     if (method === 'DELETE' && b) {
       set.delete(decodeURIComponent(b));
       return ok(res, payload(), '已取消关注');
+    }
+  }
+
+  // ---- E3：曝光上报与负反馈（/me/exposures、/me/dislikes）----
+  if (head === 'me' && (a === 'exposures' || a === 'dislikes')) {
+    const t = requireAuth(req, res);
+    if (!t) return;
+    const phone = tokens.get(t)?.phone ?? 'unknown';
+    if (method !== 'GET' && !requirePasswordCurrent(req, res, phone)) return;
+
+    if (a === 'exposures') {
+      if (method !== 'POST') return fail(res, 405, 40500, '方法不允许');
+      const body = await readBody(req);
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : null;
+      if (!ids || !ids.length) return fail(res, 422, 42200, '参数校验失败：ids 不能为空');
+      // 与后端同口径：**拒绝**而不是静默截断
+      if (ids.length > EXPOSURE_BATCH_MAX) {
+        return fail(res, 422, 42200, `参数校验失败：ids 最多 ${EXPOSURE_BATCH_MAX} 条`);
+      }
+      const map = exposuresOf(phone);
+      let written = 0;
+      for (const id of ids) {
+        if (!id) continue;
+        if (!map.has(id)) written += 1;
+        map.set(id, Date.now()); // 幂等：重复上报只刷新时间
+      }
+      return ok(res, { accepted: ids.length, written }, '已记录');
+    }
+
+    // 负反馈
+    const store = dislikesOf(phone);
+    const payload = () => {
+      const newsIds = [...store.news];
+      const sourceKeys = [...store.source].filter((k) => SOURCE_DIR.has(k));
+      return {
+        newsIds,
+        list: newsIds
+          .map((id) => news.find((n) => n.id === id))
+          .filter(Boolean)
+          .map(listOut),
+        sourceKeys,
+        sources: sourceKeys.map((k) => {
+          const s = SOURCE_DIR.get(k);
+          return { key: s.key, name: s.name, channel: s.channel };
+        }),
+      };
+    };
+
+    if (method === 'GET') return ok(res, payload());
+
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const newsId = String(body.newsId ?? '').trim();
+      const sourceKey = String(body.sourceKey ?? '').trim();
+      // 二选一是**域规则**→ 42207（不是通用 42200）：调用方要能区分
+      // "字段写错"与"意图不明"，与后端把互斥从 pydantic 挪到路由同一理由
+      if (Boolean(newsId) === Boolean(sourceKey)) {
+        return fail(res, 422, 42207, 'newsId 与 sourceKey 必须且只能提供一个');
+      }
+      if (newsId) {
+        const item = news.find((n) => n.id === newsId);
+        if (!item || item.hidden === true) {
+          return fail(res, 422, 42207, '目标内容不存在或已下架');
+        }
+        store.news.add(newsId);
+      } else {
+        const src = SOURCE_DIR.get(sourceKey);
+        if (!src || !src.enabled) return fail(res, 422, 42207, '目标来源不存在或已停用');
+        store.source.add(sourceKey);
+      }
+      return ok(res, payload(), '已记录');
+    }
+
+    if (method === 'DELETE' && b && c) {
+      // 路径 /me/dislikes/{news|sources}/{id}：b 是档位、c 是目标 id
+      const target = decodeURIComponent(c);
+      if (b === 'news') store.news.delete(target);
+      else store.source.delete(target);
+      return ok(res, payload(), '已取消');
     }
   }
 
