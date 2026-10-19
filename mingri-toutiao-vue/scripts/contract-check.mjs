@@ -9,7 +9,7 @@
  * 源健康历史与趋势（P1-19）、资讯审核与下架（P1-20）、评论治理（P1-22）、
  * 评论敏感词（P1-23）、用户昵称敏感词校验（P1-24）、令牌双轨与续期（P1-38/C1）、
  * 高敏操作二次校验（P1-40/C10）、用户举报（P1-65/E5）、评论排序（E6）、
- * 关注来源与关注流（P1-68/E6b）。
+ * 关注来源与关注流（P1-68/E6b）、搜索联想三源（P1-70/E2）。
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
@@ -204,6 +204,87 @@ const run = async () => {
     '搜索后的词进入热搜统计',
     (afterSearch.list ?? []).some((t) => t.term === '契约热词'),
   );
+
+  // 2.3) 搜索联想（E2 / P1-70）：三源、字段名、以及"不写日志"这条硬约束
+  const sEmpty = await request('/search/suggest?q=');
+  check(
+    '空输入 → 200 + 空列表（不是错误）',
+    sEmpty.list?.length === 0 && sEmpty.keyword === '',
+    JSON.stringify(sEmpty),
+  );
+  check(
+    '纯空格 → keyword 归一化为空串',
+    (await request('/search/suggest?q=%20%20')).keyword === '',
+  );
+
+  // 联想绝不能写 `search_logs`：边打字就把"新能源汽""新能源汽⻋"这类中间态
+  // 写进榜里，热搜会被输入过程污染（词越长，中间态越多）。
+  //
+  // 计数用**不同的 days** 读两次：热搜榜有 60s 缓存（D6），同一个键的第二次
+  // 读会命中缓存并返回上一份结果——那样"有没有新增"根本测不出来，
+  // 断言会变成恒真。days 参与缓存键，换一个值就是一次真实查询。
+  const countOf = async (term, days) =>
+    (await request(`/news/search/hot?days=${days}&limit=50`)).list.find((t) => t.term === term)
+      ?.count ?? 0;
+  const probe = `联想探针${String(Date.now()).slice(-6)}`;
+  await request(`/news/search?q=${encodeURIComponent(probe)}`);
+  const probeBefore = await countOf(probe, 6);
+  for (const q of [probe.slice(0, 2), probe.slice(0, 4), probe]) {
+    await request(`/search/suggest?q=${encodeURIComponent(q)}`);
+  }
+  const probeAfter = await countOf(probe, 5);
+  check(
+    '联想不写 search_logs（热搜计数不变）',
+    probeBefore === 1 && probeAfter === 1,
+    `${probeBefore} → ${probeAfter}`,
+  );
+
+  // hot 源：搜过的词按前缀回来
+  const sHot = await request(`/search/suggest?q=${encodeURIComponent(probe.slice(0, 2))}`);
+  check(
+    'hot 源：搜过的词按前缀出现',
+    (sHot.list ?? []).some((i) => i.term === probe && i.kind === 'hot'),
+    JSON.stringify(sHot.list?.slice(0, 3)),
+  );
+
+  // correct 源：错一个字能回到真实搜过的词（编辑距离 1）
+  const typo = `${probe.slice(0, -1)}X`;
+  const sCorrect = await request(`/search/suggest?q=${encodeURIComponent(typo)}`);
+  check(
+    'correct 源：错一个字回到真实词',
+    (sCorrect.list ?? []).some((i) => i.term === probe && i.kind === 'correct'),
+    JSON.stringify(sCorrect.list?.slice(0, 3)),
+  );
+
+  // title 源：双端种子标题一致（n5「新能源汽车出口…」以"新能源"开头）
+  const sTitle = await request(`/search/suggest?q=${encodeURIComponent('新能源')}`);
+  check(
+    'title 源：标题前缀出现',
+    (sTitle.list ?? []).some((i) => i.kind === 'title' && i.term.startsWith('新能源')),
+    JSON.stringify(sTitle.list?.slice(0, 3)),
+  );
+  check(
+    '联想项只含 term / kind / hitCount（不下发资讯内容）',
+    sTitle.list?.length > 0 &&
+      sTitle.list.every((i) => Object.keys(i).sort().join() === 'hitCount,kind,term'),
+    JSON.stringify(sTitle.list?.[0]),
+  );
+
+  // 边界：与 FastAPI 的 `ge=1, le=20` 同口径，mock 也必须**拒绝**而非夹取
+  let badLimit = false;
+  try {
+    await request('/search/suggest?q=a&limit=0');
+  } catch {
+    badLimit = true;
+  }
+  check('limit=0 被拒（422）', badLimit);
+  let overLimit = false;
+  try {
+    await request('/search/suggest?q=a&limit=21');
+  } catch {
+    overLimit = true;
+  }
+  check('limit=21 被拒（上限 20）', overLimit);
 
   // 3) 登录错误密码 → 前端展示 S16 文案
   let s16 = '';

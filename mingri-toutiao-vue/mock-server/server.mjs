@@ -1746,6 +1746,68 @@ function requireAuth(req, res) {
   return t;
 }
 
+/* ---------------------- 搜索联想（E2 / P1-70）---------------------- */
+
+/**
+ * 以下两个函数与后端 `app/routers/search.py` 的 `trigram_similarity` /
+ * `edit_distance_at_most_one` 是**同一套规则的第二份实现**（mock 的整体债务
+ * 见 backlog D4）。常量与判据逐条对齐，由契约脚本对照：
+ * - 边界补齐：两个前导空格 + 一个尾随空格（不补齐时短错词的相似度恒为 0）；
+ * - 纠错取「相似度 ≥ 0.3」**或**「编辑距离 ≤ 1」——两条判据缺一都会漏掉
+ *   最常见的一类中文错字（详见后端实现里的注释）。
+ */
+const SUGGEST_MIN_SIMILARITY = 0.3;
+const SUGGEST_LEN_TOLERANCE = 2;
+const SUGGEST_TITLE_MAX_LEN = 30;
+const SUGGEST_POOL_SIZE = 200;
+
+function trigrams(s) {
+  if (!s) return new Set();
+  const padded = `  ${s} `;
+  const out = new Set();
+  for (let i = 0; i + 2 < padded.length; i += 1) out.add(padded.slice(i, i + 3));
+  if (out.size === 0) out.add(padded);
+  return out;
+}
+
+function trigramSimilarity(a, b) {
+  const ta = trigrams(a);
+  const tb = trigrams(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let shared = 0;
+  for (const t of ta) if (tb.has(t)) shared += 1;
+  return shared / (ta.size + tb.size - shared);
+}
+
+/** 编辑距离是否 ≤ 1（"打错 / 打多 / 打漏一个字"），不求精确值。 */
+function editDistanceAtMostOne(a, b) {
+  if (a === b) return true;
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let diff = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    diff += 1;
+    if (diff > 1) return false;
+    if (la === lb) {
+      i += 1;
+      j += 1;
+    } else if (la > lb) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return diff + (la - i) + (lb - j) <= 1;
+}
+
 /* ----------------------------- 路由 ----------------------------- */
 
 /**
@@ -2090,6 +2152,78 @@ const server = createServer(async (req, res) => {
       .slice(0, limit)
       .map(([term, count]) => ({ term, count }));
     return ok(res, { list, days: 7 });
+  }
+
+  // GET /search/suggest —— 搜索联想（E2 / P1-70）：热搜邻居 / 纠错 / 标题前缀
+  //
+  // 与后端的三处行为必须一致，否则"在 mock 上开发前端"会给出与生产不同的下拉：
+  // ① **不写** `terms`（联想是输入过程，不是搜索行为，污染热搜榜）；
+  // ② 只给词，不带资讯字段；③ 空输入返回 200 + 空列表，不是错误。
+  if (head === 'search' && a === 'suggest' && !b && method === 'GET') {
+    const raw = (url.searchParams.get('q') || '').trim().slice(0, 50);
+    // 与 FastAPI 的 `Query(8, ge=1, le=20)` 同口径：**拒绝**而不是静默夹取。
+    // 夹取会让前端在 mock 上永远测不出"传错参数"，到了真后端才 422。
+    const limitParam = Number(url.searchParams.get('limit') ?? 8);
+    if (!Number.isInteger(limitParam) || limitParam < 1 || limitParam > 20) {
+      return fail(res, 422, 42200, '参数校验失败：limit 须为 1~20 的整数');
+    }
+    const limit = limitParam;
+    if (!raw) return ok(res, { list: [], keyword: '' });
+    const kw = raw.toLowerCase();
+
+    // 源 1（热搜邻居）与源 2（纠错）共用候选池：与后端同一口径的排序
+    const pool = [...terms.entries()]
+      .sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
+      .slice(0, SUGGEST_POOL_SIZE);
+
+    const hot = [];
+    const correct = [];
+    for (const [term, count] of pool) {
+      const low = term.toLowerCase();
+      if (low.startsWith(kw)) {
+        hot.push({ term, count });
+        continue;
+      }
+      if (low === kw) continue; // 与输入完全一样的词不是"纠错"
+      if (Math.abs(term.length - raw.length) > SUGGEST_LEN_TOLERANCE) continue;
+      const sim = trigramSimilarity(low, kw);
+      if (sim >= SUGGEST_MIN_SIMILARITY || editDistanceAtMostOne(low, kw)) {
+        correct.push({ term, count, sim });
+      }
+    }
+    hot.sort((x, y) => y.count - x.count || x.term.localeCompare(y.term));
+    correct.sort((x, y) => y.sim - x.sim || y.count - x.count || x.term.localeCompare(y.term));
+
+    // 源 3：标题前缀（过长不采纳；已下架不参与——搜得到却点开是更差的体验）
+    const titles = news
+      .filter(
+        (n) =>
+          n.hidden !== true &&
+          String(n.title ?? '')
+            .toLowerCase()
+            .startsWith(kw),
+      )
+      .sort(
+        (x, y) =>
+          String(y.publishedAt ?? '').localeCompare(String(x.publishedAt ?? '')) ||
+          String(y.id).localeCompare(String(x.id)),
+      )
+      .map((n) => String(n.title ?? '').trim())
+      .filter((t) => t && t.length <= SUGGEST_TITLE_MAX_LEN)
+      .slice(0, limit);
+
+    const out = [];
+    const seen = new Set();
+    const push = (term, kind, hitCount) => {
+      const key = term.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ term, kind, hitCount });
+    };
+    for (const i of hot) push(i.term, 'hot', i.count);
+    for (const i of correct) push(i.term, 'correct', i.count);
+    for (const t of titles) push(t, 'title', 0);
+    return ok(res, { list: out.slice(0, limit), keyword: raw });
   }
 
   // GET /news/:id

@@ -747,7 +747,11 @@ class Report(Base):
     reason = Column(String(20), nullable=False)
     status = Column(String(12), nullable=False, default="pending")
     resolution = Column(String(12), nullable=True)  # hidden | kept（人工结论）
-    created_at = Column(String(30), nullable=False, default=now_str, index=True)
+    # 刻意**不加单列索引**：复核队列是按 `status` 过滤 + 按 `id` 倒序走 keyset
+    # （见 `routers/admin/reports.py`），没有任何按 created_at 过滤/排序的查询。
+    # P1-65 这里写了 `index=True` 但迁移 0031 没建它，于是 `alembic check`
+    # 一直报漂移——补迁移不如去掉：一个没人用的索引只是给每次举报多加一次写放大。
+    created_at = Column(String(30), nullable=False, default=now_str)
     resolved_at = Column(String(30), nullable=True)
     resolved_by = Column(String(20), nullable=True)  # 管理员手机号
 

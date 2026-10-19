@@ -80,6 +80,28 @@ def record_search(db: Session, term: str, user_id: int | None = None, now=None) 
     return True
 
 
+def recent_terms(
+    db: Session, days: int = HOT_WINDOW_DAYS, now=None, limit: int = 100
+) -> list[tuple[str, int]]:
+    """窗口内搜索次数 Top-N 的词（次数倒序，同次数按词升序——顺序稳定）。
+
+    **热搜榜与搜索联想共用这一份查询**：两处口径必须一致，否则会出现
+    "榜上是 A、联想里却没有 A"这种既难复现也难解释的漂移。联想需要的候选
+    比榜上的多，故 `limit` 由调用方给，榜给展示条数、联想给候选池大小。
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = _iso(now - timedelta(days=days))
+    rows = (
+        db.query(SearchLog.term, func.count(SearchLog.id).label("c"))
+        .filter(SearchLog.created_at >= cutoff)
+        .group_by(SearchLog.term)
+        .order_by(func.count(SearchLog.id).desc(), SearchLog.term.asc())
+        .limit(limit)
+        .all()
+    )
+    return [(t, int(c)) for t, c in rows]
+
+
 def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=None) -> list[dict]:
     """近 `days` 天热词，按搜索次数倒序；同次数按词升序（保证顺序稳定）。
 
@@ -102,17 +124,10 @@ def hot_terms(db: Session, limit: int = 10, days: int = HOT_WINDOW_DAYS, now=Non
         if cached is not None:
             return cached
 
-    now = now or datetime.now(timezone.utc)
-    cutoff = _iso(now - timedelta(days=days))
-    rows = (
-        db.query(SearchLog.term, func.count(SearchLog.id).label("c"))
-        .filter(SearchLog.created_at >= cutoff)
-        .group_by(SearchLog.term)
-        .order_by(func.count(SearchLog.id).desc(), SearchLog.term.asc())
-        .limit(limit)
-        .all()
-    )
-    out = [{"term": t, "count": int(c)} for t, c in rows]
+    out = [
+        {"term": t, "count": c}
+        for t, c in recent_terms(db, days=days, now=now, limit=limit)
+    ]
     if use_cache:
         # 空榜也缓存：无数据时每次都跑聚合同样是浪费（而且空榜更常见于新站）
         _hot_cache.set(key, out, HOT_TERMS_TTL_SECONDS)

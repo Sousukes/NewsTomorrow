@@ -93,6 +93,9 @@ def _trgm_available(db: Session) -> bool:
 # 因此层级严格成立）。权重经本地 PG 真实中文查询验证（记录于《优化落地记录》P1-11）。
 _SEARCH_TITLE_BONUS = 100
 _SEARCH_SUMMARY_BONUS = 10
+# E2：正文入召回，权重最低且**不加 similarity**（见 `_search_ranked` 注释）。
+# 1 << 10 << 100 的间隔保证层级严格成立：正文命中的那篇绝不会压过标题命中的。
+_SEARCH_CONTENT_BONUS = 1
 _SEARCH_TITLE_WEIGHT = 2
 
 # ILIKE 模式串里的特殊字符：不转义时用户输入 `%` 会被当成通配符，
@@ -115,6 +118,14 @@ def _search_ranked(db: Session, keyword: str, page: int, pageSize: int):
     影响造成召回缺口；而 **ILIKE 可直接吃 pg_trgm 的 GIN 索引**
     （EXPLAIN 实测 `Bitmap Index Scan on ix_news_title_trgm`），
     大小写不敏感、无阈值、与旧行为召回口径一致，短词才退化为全表扫描（毫秒级）。
+
+    E2：正文（`content`）也入召回，但遵守三条界线——
+    1. **权重最低**（1，见 `_SEARCH_CONTENT_BONUS`）：标题命中仍严格压过正文命中；
+    2. **不给 content 建 trigram 索引**：正文单条可达 8000 字（E1 上限），GIN 索引
+       的体积与维护代价都不可接受。当前量级（数百条）下 ILIKE 全表扫描是毫秒级；
+       **数据量上到万级需要换方案**（独立索引 / 外部检索），届时这里要重写；
+    3. **正文不计 similarity**：无索引可吃的相似度表达式会让每条正文都跑一遍
+       三元组计算，收益（正文命中之间的细排）远小于代价。
     """
     like = f"%{_escape_like(keyword)}%"
     # 相似度大小写敏感，两侧同时 lower 以与 ILIKE 的语义对齐
@@ -123,10 +134,17 @@ def _search_ranked(db: Session, keyword: str, page: int, pageSize: int):
     sim_summary = func.similarity(func.lower(func.coalesce(News.summary, "")), kw)
     title_hit = case((News.title.ilike(like, escape="\\"), _SEARCH_TITLE_BONUS), else_=0)
     summary_hit = case((News.summary.ilike(like, escape="\\"), _SEARCH_SUMMARY_BONUS), else_=0)
-    score = title_hit + summary_hit + sim_title * _SEARCH_TITLE_WEIGHT + sim_summary
+    content_hit = case((News.content.ilike(like, escape="\\"), _SEARCH_CONTENT_BONUS), else_=0)
+    score = (
+        title_hit + summary_hit + content_hit + sim_title * _SEARCH_TITLE_WEIGHT + sim_summary
+    )
 
     query = db.query(News).filter(
-        or_(News.title.ilike(like, escape="\\"), News.summary.ilike(like, escape="\\")),
+        or_(
+            News.title.ilike(like, escape="\\"),
+            News.summary.ilike(like, escape="\\"),
+            News.content.ilike(like, escape="\\"),
+        ),
         # P1-20：已下架内容不参与搜索召回
         News.hidden.is_(False),
     )
@@ -145,6 +163,11 @@ def _search_fallback(db: Session, keyword: str, page: int, pageSize: int):
 
     排序规则与 PG 路径同构：标题命中（0）先于仅摘要命中（1），同级按发布时间倒序、
     id 倒序。确定性可比；层内细粒度相似度排序是 PG 专属能力，此处不模仿。
+
+    **E2 后刻意不加正文**（D2 定案）：这条路径的存在意义是"没有 trgm 时也能搜"，
+    而正文没有索引可吃，加进来会把扫描面从几百字的标题+摘要扩大到单条可达
+    8000 字的正文——在它本来就要服务的受限环境里是明显的负担，且排序口径会
+    与 PG 路径不对称（同一查询两端结果不同，比少召回几条更难解释）。
     """
     like = f"%{_escape_like(keyword)}%"
     title_hit = case((News.title.ilike(like, escape="\\"), 0), else_=1)
@@ -407,9 +430,11 @@ def search_news(
     """服务端搜索：标题/摘要匹配，**按相关度排序**（P1-11）。
 
     - **PG + pg_trgm**：ILIKE 召回（GIN 索引可加速，大小写不敏感），按
-      `100×标题命中 + 10×摘要命中 + 2×similarity(标题) + similarity(摘要)`
-      分层加权排序——标题整词命中压过摘要命中，层内按相似度细排；
-    - **SQLite / 扩展缺失**：ILIKE 召回，标题命中优先，其余按时间倒序。
+      `100×标题命中 + 10×摘要命中 + 1×正文命中 + 2×similarity(标题) + similarity(摘要)`
+      分层加权排序——标题整词命中压过摘要命中、摘要压过正文，层内按相似度细排
+      （E2 起正文入召回；正文不计 similarity，理由见 `_search_ranked`）；
+    - **SQLite / 扩展缺失**：ILIKE 召回（**不含正文**，理由见 `_search_fallback`），
+      标题命中优先，其余按时间倒序。
 
     为何不用 `tsvector` + `ts_rank`：PostgreSQL 内置分词器**不做中文分词**，
     连续汉字整体算一个 token，`to_tsquery('simple', '暴雨')` 匹配不到
