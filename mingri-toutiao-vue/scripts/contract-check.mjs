@@ -1221,6 +1221,82 @@ const run = async () => {
     check('未知源的趋势 404', missing);
   }
 
+  // 13.5) 管理端：运营大盘（P1-76 / E7）
+  //      默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //      核心口径：单端点返回全部 5 个板块（少一个就是"页面有一块是空的"，
+  //      而接口层看不出来）；days 越界在校验层被拒、超保留期被收敛；
+  //      计数口径（可见/隐藏分开、待办只数 pending）由后端单测钉，这里只查形状。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const dash = await request('/admin/dashboard', { token });
+    check(
+      'GET /admin/dashboard 返回全部板块',
+      dash.days > 0 &&
+        typeof dash.generatedAt === 'string' &&
+        !!dash.content &&
+        !!dash.todo &&
+        !!dash.engagement &&
+        !!dash.sourceHealth &&
+        !!dash.moderation &&
+        !!dash.search,
+      JSON.stringify(Object.keys(dash)),
+    );
+    check(
+      'content 六项计数齐全（news/newsHidden/comments/users/sources/sourcesEnabled）',
+      ['news', 'newsHidden', 'comments', 'users', 'sources', 'sourcesEnabled'].every(
+        (k) => typeof dash.content[k] === 'number',
+      ),
+      JSON.stringify(dash.content),
+    );
+    check(
+      'todo 三条队列（reports/commentReviews/nicknameReviews）',
+      ['reports', 'commentReviews', 'nicknameReviews'].every(
+        (k) => typeof dash.todo[k] === 'number',
+      ),
+      JSON.stringify(dash.todo),
+    );
+    check(
+      'sourceHealth 含 windowDays/unhealthy/worst，worst 按失败率升序',
+      typeof dash.sourceHealth.windowDays === 'number' &&
+        typeof dash.sourceHealth.unhealthy === 'number' &&
+        Array.isArray(dash.sourceHealth.worst) &&
+        (dash.sourceHealth.worst ?? []).every(
+          (w) =>
+            typeof w.key === 'string' &&
+            typeof w.attempts === 'number' &&
+            typeof w.failed === 'number' &&
+            (w.rate === null || typeof w.rate === 'number'),
+        ) &&
+        (dash.sourceHealth.worst ?? []).every(
+          (w, i, a) => i === 0 || (a[i - 1].rate ?? 1) <= (w.rate ?? 1),
+        ),
+      `worst=${(dash.sourceHealth.worst ?? []).map((w) => w.key).join(',')}`,
+    );
+    check(
+      'moderation 命中趋势按天升序且两序列齐全',
+      Array.isArray(dash.moderation.hitsTrend) &&
+        (dash.moderation.hitsTrend ?? []).every(
+          (p, i, a) =>
+            typeof p.date === 'string' &&
+            typeof p.sensitive === 'number' &&
+            typeof p.nickname === 'number' &&
+            (i === 0 || a[i - 1].date < p.date),
+        ),
+      `trend=${(dash.moderation.hitsTrend ?? []).length} 天`,
+    );
+    const dash7 = await request('/admin/dashboard?days=7', { token });
+    check('days 回显（7）', dash7.days === 7, String(dash7.days));
+    const dashBig = await request('/admin/dashboard?days=90', { token });
+    check('days 超保留期被收敛到 30', dashBig.days === 30, String(dashBig.days));
+
+    let badDays = false;
+    try {
+      await request('/admin/dashboard?days=999', { token });
+    } catch {
+      badDays = true;
+    }
+    check('days 越界被拒（le=365）', badDays);
+  }
+
   // 14) 管理端：资讯审核与下架（P1-20）
   //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
   //     核心口径：软下架可恢复、公开四路实时过滤（对外与不存在同码 40400）、

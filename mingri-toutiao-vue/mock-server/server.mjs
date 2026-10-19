@@ -1708,6 +1708,104 @@ function mockSourceHealth(row, requestedDays) {
   };
 }
 
+/**
+ * 演示用的运营大盘（E7）：与真实后端 `GET /api/admin/dashboard` 同形状。
+ *
+ * 数字**全部从 mock 自己的状态推导**（news / comments / hits / accounts /
+ * sources / marks…），不写死——否则演示时改了一条数据大盘不动，反而像坏了。
+ * 两个 mock 不建模的队列给 0 并在注释里说明，前端不因此空白。
+ */
+function mockDashboard(win) {
+  const allComments = Object.values(comments).flat();
+  const cutoff = Date.now() - win * 24 * 60 * 60 * 1000;
+  const inWin = (iso) => {
+    const t = Date.parse(iso);
+    return Number.isFinite(t) && t >= cutoff;
+  };
+  const dayOf = (iso) => String(iso || '').slice(0, 10);
+
+  // 命中趋势：两个序列合并成"同一天一个点"，缺的那条补 0（与后端同口径）
+  const trend = new Map();
+  const bump = (day, field) => {
+    if (!day) return;
+    const cur = trend.get(day) || { date: day, sensitive: 0, nickname: 0 };
+    cur[field] += 1;
+    trend.set(day, cur);
+  };
+  for (const h of hits) bump(dayOf(h.createdAt), 'sensitive');
+  for (const h of nicknameHits) bump(dayOf(h.createdAt), 'nickname');
+  const hitsTrend = [...trend.values()].sort((x, y) => x.date.localeCompare(y.date));
+
+  // 源健康：复用单源趋势的同一套演示模型（四种故障形态就在那里）
+  const worst = [];
+  for (const row of sources) {
+    const s = mockSourceHealth(row, win).summary;
+    if (!s.attempts || !s.failed) continue; // 没有尝试 = 空闲，不是不健康
+    worst.push({
+      key: row.key,
+      name: row.name,
+      attempts: s.attempts,
+      ok: s.ok,
+      failed: s.failed,
+      rate: s.rate,
+      avgItems: s.avgItems,
+      lastFailAt: s.lastFailAt,
+    });
+  }
+  worst.sort((a, b) => (a.rate ?? 1) - (b.rate ?? 1) || b.attempts - a.attempts);
+
+  return {
+    days: win,
+    generatedAt: new Date().toISOString(),
+    content: {
+      news: news.filter((n) => n.hidden !== true).length,
+      newsHidden: news.filter((n) => n.hidden === true).length,
+      comments: allComments.length,
+      users: accounts.size,
+      sources: sources.length,
+      sourcesEnabled: sources.filter((s) => s.enabled).length,
+    },
+    todo: {
+      // mock 不建模举报复核队列（用户举报只进 POST /reports 的响应），给 0
+      reports: 0,
+      commentReviews: allComments.filter((c) => c.pendingReview).length,
+      nicknameReviews: [...accounts.values()].filter((a) => a.pendingReview).length,
+    },
+    engagement: {
+      searches: terms.size,
+      favorites: [...marks.values()].reduce((n, m) => n + (m.favorites?.size || 0), 0),
+      history: [...marks.values()].reduce((n, m) => n + (m.history?.size || 0), 0),
+      follows: [...follows.values()].reduce((n, f) => n + (f.keys?.size || 0), 0),
+      exposures: [...exposures.values()].reduce((n, e) => n + e.size, 0),
+      dislikes: [...dislikes.values()].reduce(
+        (n, d) => n + (d.news?.size || 0) + (d.source?.size || 0),
+        0,
+      ),
+    },
+    sourceHealth: {
+      windowDays: win,
+      unhealthy: worst.length,
+      worst: worst.slice(0, 5),
+    },
+    moderation: {
+      newsHidden: news.filter((n) => n.hidden === true && inWin(n.hiddenAt)).length,
+      commentsHidden: allComments.filter((c) => c.hidden === true && inWin(c.hiddenAt)).length,
+      hits: {
+        sensitive: hits.length,
+        nickname: nicknameHits.length,
+      },
+      hitsTrend,
+    },
+    search: {
+      hot: [...terms.entries()]
+        .map(([term, at]) => ({ term, count: 1, at }))
+        .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+        .slice(0, 10)
+        .map(({ term, count }) => ({ term, count })),
+    },
+  };
+}
+
 /** 鉴权 + 管理员校验；失败已直接写响应，返回 null 表示应中断 */
 function requireAdmin(req, res) {
   const t = requireAuth(req, res);
@@ -3837,6 +3935,19 @@ const server = createServer(async (req, res) => {
       hasMore,
       nextCursor: hasMore && items.length ? String(items[items.length - 1].id) : null,
     });
+  }
+
+  // GET /admin/dashboard —— 运营大盘（E7）
+  if (head === 'admin' && a === 'dashboard' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    // days 校验与真实后端 Query(ge=1, le=365) 对齐；超出保留期由 window 收敛
+    // （与 /admin/sources/:key/health 同一处方，避免两个后端口径不一致）
+    const raw = url.searchParams.get('days');
+    const bad = raw !== null && (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 365);
+    if (bad) return fail(res, 422, 42200, '参数校验失败：days 须为 1~365 的整数');
+    const requested = raw === null ? 0 : Number(raw);
+    const win = requested > 0 ? Math.min(requested, HEALTH_KEEP_DAYS) : HEALTH_KEEP_DAYS;
+    return ok(res, mockDashboard(win));
   }
 
   fail(res, 404, 40404, '接口不存在');

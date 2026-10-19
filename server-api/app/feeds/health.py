@@ -91,7 +91,7 @@ def prune(db: Session, keep_days: int | None = None) -> int:
         return 0
 
 
-def _since(days: int) -> datetime:
+def since(days: int) -> datetime:
     """N 天前的 UTC aware 锚点（`DateTime` 列的**参数绑定值**，不是字符串）。
 
     D1-1：`at` 列改成 `DateTime` 后，这里返回 datetime 对象由 SQLAlchemy
@@ -116,7 +116,7 @@ def summarize(db: Session, key: str, days: int) -> dict:
     `avgItems` 是**成功轮次的平均条数**而不是全部轮次的：失败轮次天然是 0 条，
     混进来会让"条数退化"被失败率掩盖——这是本模块要抓的第二类隐形故障。
     """
-    cutoff = _since(days)
+    cutoff = since(days)
     row = (
         db.execute(
             select(
@@ -158,7 +158,7 @@ def summarize_many(db: Session, keys: list[str], days: int) -> dict[str, dict]:
     """
     if not keys:
         return {}
-    cutoff = _since(days)
+    cutoff = since(days)
     rows = (
         db.execute(
             select(
@@ -208,7 +208,7 @@ def daily_points(db: Session, key: str, days: int) -> list[dict]:
     代价是把窗口内的行取回 Python：该表有保留期（`FEED_HEALTH_KEEP_DAYS`
     默认 30 天），量级在千行，远小于一次 500。
     """
-    cutoff = _since(days)
+    cutoff = since(days)
     rows = (
         db.execute(
             select(
@@ -254,7 +254,7 @@ def recent_failures(db: Session, key: str, days: int, limit: int = 20) -> list[d
 
     只列失败：成功在趋势图里已经看得到，这里要回答的是"它到底为什么挂"。
     """
-    cutoff = _since(days)
+    cutoff = since(days)
     rows = (
         db.execute(
             select(RssSourceHealthEvent)

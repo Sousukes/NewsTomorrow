@@ -276,7 +276,7 @@ class TestDateTimeColumnBoundary:
 
         from app.feeds import health as health_mod
 
-        assert inspect.isfunction(health_mod._since)
-        anchor = health_mod._since(3)
+        assert inspect.isfunction(health_mod.since)
+        anchor = health_mod.since(3)
         assert isinstance(anchor, datetime), f"cutoff 应是 datetime，实际 {type(anchor)}"
         assert anchor.tzinfo is not None, "cutoff 必须是 aware（naive 在 PG 里按会话时区解释）"

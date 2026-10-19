@@ -104,6 +104,7 @@ router = APIRouter(
 # 提前导入会变成循环依赖（那时 require_admin 还没存在）。
 from . import audit as audit_mod  # noqa: E402
 from . import comments as comments_mod  # noqa: E402
+from . import dashboard as dashboard_mod  # noqa: E402
 from . import news as news_mod  # noqa: E402
 from . import nickname as nickname_mod  # noqa: E402
 from . import reports as reports_mod  # noqa: E402
@@ -124,6 +125,7 @@ for _mod in (
     users_mod,
     audit_mod,
     reports_mod,
+    dashboard_mod,
 ):
     router.include_router(_mod.router)
 
