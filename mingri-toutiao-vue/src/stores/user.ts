@@ -16,6 +16,7 @@ import {
   removeFavorite,
   type MarksPayload,
 } from '@/api/me';
+import { reportExposures } from '@/api/feedback';
 import { useNewsStore } from '@/stores/news';
 import { toThemeMode, type ThemeMode } from '@/constants/theme';
 
@@ -32,6 +33,25 @@ const ANON_SCOPE = 'anonymous';
 const SEARCH_PREFIX = 'mingri-toutiao:search-history:';
 const searchKey = (userId: number | null) =>
   `${SEARCH_PREFIX}${userId === null ? ANON_SCOPE : `u${userId}`}`;
+/**
+ * 曝光（E3-a）**单独分键**，与搜索历史同款处方：同一套作用域后缀规则，
+ * 但**不并入 marks**。两条理由：
+ * 1. 频次差一个量级——marks 的变更由用户显式动作触发，曝光是攒批 10 条一发，
+ *    并进 marks 会让每一批都重写一遍收藏/历史；
+ * 2. 它**不上云做双向同步**：登录时单向推送一次即由服务端负责，
+ *    而 marks 要参与并集合并。混在一个键里会让同步逻辑多一条要排除的分支。
+ */
+const EXPOSURES_PREFIX = 'mingri-toutiao:exposures:';
+const exposureKey = (userId: number | null) =>
+  `${EXPOSURES_PREFIX}${userId === null ? ANON_SCOPE : `u${userId}`}`;
+
+/** 曝光本地保留期（天）——与服务端 `EXPOSURE_RETENTION_DAYS` 对齐 */
+export const EXPOSURE_RETENTION_DAYS = 7;
+/**
+ * 本地曝光条数上限。界两件事：localStorage 体积，以及"每批都要重写整份 map"
+ * 的写入成本（攒批 10 条一发，map 越大每发越贵）。超限时保留**最近**的 N 条。
+ */
+export const EXPOSURE_CAP = 500;
 
 /** 浏览历史本地/云端共同遵守的上限（与服务端 HISTORY_MAX 一致） */
 export const HISTORY_LIMIT = 50;
@@ -138,6 +158,64 @@ function dedupe(ids: string[]): string[] {
   return Array.from(new Set(ids));
 }
 
+/* ---------- 曝光（E3-a） ---------- */
+
+/** id → 最近一次曝光的时间戳。形状与 `api/feedback.ts` 离线分支一致 */
+export type ExposureMap = Record<string, number>;
+
+/** 空 map 必须是工厂：共享常量会被浅拷贝成同一个实例（同 `emptyMarks` 的理由） */
+const emptyExposures = (): ExposureMap => ({});
+
+function loadExposures(userId: number | null): ExposureMap {
+  const parsed = readJson<{ exposures?: unknown }>(exposureKey(userId));
+  const raw = parsed?.exposures;
+  if (!raw || typeof raw !== 'object') return emptyExposures();
+  const out: ExposureMap = {};
+  for (const [id, ts] of Object.entries(raw as Record<string, unknown>)) {
+    const n = Number(ts);
+    // 只收正整数时间戳：脏值（字符串/0/负数）宁可丢掉，也不该让分桶算出怪结果
+    if (id && Number.isFinite(n) && n > 0) out[id] = n;
+  }
+  return out;
+}
+
+function saveExposures(userId: number | null, map: ExposureMap): void {
+  writeJson(exposureKey(userId), { exposures: map });
+}
+
+function clearExposures(userId: number | null): void {
+  try {
+    localStorage.removeItem(exposureKey(userId));
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 合并两份曝光：同一 id 取**较新**的时间戳（匿名期与账号期都看过它） */
+function mergeExposureMaps(a: ExposureMap, b: ExposureMap): ExposureMap {
+  const out: ExposureMap = { ...a };
+  for (const [id, ts] of Object.entries(b)) {
+    out[id] = Math.max(out[id] ?? 0, ts);
+  }
+  return out;
+}
+
+/**
+ * 按保留期裁剪，再按条数上限保留**最近**的 N 条（新的在前）。
+ *
+ * 两个上限都要：只裁时间的话，一个把浏览器当后台挂着的用户能攒出几千条；
+ * 只裁条数的话，几周前的一次误触会一直占着位置。
+ */
+function pruneExposures(map: ExposureMap, now: number = Date.now()): ExposureMap {
+  const cutoff = now - EXPOSURE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return Object.fromEntries(
+    Object.entries(map)
+      .filter(([, ts]) => ts >= cutoff)
+      .sort((x, y) => y[1] - x[1])
+      .slice(0, EXPOSURE_CAP),
+  );
+}
+
 /**
  * 读取偏好，并**一次性迁移**旧格式。
  *
@@ -199,6 +277,12 @@ export const useUserStore = defineStore('user', () => {
   const history = ref<string[]>(marks.history);
   /** 搜索历史：仅本地，按同一套作用域隔离（不同账号不串） */
   const searchTerms = ref<string[]>(loadSearchTerms(userId.value));
+  /**
+   * 曝光缓冲（E3-a）：**只有未登录时才往这里记**——已登录时服务端就是落点，
+   * 本地再记一份没有消费者（设计 §十一 理由一）。它的唯一用途是登录时被采纳。
+   * 刻意不做客户端去重：for-you 的去重只有服务端一份实现。
+   */
+  const exposures = ref<ExposureMap>(loadExposures(userId.value));
 
   /** 云端同步状态（供界面展示/排障） */
   const syncing = ref(false);
@@ -255,6 +339,8 @@ export const useUserStore = defineStore('user', () => {
     favorites.value = next.favorites;
     history.value = next.history;
     searchTerms.value = nextTerms;
+    // 曝光随作用域切换（E3-a）：账号数据在登出后仍保留在本地，重新登录即恢复
+    exposures.value = loadExposures(nextUserId);
   }
 
   /** 记录一次搜索：去重置顶 + 超限裁剪 */
@@ -274,6 +360,58 @@ export const useUserStore = defineStore('user', () => {
   function clearSearchHistory() {
     searchTerms.value = [];
     persistMarks();
+  }
+
+  /**
+   * 记一批曝光到**当前作用域**的本地缓冲（E3-a）。
+   *
+   * 只由**未登录**路径调用（见 `exposures` 的注释）：已登录时 `reportExposures`
+   * 直接打服务端，本地这份没有消费者。写盘与改状态在同一个 tick 内完成——
+   * 曝光是最高频的写路径，不能等 watcher 兜底（那会在同一 tick 里被扫到旧值）。
+   */
+  function recordExposures(ids: string[]) {
+    const list = (ids ?? []).map(String).filter(Boolean);
+    if (!list.length) return;
+    const now = Date.now();
+    const next = { ...exposures.value };
+    for (const id of list) next[id] = now;
+    exposures.value = pruneExposures(next, now);
+    saveExposures(userId.value, exposures.value);
+  }
+
+  /**
+   * 登录时采纳曝光（E3-a）：匿名作用域 + 账号作用域合并后**单向推送**服务端。
+   *
+   * 三个刻意的次序：
+   * 1. **先落盘再推送**——推送失败时账号作用域里已有合并结果，下次登录重试即可，
+   *    不需要再从匿名作用域捞一次（那时匿名数据可能已被清）；
+   * 2. **推送成功才清本地副本**（含匿名作用域）——数据已经归属该账号，
+   *    留着会造成下次登录重复推送；
+   * 3. **失败只静默**：曝光丢失的代价只是"这条可能重复出现一次"，
+   *    远小于阻断登录（与 `syncMarks` 同一口径）。
+   */
+  async function adoptExposures(nextUserId: number | null): Promise<void> {
+    const anon = loadExposures(null);
+    const own = loadExposures(nextUserId);
+    const merged = pruneExposures(mergeExposureMaps(own, anon));
+    const ids = Object.keys(merged);
+    if (!ids.length) {
+      // 两边都空（或全在保留期外）：清掉可能残留的过期本地副本
+      clearExposures(null);
+      clearExposures(nextUserId);
+      exposures.value = emptyExposures();
+      return;
+    }
+    saveExposures(nextUserId, merged);
+    try {
+      await reportExposures(ids);
+      clearExposures(nextUserId);
+      clearExposures(null);
+      exposures.value = emptyExposures();
+    } catch {
+      // 保留本地副本，下次登录会再试（幂等，服务端按 id 去重）
+      exposures.value = merged;
+    }
   }
 
   /** 能同步的前提：构建支持 + 已登录 + 知道是哪个账号 */
@@ -339,6 +477,9 @@ export const useUserStore = defineStore('user', () => {
     saveMarks(nextUserId, adopted);
     clearMarks(null);
 
+    // E3-a：采纳匿名期曝光并推送服务端。放在 clearMarks(null) 之后、
+    // syncMarks 之前——两者互不依赖，但采纳失败不该影响 marks 同步。
+    await adoptExposures(nextUserId);
     await syncMarks();
     return res;
   }
@@ -467,6 +608,7 @@ export const useUserStore = defineStore('user', () => {
     favorites,
     history,
     searchTerms,
+    exposures,
     theme,
     syncing,
     syncError,
@@ -481,6 +623,7 @@ export const useUserStore = defineStore('user', () => {
     addSearchTerm,
     removeSearchTerm,
     clearSearchHistory,
+    recordExposures,
     setTheme,
     setName,
   };

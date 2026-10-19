@@ -96,13 +96,14 @@ function onSort(key: string) {
 /**
  * 曝光判定（E3 / D2）：进入视口 ≥ 50% 且停留 ≥ 500ms 才算看过，攒批上报。
  *
- * **未登录不上报**：曝光去重由服务端做，匿名上报只会吃 401。
- * 匿名用户的收益由下面的「已读原地移除」承担（本地生效、不需要账号）。
- * ——设计 §三 D4 里「匿名曝光落 localStorage 并在登录时采纳」的完整链路
- * 记进了 backlog，本批不做（它需要与 user store 的采纳流程一起改）。
+ * 两条路径（E3-a 补齐了匿名的下半截）：
+ * - **已登录**：直接打 `/me/exposures`，去重由服务端做；
+ * - **未登录**：落本地作用域缓冲，**登录时被采纳并推送**（`user.recordExposures`）。
+ *   客户端刻意不做去重——for-you 的去重只有服务端一份实现，
+ *   在客户端再抄一遍就是第二份实现（设计 §十一 理由一）。
  */
 const exposure = useExposure({
-  report: (ids) => (user.isLoggedIn ? reportExposures(ids) : undefined),
+  report: (ids) => (user.isLoggedIn ? reportExposures(ids) : user.recordExposures(ids)),
 });
 
 /** 卡片元素 → id：v-for 的函数 ref 只给得到组件实例，曝光观察要的是 DOM 节点 */

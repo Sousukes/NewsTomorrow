@@ -28,11 +28,19 @@ vi.mock('@/api/news', () => ({
   normalizeNewsItem: vi.fn((raw: Record<string, unknown>) => raw),
 }));
 
+// E3-a：登录时要把匿名期曝光推送服务端。不打桩就会真的发请求
+vi.mock('@/api/feedback', () => ({
+  reportExposures: vi.fn(async (_ids: string[]) => ({ accepted: 0, written: 0 })),
+}));
+
 import * as authApi from '@/api/auth';
 import type { LoginResult } from '@/api/auth';
+import * as feedbackApi from '@/api/feedback';
 import * as meApi from '@/api/me';
 import { useNewsStore } from '@/stores/news';
 import {
+  EXPOSURE_CAP,
+  EXPOSURE_RETENTION_DAYS,
   HISTORY_LIMIT,
   SEARCH_HISTORY_LIMIT as SEARCH_HISTORY_LIMIT_,
   useUserStore,
@@ -41,6 +49,8 @@ import type { NewsItem } from '@/types';
 
 const PREFS_KEY = 'mingri-toutiao:user';
 const marksKey = (scope: string) => `mingri-toutiao:marks:${scope}`;
+const exposuresKey = (scope: string) => `mingri-toutiao:exposures:${scope}`;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const item = (id: string): NewsItem => ({
   id,
@@ -736,5 +746,207 @@ describe('stores/user 昵称（P1-24）', () => {
     await s.logout();
 
     expect(s.mustChangePassword).toBe(false);
+  });
+});
+
+/**
+ * E3-a：曝光缓冲（未登录落本地作用域）与登录采纳。
+ *
+ * 三条被钉住的不变量：
+ * 1. **匿名期曝光不进服务端**（去了也是 401），只落本地；
+ * 2. **登录时单向推送**，成功才清本地副本——失败保留，下次登录重试（幂等）；
+ * 3. **同一 id 取较新时间戳**：匿名期与账号期都看过它时，不能因为合并丢掉较新那次。
+ */
+describe('stores/user 曝光缓冲与登录采纳（E3-a）', () => {
+  /** 直接往某作用域塞一份曝光存档（绕过 store，模拟"上一段时间攒下的"） */
+  const seed = (scope: string, map: Record<string, number>) =>
+    localStorage.setItem(exposuresKey(scope), JSON.stringify({ exposures: map }));
+  const readSeed = (scope: string): Record<string, number> => {
+    const raw = JSON.parse(localStorage.getItem(exposuresKey(scope)) ?? '{}') as {
+      exposures?: Record<string, number>;
+    };
+    return raw.exposures ?? {};
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    pinia = createPinia();
+    setActivePinia(pinia);
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    for (const s of liveStores) s.$dispose();
+    liveStores.length = 0;
+  });
+
+  it('未登录记录的曝光落匿名作用域，且不进服务端', async () => {
+    const s = makeStore();
+    s.recordExposures(['a', 'b']);
+    await flush();
+
+    const stored = readSeed('anonymous');
+    expect(Object.keys(stored).sort()).toEqual(['a', 'b']);
+    expect(s.exposures).toEqual(stored);
+    // 匿名上报只会吃 401：本地这份的唯一消费者是"登录时采纳"
+    expect(feedbackApi.reportExposures).not.toHaveBeenCalled();
+  });
+
+  it('空批不写盘（"划过什么都没看到"不该留下一个空文件）', async () => {
+    const s = makeStore();
+    s.recordExposures([]);
+    await flush();
+    expect(localStorage.getItem(exposuresKey('anonymous'))).toBeNull();
+    expect(s.exposures).toEqual({});
+  });
+
+  it('同一 id 重复记录只刷新时间戳（幂等，不膨胀）', async () => {
+    const s = makeStore();
+    s.recordExposures(['a']);
+    await flush();
+    const first = readSeed('anonymous').a;
+    s.recordExposures(['a', 'b']);
+    await flush();
+
+    const stored = readSeed('anonymous');
+    expect(Object.keys(stored).sort()).toEqual(['a', 'b']);
+    expect(stored.a).toBeGreaterThanOrEqual(first);
+  });
+
+  it('超过保留期的曝光被裁掉（与服务端 EXPOSURE_RETENTION_DAYS 同口径）', async () => {
+    seed('anonymous', { stale: Date.now() - (EXPOSURE_RETENTION_DAYS + 1) * DAY_MS });
+    const s = makeStore();
+    s.recordExposures(['fresh']);
+    await flush();
+
+    const stored = readSeed('anonymous');
+    expect(Object.keys(stored)).toEqual(['fresh']);
+  });
+
+  it('超过条数上限时保留最近的 N 条', async () => {
+    // 第 i 条的时间戳比第 i+1 条新 1 秒：被裁掉的必须是尾部最旧的
+    const old: Record<string, number> = {};
+    const base = Date.now();
+    for (let i = 0; i < EXPOSURE_CAP + 20; i += 1) old[`id-${i}`] = base - i * 1000;
+    seed('anonymous', old);
+
+    const s = makeStore();
+    s.recordExposures(['brand-new']);
+    await flush();
+
+    const stored = readSeed('anonymous');
+    expect(Object.keys(stored)).toHaveLength(EXPOSURE_CAP);
+    expect(stored['brand-new']).toBeGreaterThan(0);
+    // 最旧的 21 条（id-500 ~ id-519）应被裁掉
+    expect(stored[`id-${EXPOSURE_CAP}`]).toBeUndefined();
+    expect(stored['id-0']).toBeDefined();
+  });
+
+  it('登录时采纳匿名曝光并推送服务端，两份本地副本随即清空', async () => {
+    seed('anonymous', { a: Date.now(), b: Date.now() });
+    vi.mocked(authApi.login).mockResolvedValue({ token: 't', user: { id: 7, name: '用户' } });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+
+    expect(feedbackApi.reportExposures).toHaveBeenCalledTimes(1);
+    const pushed = vi.mocked(feedbackApi.reportExposures).mock.calls[0][0];
+    expect([...pushed].sort()).toEqual(['a', 'b']);
+    // 数据已归属该账号：两份本地副本都该退役，否则下次登录会重复推送
+    expect(localStorage.getItem(exposuresKey('anonymous'))).toBeNull();
+    expect(localStorage.getItem(exposuresKey('u7'))).toBeNull();
+    expect(s.exposures).toEqual({});
+  });
+
+  it('采纳时合并账号作用域里已有的副本（并集，不覆盖）', async () => {
+    seed('anonymous', { a: Date.now() });
+    seed('u7', { b: Date.now() });
+    vi.mocked(authApi.login).mockResolvedValue({ token: 't', user: { id: 7, name: '用户' } });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+
+    const pushed = vi.mocked(feedbackApi.reportExposures).mock.calls[0][0];
+    expect([...pushed].sort()).toEqual(['a', 'b']);
+  });
+
+  it('同一 id 在两份作用域里取较新的时间戳', async () => {
+    const older = Date.now() - 5 * DAY_MS;
+    const newer = Date.now() - 1000;
+    // 账号作用域反而更新：若合并写成"后者覆盖前者"（匿名盖账号），
+    // 这里会退化成 older——两个方向都要钉住，否则断言恒真
+    seed('anonymous', { x: older });
+    seed('u7', { x: newer });
+    // 推送失败 → 本地副本保留，正好能看出合并后留的是哪个时间戳
+    vi.mocked(authApi.login).mockResolvedValue({ token: 't', user: { id: 7, name: '用户' } });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    vi.mocked(feedbackApi.reportExposures).mockRejectedValue(new Error('网络异常'));
+
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+
+    expect(s.exposures.x).toBe(newer);
+    expect(readSeed('u7').x).toBe(newer);
+  });
+
+  it('推送失败保留本地副本，下次登录重试（幂等）', async () => {
+    seed('anonymous', { a: Date.now() });
+    vi.mocked(authApi.login).mockResolvedValue({ token: 't', user: { id: 7, name: '用户' } });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    vi.mocked(authApi.logout).mockResolvedValue(undefined);
+    vi.mocked(feedbackApi.reportExposures).mockRejectedValueOnce(new Error('网络异常'));
+
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+
+    // 失败：账号作用域已落盘（可重试），匿名作用域不清（数据还没被承认）
+    expect(readSeed('u7').a).toBeGreaterThan(0);
+    expect(readSeed('anonymous').a).toBeGreaterThan(0);
+    expect(s.exposures).toEqual({ a: readSeed('u7').a });
+
+    await s.logout();
+    // 登出后匿名作用域仍在 → 重新登录会再试一次
+    vi.mocked(feedbackApi.reportExposures).mockResolvedValue({ accepted: 1, written: 1 });
+    await s.login('13800138000', '123456');
+
+    expect(feedbackApi.reportExposures).toHaveBeenCalledTimes(2);
+    const retried = vi.mocked(feedbackApi.reportExposures).mock.calls[1][0];
+    expect(retried).toEqual(['a']);
+    // 这次成功了：两份副本都清掉
+    expect(localStorage.getItem(exposuresKey('anonymous'))).toBeNull();
+    expect(localStorage.getItem(exposuresKey('u7'))).toBeNull();
+  });
+
+  it('登出切回匿名作用域并载入该作用域的曝光（账号副本不被登出销毁）', async () => {
+    seed('anonymous', { a: Date.now() });
+    vi.mocked(authApi.login).mockResolvedValue({ token: 't', user: { id: 1, name: '用户' } });
+    vi.mocked(meApi.mergeFavorites).mockResolvedValue(emptyPayload);
+    vi.mocked(meApi.mergeHistory).mockResolvedValue(emptyPayload);
+    vi.mocked(authApi.logout).mockResolvedValue(undefined);
+    // 推送失败 → 账号作用域留下合并结果，匿名作用域也未清（数据还没被承认）
+    vi.mocked(feedbackApi.reportExposures).mockRejectedValue(new Error('网络异常'));
+
+    const s = makeStore();
+    await s.login('13800138000', '123456');
+    await s.logout();
+
+    expect(s.userId).toBeNull();
+    expect(Object.keys(s.exposures)).toEqual(['a']); // 载入的是匿名作用域
+    expect(readSeed('u1').a).toBeGreaterThan(0); // 账号副本仍在，重新登录可重试
+  });
+
+  it('脏数据（非正整数时间戳）被忽略，不让分桶算出怪结果', async () => {
+    localStorage.setItem(
+      exposuresKey('anonymous'),
+      JSON.stringify({ exposures: { good: Date.now(), zero: 0, neg: -5, str: 'x' } }),
+    );
+    const s = makeStore();
+    expect(Object.keys(s.exposures)).toEqual(['good']);
   });
 });

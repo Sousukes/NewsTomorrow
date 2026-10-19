@@ -30,7 +30,11 @@ vi.mock('@/stores/news', () => ({ useNewsStore: () => newsState }));
 
 // E6b：关注流需要 user / follows 两个 store。目录是公开数据，这里按「已加载」打桩，
 // 避免每个用例都被 onMounted 的 loadDirectory 干扰。
-const userState = { isLoggedIn: false };
+// E3-a：`recordExposures` 是匿名期的本地缓冲入口（打桩 store 而非 api）
+const userState = {
+  isLoggedIn: false,
+  recordExposures: vi.fn(),
+};
 vi.mock('@/stores/user', () => ({ useUserStore: () => userState }));
 const followsState = {
   keys: [] as string[],
@@ -99,6 +103,8 @@ const settle = async (w: VueWrapper) => {
 beforeEach(() => {
   vi.clearAllMocks();
   routerPush.mockClear();
+  // 登录态是跨用例共享的同一个桩对象，显式复位避免用例间顺序依赖
+  userState.isLoggedIn = false;
   // 已读集合落 localStorage，不清会在用例之间串味
   localStorage.clear();
 });
@@ -263,12 +269,14 @@ describe('HomeFeed 负反馈与曝光（E3）', () => {
       hasMore: false,
     } as never);
 
-  it('未登录不上报曝光（服务端去重只对登录态有意义，匿名上报只会吃 401）', async () => {
+  it('未登录不调服务端接口，改记本地缓冲（E3-a：登录时才被采纳）', async () => {
     userState.isLoggedIn = false;
     const w = mountPage();
     await settle(w);
     exposureState.report?.(['n1']);
+    // 匿名上报只会吃 401；落本地是为了登录时能采纳（设计 §十一 理由一）
     expect(reportExposures).not.toHaveBeenCalled();
+    expect(userState.recordExposures).toHaveBeenCalledWith(['n1']);
     w.unmount();
   });
 
