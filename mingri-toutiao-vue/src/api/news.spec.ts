@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // 关闭 mock，走真实请求分支（测试环境默认 USE_MOCK=true）
 vi.mock('@/api/config', () => ({ USE_MOCK: false, API_BASE: '/api' }));
 
-import { fetchHotTerms, fetchNewsPage, fetchRelated } from '@/api/news';
+import { fetchHotTerms, fetchNewsPage, fetchRelated, fetchSuggestions } from '@/api/news';
 
 /** 构造统一契约响应 { code, message, data } */
 function respond(data: unknown): Response {
@@ -275,4 +275,51 @@ it('关注流传 feed=following 且不带 channel（服务端会忽略 channel�
   const url = vi.mocked(fetch).mock.calls[0][0] as string;
   expect(url).toContain('feed=following');
   expect(url).not.toContain('channel=');
+});
+
+// E2：搜索联想。契约上三条要钉死——空输入不请求、只透传词与 limit、
+// **失败降级为空数组**（联想是输入过程的辅助，坏掉不该让搜索本身不可用）
+describe('fetchSuggestions（E2 联想）', () => {
+  it('空/纯空白输入不发请求', async () => {
+    const spy = vi.fn(async () => respond({ list: [] }));
+    vi.stubGlobal('fetch', spy);
+    await expect(fetchSuggestions('   ')).resolves.toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('正常输入走 /search/suggest，带 q 与 limit', async () => {
+    const spy = vi.fn(async (_url: unknown) =>
+      respond({ list: [{ term: '暴雨预警', kind: 'hot', hitCount: 3 }] }),
+    );
+    vi.stubGlobal('fetch', spy);
+    const list = await fetchSuggestions('暴雨', 8);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const url = spy.mock.calls[0][0] as unknown as string;
+    expect(url).toContain('/search/suggest');
+    expect(url).toContain('q=');
+    expect(list).toEqual([{ term: '暴雨预警', kind: 'hot', hitCount: 3 }]);
+    vi.unstubAllGlobals();
+  });
+
+  it('缺字段归一到安全默认值（kind 不能是 undefined，前端要拿它决定样式）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ list: [{ term: '只有词' }] })),
+    );
+    const [s] = await fetchSuggestions('暴');
+    expect(s.term).toBe('只有词');
+    expect(s.kind).toBe('title');
+    expect(s.hitCount).toBe(0);
+  });
+
+  it('接口失败降级为空数组，不抛出（否则输入过程会被错误打断）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('网络错误');
+      }),
+    );
+    await expect(fetchSuggestions('暴')).resolves.toEqual([]);
+  });
 });

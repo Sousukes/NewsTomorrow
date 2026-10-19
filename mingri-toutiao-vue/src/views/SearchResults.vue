@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import NewsCard from '@/components/NewsCard.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import Button from '@/components/Button.vue';
+import { fetchHotTerms, type HotTerm } from '@/api/news';
 import { useNewsStore } from '@/stores/news';
 import { useUserStore } from '@/stores/user';
 import type { NewsItem } from '@/types';
@@ -23,6 +24,32 @@ const page = ref(1);
 const hasMore = ref(false);
 const loading = ref(false);
 const error = ref('');
+
+/**
+ * 零结果引导用的热搜词（E2 / P1-71）。
+ *
+ * 失败降级为空数组：热搜词是**零结果时的备选路径**，拿不到就不显示那一行，
+ * 换词入口仍然可用——不能让"引导用的内容"自己变成新的报错源。
+ */
+const hotTerms = ref<HotTerm[]>([]);
+onMounted(() => {
+  void fetchHotTerms(6)
+    .then((list) => (hotTerms.value = list))
+    .catch(() => (hotTerms.value = []));
+});
+
+/** 点热搜词 = 换一次搜索：改写 URL query，watch 会触发重新查询 */
+function retry(term: string) {
+  void router.push({ path: '/search/results', query: { q: term } });
+}
+
+/**
+ * 零结果文案把"已下架"这一例外讲清楚（懒标注的做法里没有这条）。
+ * 用户搜一个刚被下架的话题拿到 0 结果，最容易得出的结论是"搜索坏了"。
+ */
+const zeroDesc = computed(() =>
+  error.value ? '搜索服务暂不可用，换个关键词或稍后再试' : '换个关键词试试，或浏览首页推荐',
+);
 
 /** 追加时按 id 去重：翻页之间若有新增/排序变动，同一条可能出现在两页 */
 function mergeUnique(prev: NewsItem[], next: NewsItem[]): NewsItem[] {
@@ -111,13 +138,22 @@ watch(
       <div v-for="i in 3" :key="i" class="results__skeleton" />
     </div>
 
-    <EmptyState
-      v-else
-      icon="search"
-      title="没有找到相关内容"
-      description="换个关键词试试，或浏览首页推荐"
-    >
-      <Button variant="primary" label="返回首页" @click="router.push('/')" />
+    <EmptyState v-else icon="search" title="没有找到相关内容" :description="zeroDesc">
+      <div v-if="hotTerms.length" class="results__retry">
+        <p class="results__retry-h">试试这些热搜词</p>
+        <div class="results__retry-tags">
+          <button
+            v-for="t in hotTerms.slice(0, 6)"
+            :key="t.term"
+            class="results__retry-tag"
+            @click="retry(t.term)"
+          >
+            {{ t.term }}
+          </button>
+        </div>
+      </div>
+      <Button variant="primary" label="换个关键词" @click="router.push('/search')" />
+      <Button variant="secondary" label="返回首页" @click="router.push('/')" />
     </EmptyState>
   </div>
 </template>
@@ -175,6 +211,41 @@ watch(
 .results__end {
   font-size: 12px;
   color: var(--color-text-secondary);
+}
+
+/* 零结果引导（E2）：热搜词给"下一步"，换词按钮保留原路 */
+.results__retry {
+  margin-bottom: 14px;
+  text-align: center;
+}
+
+.results__retry-h {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.results__retry-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.results__retry-tag {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-page-bg);
+  font-size: 12px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.results__retry-tag:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
 }
 
 .results__skeleton {

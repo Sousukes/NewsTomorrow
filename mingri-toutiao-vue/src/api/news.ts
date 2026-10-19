@@ -196,6 +196,92 @@ export async function fetchHotTerms(limit = 10): Promise<HotTerm[]> {
   }
 }
 
+/**
+ * 联想词来源（E2 / P1-70）：`hot` 热搜邻居 / `correct` 纠错 / `title` 标题前缀。
+ *
+ * 前端**只用于展示样式标注**（纠错项标"您是不是想搜"），不做任何业务判断——
+ * 排序与取舍一律以服务端为准，客户端擅自再排会让两端下拉不一致。
+ */
+export type SuggestKind = 'hot' | 'correct' | 'title';
+
+/** 一条联想词。**刻意没有资讯字段**：选词与看结果是两件事（后端契约如此） */
+export interface Suggestion {
+  term: string;
+  kind: SuggestKind;
+  hitCount: number;
+}
+
+/**
+ * 标题来源的采纳上限：与后端 `SUGGEST_TITLE_MAX_LEN` 对齐。
+ * 标题本来就是一条完整新闻标题，超过这个长度的多半是抓取异常，
+ * 塞进下拉会把整个建议框撑坏。
+ */
+const SUGGEST_TITLE_MAX_LEN = 30;
+
+/**
+ * GET /search/suggest —— 搜索联想（E2 / P1-70）。
+ *
+ * `limit` 默认 8、上限 20（与后端 `Query(8, ge=1, le=20)` 一致，越界由后端 422，
+ * 调用方不要自己夹取——夹取会让参数错误在 mock 上永远测不出来）。
+ *
+ * 失败降级为空数组：联想是**输入过程的辅助**，它坏掉不该让搜索本身不可用。
+ * 与热搜词同一取舍。
+ */
+export async function fetchSuggestions(q: string, limit = 8): Promise<Suggestion[]> {
+  const keyword = q.trim();
+  // 空输入不发请求：后端返回 200 + 空列表，但那是一次纯浪费的往返
+  if (!keyword) return [];
+
+  if (USE_MOCK) {
+    // 离线演示：标题前缀 + 与 fetchHotTerms 同一份假热词的前缀。
+    // **不含纠错**：纠错依赖真实搜索日志，离线没有这个数据源，
+    // 造一个"假纠错"反而会让演示效果误导开发者。
+    const kw = keyword.toLowerCase();
+    const fakeHot = [
+      '国产大飞机',
+      '新能源汽车',
+      '楼市新政',
+      '暴雨预警',
+      '航母训练',
+      '教育课后服务',
+    ];
+    const out: Suggestion[] = [];
+    const seen = new Set<string>();
+    for (const term of fakeHot) {
+      if (term.toLowerCase().startsWith(kw) && !seen.has(term)) {
+        seen.add(term);
+        out.push({ term, kind: 'hot', hitCount: 100 - out.length * 10 });
+      }
+    }
+    for (const n of mockNews) {
+      const title = String(n.title ?? '').trim();
+      if (
+        title.toLowerCase().startsWith(kw) &&
+        !seen.has(title) &&
+        title.length <= SUGGEST_TITLE_MAX_LEN
+      ) {
+        seen.add(title);
+        out.push({ term: title, kind: 'title', hitCount: 0 });
+      }
+    }
+    return mockDelay(out.slice(0, limit));
+  }
+
+  try {
+    const data = await request<{ list?: unknown[] }>('/search/suggest', {
+      query: { q: keyword, limit },
+    });
+    const arr = Array.isArray(data) ? data : (data?.list ?? []);
+    return (arr as Record<string, unknown>[]).map((r) => ({
+      term: String(r.term ?? ''),
+      kind: (String(r.kind ?? 'title') || 'title') as SuggestKind,
+      hitCount: Number(r.hitCount ?? 0),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchRelated(id: string, limit = 6): Promise<NewsItem[]> {
   if (USE_MOCK) {
     // 离线兜底：同频道优先，其次全量

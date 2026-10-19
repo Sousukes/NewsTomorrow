@@ -17,9 +17,16 @@ vi.mock('@/stores/user', () => ({
 
 // 真实 vue-router 的 route 是响应式的，关键词变化要能触发 watcher
 const routeQuery = reactive<Record<string, string>>({ q: '暴雨' });
+const routerPush = vi.fn();
 vi.mock('vue-router', () => ({
   useRoute: () => ({ query: routeQuery }),
-  useRouter: () => ({ back: vi.fn(), push: vi.fn() }),
+  useRouter: () => ({ back: vi.fn(), push: routerPush }),
+}));
+
+// E2：零结果引导用的热搜词走 api 层（失败要能降级，故单独桩）
+const fetchHotTerms = vi.fn(async (_limit?: number) => [{ term: '真实热搜', count: 3 }]);
+vi.mock('@/api/news', () => ({
+  fetchHotTerms: (limit?: number) => fetchHotTerms(limit),
 }));
 
 import SearchResults from './SearchResults.vue';
@@ -127,5 +134,41 @@ describe('views/SearchResults 分页语义（A5）', () => {
 
     expect(search).toHaveBeenLastCalledWith('楼市', 1, 20);
     expect(cardTitles(w)).toEqual(['b1']);
+  });
+});
+
+describe('SearchResults 零结果引导（E2）', () => {
+  // 热搜词在零结果时提供"下一步"：拿不到就不显示那一行，换词入口仍在。
+
+  it('零结果时给出热搜词入口，点击即换一次搜索', async () => {
+    vi.mocked(routeQuery as unknown as { q: string }).q = '不存在的词xyz';
+    search.mockResolvedValueOnce(page([], false, 0));
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.text()).toContain('没有找到相关内容');
+    const tag = w.find('.results__retry-tag');
+    expect(tag.exists()).toBe(true);
+    await tag.trigger('click');
+    expect(routerPush).toHaveBeenCalledWith({ path: '/search/results', query: { q: '真实热搜' } });
+  });
+
+  it('热搜词拿不到时不显示那一行，但「换个关键词」仍在', async () => {
+    fetchHotTerms.mockRejectedValueOnce(new Error('挂了'));
+    vi.mocked(routeQuery as unknown as { q: string }).q = '不存在的词xyz';
+    search.mockResolvedValueOnce(page([], false, 0));
+    const w = mountPage();
+    await settle(w);
+
+    expect(w.find('.results__retry').exists()).toBe(false);
+    expect(w.text()).toContain('换个关键词');
+  });
+
+  it('有结果时不显示引导区块', async () => {
+    vi.mocked(routeQuery as unknown as { q: string }).q = '有结果';
+    search.mockResolvedValueOnce(page(['n1'], false));
+    const w = mountPage();
+    await settle(w);
+    expect(w.find('.results__retry').exists()).toBe(false);
   });
 });
