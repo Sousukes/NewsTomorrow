@@ -21,6 +21,7 @@ P1-19 健康历史：
 import logging
 import random
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,7 @@ from ..config import (
     FEED_RETRY_BACKOFF,
     FEED_RETRY_TRANSIENT,
 )
+from .. import trgm
 from ..models import News
 from .fetcher import (
     PERMANENT,
@@ -85,6 +87,9 @@ class FetchReport:
     inserted: int = 0
     updated: int = 0
     skipped: int = 0
+    # E4-a：被同源判重挡下的条数（本该新增，但库里/本批里已有同一篇）。
+    # 单独计数是为了可观测——"入库 N 条"里若混着重复，看日志永远发现不了。
+    deduped: int = 0
     ok_sources: list[str] = field(default_factory=list)
     failed_sources: list[str] = field(default_factory=list)
 
@@ -377,8 +382,101 @@ def collect(
         return _collect_all(srcs, c, keyword, limit_per_source, stats, workers, gap, interval)
 
 
+# ---- E4-a：同源重复入库 ----
+#
+# 真实库里量到的重复（491 条可见资讯）：完全同标题的 3 组共 6 条，**全部同源**，
+# 两条相差 40~60 分钟、id 不同。根因是 `fetcher._stable_id` 用 `sha1(url || title)`
+# ——源改了链接（或加了跟踪参数）就算不出同一个 id，按 id 判重随即失效。
+#
+# 阈值取 0.9 而不是更低的依据（详见 docs/后端/E4多源转载去重设计.md §三）：
+# 同源「广州队不敌天津队」与「广州队不敌山东队」的相似度是 **0.652**，那是
+# **两场不同的比赛**；而真正要合并的目标相似度全是 1.000。0.9 恰好分开两者。
+# 源自己改标题重发（0.65~0.80）**刻意不合并**——那是源的行为，留给运营判断更安全。
+DUP_SIMILARITY = 0.9
+# 归一化标题的扫描范围：重复是"源在相邻周期发了同一篇"，不会隔几个月
+DUP_SCAN_ROWS = 300
+
+
+def normalize_title(title: str) -> str:
+    """判重用的标题归一：NFKC + 小写 + 去掉标点/空白/符号/控制字符。
+
+    这一步让"标题末尾多个感叹号、全角半角不同、中间多个空格"这类**琐碎差异**
+    不必依赖 `similarity()`——它们在三元组相似度下只有 0.4 左右（"标题！" vs
+    "标题" 是 0.4），却明显是同一篇。于是在没有 pg_trgm 的环境里也能判掉最常
+    见的那部分，判重能力不会因方言而退化成"几乎没用"。
+    """
+    folded = unicodedata.normalize("NFKC", title or "").casefold()
+    return "".join(
+        ch for ch in folded if not unicodedata.category(ch).startswith(("P", "Z", "S", "C"))
+    )
+
+
+def _same_source(db: Session, source_key: str | None):
+    q = db.query(News).filter(News.hidden.is_(False))
+    if source_key:
+        return q.filter(News.source_key == source_key)
+    return q.filter(News.source_key.is_(None))
+
+
+def find_duplicate(db: Session, source_key: str | None, title: str) -> News | None:
+    """在**同一来源**内找已存在的同一篇稿件；没有则返回 None。
+
+    两档判据，从便宜到贵：
+    1. 归一化标题相等（方言无关）——吃掉空白/标点/全角半角差异；
+    2. `similarity(title, :title) >= 0.9`（仅 PG + pg_trgm 可用时）——
+       吃掉剩下的琐碎改写。
+
+    **跨源不做**：改写型跨源重复的相似度只有 0.30~0.50，而不同稿件之间又能
+    达到 0.65——两个分布重叠，不存在安全阈值（见设计文档 §二）。
+    """
+    norm = normalize_title(title)
+    if not norm:
+        return None
+
+    q = _same_source(db, source_key)
+    for row in (
+        q.order_by(func.coalesce(News.published_at, "").desc(), News.id.desc())
+        .limit(DUP_SCAN_ROWS)
+        .all()
+    ):
+        if normalize_title(row.title) == norm:
+            return row
+
+    if not trgm.available(db):
+        return None
+    return (
+        q.filter(func.similarity(News.title, title) >= DUP_SIMILARITY)
+        .order_by(func.coalesce(News.published_at, "").desc(), News.id.desc())
+        .first()
+    )
+
+
+def _apply_update(row: News, it: RawItem) -> None:
+    """增量刷新易变字段，**保留已积累的互动数据**。"""
+    row.title = it.title
+    row.summary = it.summary
+    # E1：正文同样可能被源修订（纠错/更新），非空即刷新；
+    # 为空则保留旧正文——某轮抓到无正文的条目不该把已有正文抹掉。
+    if it.content:
+        row.content = it.content
+    row.source = it.source
+    if it.time_text:
+        row.time = it.time_text
+    if it.images:
+        row.images = it.images
+        row.cover = it.cover or row.cover
+    if it.variant:
+        row.variant = it.variant
+    if it.published_at:
+        row.published_at = it.published_at.isoformat()
+
+
 def upsert_news(db: Session, items: list[RawItem]) -> FetchReport:
-    """写入数据库：按 id 判定新增/ 更新（增量更新，幂等）。"""
+    """写入数据库：按 id 判定新增/ 更新（增量更新，幂等）。
+
+    E4-a 起**新增分支**多一道同源判重：按 id 判重挡不住"源换了链接重发同一篇"，
+    那会让库里出现两条一模一样的新闻。判据见 `find_duplicate`。
+    """
     rep = FetchReport(fetched=len(items))
     if not items:
         return rep
@@ -387,55 +485,57 @@ def upsert_news(db: Session, items: list[RawItem]) -> FetchReport:
         row.id: row
         for row in db.execute(select(News).where(News.id.in_([i.id for i in items]))).scalars()
     }
+    # 本批已处理过的条目（含新增与命中判重的），用于**批量内自判重**——
+    # 同一批里两条互为重复时，第二条还没落库，查库是查不到的。
+    handled: dict[tuple[str, str], News] = {}
 
     for it in items:
+        norm = normalize_title(it.title)
+        key = ((it.source_key or "").strip(), norm)
         row = existing.get(it.id)
+        if row is None and norm:
+            row = handled.get(key) or find_duplicate(db, it.source_key, it.title)
+
         if row is None:
-            db.add(
-                News(
-                    id=it.id,
-                    title=it.title,
-                    summary=it.summary,
-                    content=it.content or None,
-                    source=it.source,
-                    # E6b：稳定标识随抓取一并写入。迁移 0033 只回填历史，
-                    # 这里不写的话新数据会重新变成 NULL（关注流随即漏内容）
-                    source_key=it.source_key or None,
-                    comment_count=0,
-                    time=it.time_text or "刚刚",
-                    images=it.images or None,
-                    cover=it.cover or None,
-                    video_url=None,
-                    play_count=None,
-                    is_top=bool(it.is_top),
-                    channel=it.channel,
-                    variant=it.variant,
-                    published_at=it.published_at.isoformat() if it.published_at else None,
-                )
+            row = News(
+                id=it.id,
+                title=it.title,
+                summary=it.summary,
+                content=it.content or None,
+                source=it.source,
+                # E6b：稳定标识随抓取一并写入。迁移 0033 只回填历史，
+                # 这里不写的话新数据会重新变成 NULL（关注流随即漏内容）
+                source_key=it.source_key or None,
+                comment_count=0,
+                time=it.time_text or "刚刚",
+                images=it.images or None,
+                cover=it.cover or None,
+                video_url=None,
+                play_count=None,
+                is_top=bool(it.is_top),
+                channel=it.channel,
+                variant=it.variant,
+                published_at=it.published_at.isoformat() if it.published_at else None,
             )
+            db.add(row)
             rep.inserted += 1
         else:
-            # 增量：只刷新易变字段，保留已积累的互动数据
-            row.title = it.title
-            row.summary = it.summary
-            # E1：正文同样可能被源修订（纠错/更新），非空即刷新；
-            # 为空则保留旧正文——某轮抓到无正文的条目不该把已有正文抹掉。
-            if it.content:
-                row.content = it.content
-            row.source = it.source
-            if it.time_text:
-                row.time = it.time_text
-            if it.images:
-                row.images = it.images
-                row.cover = it.cover or row.cover
-            if it.variant:
-                row.variant = it.variant
-            if it.published_at:
-                row.published_at = it.published_at.isoformat()
+            _apply_update(row, it)
             rep.updated += 1
+            # 按 id 命中是"同一条被再抓到"，走判重命中才算真的挡下了重复
+            if it.id not in existing:
+                rep.deduped += 1
+
+        if norm:
+            handled[key] = row
 
     db.commit()
-    logger.info("入库完成：新增 %d / 更新 %d", rep.inserted, rep.updated)
+    logger.info(
+        "入库完成：新增 %d / 更新 %d（其中同源判重挡下 %d）",
+        rep.inserted,
+        rep.updated,
+        rep.deduped,
+    )
     return rep
 
 

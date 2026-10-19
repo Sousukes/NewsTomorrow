@@ -24,7 +24,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, case, func, or_, select, text
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -48,16 +48,13 @@ from ..feedback import (
 from ..search_stats import HOT_WINDOW_DAYS, hot_terms, record_search
 from ..response import ok
 from ..schemas import NewsOut
+from .. import trgm
 
 router = APIRouter(prefix="/api/news", tags=["news"])
 logger = logging.getLogger("toutiao.news")
 
 # 排序用的"发布时间"表达式：published_at 为空时按空串处理（倒序时排最后）
 _PUB = func.coalesce(News.published_at, "")
-
-# pg_trgm 可用性缓存：扩展是否存在不会在运行时变化，没必要每次请求都查
-_TRGM_CHECKED = False
-_TRGM_AVAILABLE = False
 
 # 相似度下限：低于此值说明标题几乎无共同三元组，不宜作为"相关"呈现
 _SIMILARITY_THRESHOLD = 0.05
@@ -76,22 +73,11 @@ def _trgm_available(db: Session) -> bool:
     迁移 0005 会在 PostgreSQL 上创建该扩展，但**权限不足时会跳过**；
     SQLite 等方言则根本没有。因此必须运行时探测，不可无条件使用
     `func.similarity()`——否则在 SQLite 上会直接报"函数不存在"。
+
+    判定本体在 `app/trgm.py`：`feeds/ingest.py` 的入库判重也要用它，
+    放这里是为了让两层都依赖中立模块，而不是互相依赖或各抄一份。
     """
-    global _TRGM_CHECKED, _TRGM_AVAILABLE
-    if _TRGM_CHECKED:
-        return _TRGM_AVAILABLE
-    if db.bind is None or db.bind.dialect.name != "postgresql":
-        _TRGM_AVAILABLE = False
-    else:
-        try:
-            _TRGM_AVAILABLE = bool(
-                db.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'")).scalar()
-            )
-        except Exception as e:
-            logger.warning("pg_trgm 探测失败，相关推荐退回同频道兜底：%s", e)
-            _TRGM_AVAILABLE = False
-    _TRGM_CHECKED = True
-    return _TRGM_AVAILABLE
+    return trgm.available(db)
 
 
 # ---- 搜索相关度（P1-11）----

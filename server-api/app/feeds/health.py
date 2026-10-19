@@ -27,11 +27,6 @@ from ..models import RssSourceHealthEvent, iso_utc, now_dt, now_str
 
 logger = logging.getLogger("toutiao.feeds.health")
 
-# 日期前缀长度：`at` 是 ISO 串（2026-10-15T03:24:35），前 10 位即日期。
-# 用 substr 而不是数据库的日期函数：SQLite 与 PostgreSQL 行为不一，
-# 而这里只需要"按天分桶"，字符串前缀足够且两边通用。
-_DATE_LEN = 10
-
 
 def record_event(
     db: Session,
@@ -199,35 +194,56 @@ def daily_points(db: Session, key: str, days: int) -> list[dict]:
     **缺的天不补零**：空白表示"那天没抓它"（跳过 / 未启用 / 服务没跑），
     补零会把它伪装成"抓了但全失败"——这两种情况的处置完全不同。
     前端按 `days` 铺好格子再按日期落点，空白自然显示为无数据。
+
+    **分桶在 Python 侧做**，不再用 SQL 的 `substr(at, 1, 10)`：
+    D1-1（迁移 0030）把 `at` 迁成 `DateTime` 之后，PG 上
+    `substr(timestamptz, …)` 直接报"函数不存在"——该端点在此后所有 PG
+    环境里一直返回 **500**，而 SQLite 的 `substr` 对文本可用，行为测试
+    因此一路绿灯（由契约检查在真实 PG 上才暴露出来）。
+
+    也不用 `date(at)` 这类数据库日期函数：PG 的 `date(timestamptz)` 按
+    **会话时区**截断（实测本地 PG 是 +08），SQLite 按文本解析，两边会
+    把跨 UTC 午夜的事件分到不同的一天。读回一律经 `iso_utc()`（与
+    `window_summary` 同一处方）——统一按 UTC 分桶，方言无关且语义确定。
+    代价是把窗口内的行取回 Python：该表有保留期（`FEED_HEALTH_KEEP_DAYS`
+    默认 30 天），量级在千行，远小于一次 500。
     """
     cutoff = _since(days)
-    day = func.substr(RssSourceHealthEvent.at, 1, _DATE_LEN)
     rows = (
         db.execute(
             select(
-                day.label("date"),
-                func.count(RssSourceHealthEvent.id),
-                func.sum(case((RssSourceHealthEvent.ok.is_(True), 1), else_=0)),
-                func.sum(RssSourceHealthEvent.item_count),
+                RssSourceHealthEvent.at,
+                RssSourceHealthEvent.ok,
+                RssSourceHealthEvent.item_count,
+            ).where(
+                RssSourceHealthEvent.source_key == key,
+                RssSourceHealthEvent.at >= cutoff,
             )
-            .where(RssSourceHealthEvent.source_key == key, RssSourceHealthEvent.at >= cutoff)
-            .group_by(day)
-            .order_by(day)
         )
         .all()
     )
+    buckets: dict[str, dict] = {}
+    for at, ok, items in rows:
+        stamp = iso_utc(at)
+        if not stamp:
+            continue
+        bucket = buckets.setdefault(stamp[:10], {"total": 0, "ok": 0, "items": 0})
+        bucket["total"] += 1
+        if ok:
+            bucket["ok"] += 1
+        bucket["items"] += int(items or 0)
+
     points = []
-    for date, total, ok, items in rows:
-        total = int(total or 0)
-        ok = int(ok or 0)
+    for date in sorted(buckets):
+        b = buckets[date]
         points.append(
             {
-                "date": str(date),
-                "total": total,
-                "ok": ok,
-                "failed": max(0, total - ok),
-                "items": int(items or 0),
-                "rate": _rate(ok, total),
+                "date": date,
+                "total": b["total"],
+                "ok": b["ok"],
+                "failed": max(0, b["total"] - b["ok"]),
+                "items": b["items"],
+                "rate": _rate(b["ok"], b["total"]),
             }
         )
     return points

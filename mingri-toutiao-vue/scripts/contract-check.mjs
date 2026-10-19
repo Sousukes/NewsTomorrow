@@ -226,10 +226,15 @@ const run = async () => {
   const countOf = async (term, days) =>
     (await request(`/news/search/hot?days=${days}&limit=50`)).list.find((t) => t.term === term)
       ?.count ?? 0;
-  const probe = `联想探针${String(Date.now()).slice(-6)}`;
+  // 探针词的**前缀每次运行都不同**。此前所有运行共用「联想探针」前缀，dev 库的
+  // search_logs 会逐次累积探针词，而 hot 源按「次数倒序 + 词典序」取前 N 条：
+  // 10 个旧探针（次数都是 1）就会把当次探针挤出前十，断言于是变成「看库有多脏」
+  // 而不是「看联想好不好用」。换成唯一前缀后，只有当次探针能匹配上前缀。
+  const tag = `探${String(Date.now()).slice(-6)}`;
+  const probe = `${tag}针`;
   await request(`/news/search?q=${encodeURIComponent(probe)}`);
   const probeBefore = await countOf(probe, 6);
-  for (const q of [probe.slice(0, 2), probe.slice(0, 4), probe]) {
+  for (const q of [tag.slice(0, 2), tag.slice(0, 4), probe]) {
     await request(`/search/suggest?q=${encodeURIComponent(q)}`);
   }
   const probeAfter = await countOf(probe, 5);
@@ -240,7 +245,7 @@ const run = async () => {
   );
 
   // hot 源：搜过的词按前缀回来
-  const sHot = await request(`/search/suggest?q=${encodeURIComponent(probe.slice(0, 2))}`);
+  const sHot = await request(`/search/suggest?q=${encodeURIComponent(tag)}`);
   check(
     'hot 源：搜过的词按前缀出现',
     (sHot.list ?? []).some((i) => i.term === probe && i.kind === 'hot'),

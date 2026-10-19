@@ -18,7 +18,9 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, select, text  # noqa: E402
+from sqlalchemy.engine import create_engine  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
 import main  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
@@ -320,6 +322,94 @@ class TestDailyPoints:
         with SessionLocal() as db:
             _source(db, "s1")
             assert health_mod.daily_points(db, "s1", 7) == []
+
+
+# ------------------------------------------- 按天分桶（PostgreSQL 回归护栏）
+
+
+class TestDailyPointsOnPostgres:
+    """D1-1 回归护栏：`at` 是 `DateTime`，按天分桶不能再对它做字符串切片。
+
+    PG 上 `substr(timestamptz, 1, 10)` 直接报「函数不存在」——
+    `/admin/sources/{key}/health` 在 P1-53（迁移 0030 把 `at` 迁成 DateTime）
+    之后的**所有 PG 环境里一直返回 500**。SQLite 的 `substr` 对文本可用，
+    所以上面那些行为测试一路绿灯，是契约检查跑在真实 PG 上才暴露出来的。
+
+    这条用例直接连 PG 跑一遍（没配 `TEST_PG_URL` 或连不上就跳过）。
+    同时锁住「按 **UTC** 分桶」的语义：PG 的 `date(timestamptz)` 按会话
+    时区截断（本地实测 +08），会把跨 UTC 午夜的事件分到不同的一天——
+    那正是当初引入 `substr` 想避免的"两种方言行为不一"。
+    """
+
+    PROBE_KEY = "__pytest_health_probe__"
+
+    @pytest.fixture
+    def pg(self):
+        url = os.environ.get("TEST_PG_URL", "")
+        if not url:
+            pytest.skip("未配置 TEST_PG_URL")
+        eng = None
+        conn = None
+        try:
+            eng = create_engine(url)
+            conn = eng.connect()
+            conn.execute(text("SELECT 1"))
+            conn.rollback()  # 结束 autobegin，下面才能显式 begin()
+        except Exception as e:  # noqa: BLE001 - 连不上就跳过，不是失败
+            if conn is not None:
+                conn.close()
+            if eng is not None:
+                eng.dispose()
+            pytest.skip(f"连不上 PostgreSQL：{type(e).__name__}")
+        # 整段包在事务里、用完回滚：既不在真实库里留探针行，
+        # 也不需要库已 migrate（create_all 在事务内，PG 的事务性 DDL 会一并回滚）
+        trans = conn.begin()
+        try:
+            Base.metadata.create_all(bind=conn)
+            yield conn
+        finally:
+            trans.rollback()
+            conn.close()
+            eng.dispose()
+
+    def test_buckets_without_string_slicing(self, pg):
+        # 昨天 00:30 与 16:30（UTC）：同一天，但在 +08 时区是**两天**。
+        # 用 date(at) 按会话时区分桶会得到 2 个点，按 UTC 分桶应合并为 1 个。
+        base = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        early = base + timedelta(minutes=30)
+        late = base + timedelta(hours=16, minutes=30)
+        assert early.date() == late.date()  # 同一 UTC 日
+        assert early.astimezone().date() != late.astimezone().date()  # 本地跨日
+
+        with Session(bind=pg) as db:
+            # PG 强制外键（SQLite 默认不强制，所以下面的用例看不到这条）：
+            # 探针行必须先有对应的 rss_sources 行。整段随后被回滚，不会留痕。
+            db.add(
+                RssSource(
+                    key=self.PROBE_KEY,
+                    name=self.PROBE_KEY,
+                    channel="tech",
+                    url="https://probe.invalid/f.xml",
+                    weight=5,
+                    enabled=True,
+                    created_at=now_str(),
+                    updated_at=now_str(),
+                )
+            )
+            for at, ok, count in ((early, True, 10), (late, False, 0)):
+                db.add(
+                    RssSourceHealthEvent(
+                        source_key=self.PROBE_KEY, ok=ok, item_count=count, at=at
+                    )
+                )
+            db.flush()  # 不用 commit：外层事务由 fixture 回滚
+            points = health_mod.daily_points(db, self.PROBE_KEY, 7)
+
+        assert [p["date"] for p in points] == [base.date().isoformat()]
+        assert points[0]["total"] == 2 and points[0]["ok"] == 1
+        assert points[0]["items"] == 10 and points[0]["rate"] == 0.5
 
 
 # ---------------------------------------------------------------- 最近失败
