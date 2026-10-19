@@ -62,10 +62,18 @@ async function loadSuggestions() {
     suggestOpen.value = false;
     return;
   }
-  const list = await fetchSuggestions(text, SUGGEST_LIMIT);
-  if (gen !== suggestGen.value) return; // 已有更新的输入丢弃本次结果
-  suggestions.value = list;
-  suggestOpen.value = list.length > 0;
+  // 必须 catch：调用点是 `void loadSuggestions()`，这里的 rejection 没人接，
+  // 会变成 unhandled rejection（P1-71 的 spec 因此一直报一条 Error: 挂了）。
+  try {
+    const list = await fetchSuggestions(text, SUGGEST_LIMIT);
+    if (gen !== suggestGen.value) return; // 已有更新的输入丢弃本次结果
+    suggestions.value = list;
+    suggestOpen.value = list.length > 0;
+  } catch {
+    if (gen !== suggestGen.value) return;
+    suggestions.value = [];
+    suggestOpen.value = false;
+  }
 }
 
 watch(keyword, (val) => {

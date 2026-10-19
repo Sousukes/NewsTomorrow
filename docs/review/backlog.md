@@ -47,7 +47,7 @@
 | ID | 方向 | 成本 | 说明 | 来源 |
 | --- | --- | --- | --- | --- |
 | B7 | 视频仍直连源站（`media-src` 保留 `https:`） | L | B4 图片代理落地后，CSP **只剩这一处**松口。视频是几十 MB + Range 请求，与图片不是一个量级：需要 Range 透传、分片缓存、带宽/成本预案后再做 | P1-43 拆出 |
-| E3 | 负反馈与曝光去重 | M | **后端已落地（P1-72）**：迁移 0034（`user_exposures` + `user_dislikes`）+ 曝光批量上报 + 负反馈两档 + `for-you` 去重（含**探底保护**）与来源衰减（0.3）。**剩前端（P1-73）**：`useExposure` 视口判定、卡片负反馈菜单、已读原地移除。见 [E3 设计](../后端/E3负反馈与曝光去重设计.md) | 审查报告 §4 |
+| E3-a | **未登录（匿名）曝光落 localStorage，并在登录时采纳** | S | E3 拆分而来：曝光去重由服务端做，匿名上报只会吃 401，故 P1-73 未登录直接不上报；完整链路需与 `stores/user.ts` 的 marks 采纳流程一起改（否则又多一套命名规则）。匿名用户的收益暂由「已读原地移除」承担 | P1-73 拆出 |
 | E4 | 多源转载去重 | M | 同源稿件多源入库会重复出现；已有 `similarity` 可做标题聚类 | 审查报告 §4 |
 | E7 | 运营数据看板 | M | 把 `/api/metrics`、源健康、审核量、命中趋势做成管理端大盘 | 审查报告 §4 |
 | E8 | PWA / 离线阅读 | M | 收藏已服务端同步，具备离线基础 | 审查报告 §4 |
@@ -84,6 +84,7 @@
 | P1-45 | F2 覆盖率门槛与趋势（`.coveragerc` fail_under=91，实测 92.55%；CI 出 XML 构件）；并拆出 F4'（前端覆盖率）、F5（补低覆盖模块的真测试） |
 | P1-46 | F4 文档按专题拆分（`docs/` 下 64 篇；入口文档只留索引；新增链接与体积护栏 19 项） |
 | P1-47 | D2 管理端按业务域拆分（`routers/admin/{sources,news,comments,words,nickname,users,audit}`；鉴权仍挂聚合 router；顺带收敛 `ADMIN_PHONES` 双真相源） |
+| P1-73 | E3 前端：`useExposure` 曝光判定（视口 50% + 停留 500ms + 攒批 10 条/5 秒 + 离场 flush）+ `api/feedback.ts` + 卡片负反馈菜单（与举报严格分离）+ 已读原地移除 + 举报接 E5 弹窗；40 项测试；vitest 771 → 811；**顺带修掉 P1-71 遗留的 unhandled rejection**（`Search.vue` 的 `loadSuggestions` 缺 catch）；**E3 闭环** |
 | P1-72 | E3 后端：迁移 0034 + 曝光批量上报 + 负反馈两档（二选一校验走路由，回 42207）+ for-you 去重（探底保护 `dedupRelaxed`）+ 来源衰减 0.3；21 项测试（含**游标键与 SQL 一致性**，抓到自己引入的分叉）；pytest 966 → 987；契约 111/109 |
 | P1-71 | E2 前端：搜索联想（debounce + 代际守卫 + 纠错标注）+ 零结果热搜引导；vitest 756 → 771；**E2 闭环** |
 | P1-70 | E2 搜索后端：正文入召回（`content_hit`=1，不给正文建 trigram 索引、SQLite/fallback 路径不加）+ `GET /api/search/suggest` 三源合并 + 48 项测试 + mock + 契约 14 项；`recent_terms()` 让热搜榜与联想共用一份查询；pytest 918 → 966；**顺带修掉 P1-65 的 `ix_reports_created_at` 模型/迁移漂移**（它让 CI 的 `alembic check` 一直红） |

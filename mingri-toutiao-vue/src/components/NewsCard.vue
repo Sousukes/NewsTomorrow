@@ -1,13 +1,45 @@
 <script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { bgFor, proxiedImageUrl } from '@/utils/image';
 import type { NewsItem } from '@/types';
 
-defineProps<{ item: NewsItem }>();
+const props = defineProps<{ item: NewsItem }>();
 
 const emit = defineEmits<{
   (e: 'click', id: string): void;
   (e: 'image', id: string, index: number): void;
+  /**
+   * 负向操作（E3）。**刻意不在这里调接口**：卡片只负责表达用户意图，
+   * 由父级决定"举报弹窗怎么开、踩完要不要原地移除"。
+   */
+  (
+    e: 'feedback',
+    payload: { action: 'news' | 'source' | 'report'; id: string; sourceKey: string },
+  ): void;
 }>();
+
+/** 负反馈菜单是否展开（默认收起：低频操作不该占视觉） */
+const menuOpen = ref(false);
+
+/** 「减少该来源」只在拿得到来源标识时给出——没有标识就别给点了会失败的选项 */
+const canReduceSource = computed(() => Boolean(props.item.sourceKey));
+
+function choose(action: 'news' | 'source' | 'report') {
+  menuOpen.value = false;
+  emit('feedback', { action, id: props.item.id, sourceKey: props.item.sourceKey ?? '' });
+}
+
+/** 点空白处收起：菜单是浮层，留在屏幕上会挡住后面的卡片 */
+function onDocumentClick() {
+  if (menuOpen.value) menuOpen.value = false;
+}
+
+watch(menuOpen, (open) => {
+  if (open) document.addEventListener('click', onDocumentClick);
+  else document.removeEventListener('click', onDocumentClick);
+});
+
+onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick));
 
 /** 真实图片 URL（协议白名单 + 走图片代理 B4）；无则返回空串走渐变占位 */
 function imgOf(url?: string | null): string {
@@ -114,12 +146,36 @@ function formatCount(n?: number): string {
       </template>
       <span class="mt-card__dot">·</span>
       <span>{{ item.time }}</span>
+
+      <!-- E3：负向操作入口。**不进主操作区**——与关注、收藏同属低频动作 -->
+      <button
+        class="mt-card__more"
+        :aria-label="`${item.title} 的更多操作`"
+        :aria-expanded="menuOpen"
+        @click.stop="menuOpen = !menuOpen"
+      >
+        ×
+      </button>
+
+      <div v-if="menuOpen" class="mt-card__menu" role="menu" @click.stop>
+        <button class="mt-card__menu-item" role="menuitem" @click="choose('news')">不感兴趣</button>
+        <button
+          v-if="canReduceSource"
+          class="mt-card__menu-item"
+          role="menuitem"
+          @click="choose('source')"
+        >
+          减少「{{ item.source }}」的内容
+        </button>
+        <button class="mt-card__menu-item" role="menuitem" @click="choose('report')">举报</button>
+      </div>
     </div>
   </article>
 </template>
 
 <style scoped>
 .mt-card {
+  position: relative;
   background: var(--color-card-bg);
   border-radius: var(--radius-card);
   padding: 14px 16px;
@@ -238,5 +294,57 @@ function formatCount(n?: number): string {
 
 .mt-card__dot {
   color: var(--color-text-secondary);
+}
+
+/* ---- E3 负反馈入口与菜单 ---- */
+
+.mt-card__more {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mt-card__more:hover {
+  color: var(--color-text-primary);
+}
+
+.mt-card__menu {
+  position: absolute;
+  right: 12px;
+  bottom: 34px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-card-bg);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 16%);
+}
+
+.mt-card__menu-item {
+  padding: 9px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mt-card__menu-item:hover {
+  background: var(--color-page-bg);
 }
 </style>

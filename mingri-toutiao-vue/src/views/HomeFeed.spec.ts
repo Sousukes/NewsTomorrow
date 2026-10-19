@@ -45,9 +45,44 @@ vi.mock('@/stores/follows', () => ({ useFollowsStore: () => followsState }));
 const routerPush = vi.fn();
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: routerPush }) }));
 
+/**
+ * E3：`useExposure` 的判定规则（50% / 500ms / 攒批）由它自己的 spec 覆盖，
+ * 这里只验**接线**——曝光回调用什么上报、进详情前有没有 flush。
+ * 故这里把它换成捕获 options 的桩，而不是复跑一遍 IntersectionObserver。
+ */
+const exposureState: { report: ((ids: string[]) => unknown) | null } = { report: null };
+const flushSpy = vi.fn(async () => undefined);
+vi.mock('@/composables/useExposure', () => ({
+  useExposure: (opts: { report: (ids: string[]) => unknown }) => {
+    exposureState.report = opts.report;
+    return {
+      pending: { value: [] },
+      observe: vi.fn(),
+      unobserve: vi.fn(),
+      flush: flushSpy,
+      destroy: vi.fn(),
+    };
+  },
+}));
+
+// 参数类型写明：`vi.fn` 无参时 `mock.calls` 会被推断成空元组，
+// 断言 `calls[0][0]` 报 "Source has 0 element(s)"（同 store 桩的处理）
+const addDislike = vi.fn(async (_target: { newsId: string } | { sourceKey: string }) => ({
+  newsIds: [],
+  list: [],
+  sourceKeys: [],
+  sources: [],
+}));
+const reportExposures = vi.fn(async (_ids: string[]) => ({ accepted: 0, written: 0 }));
+vi.mock('@/api/feedback', () => ({
+  addDislike: (target: { newsId: string } | { sourceKey: string }) => addDislike(target),
+  reportExposures: (ids: string[]) => reportExposures(ids),
+}));
+
 import HomeFeed from './HomeFeed.vue';
 import ChannelTabs from '@/components/ChannelTabs.vue';
 import NewsCard from '@/components/NewsCard.vue';
+import ReportDialog from '@/components/ReportDialog.vue';
 
 const mountPage = () =>
   mount(HomeFeed, {
@@ -64,6 +99,8 @@ const settle = async (w: VueWrapper) => {
 beforeEach(() => {
   vi.clearAllMocks();
   routerPush.mockClear();
+  // 已读集合落 localStorage，不清会在用例之间串味
+  localStorage.clear();
 });
 
 describe('HomeFeed', () => {
@@ -207,5 +244,122 @@ describe('HomeFeed 关注流（E6b）', () => {
     expect(w.text()).not.toContain('登录后查看关注的内容');
     expect(w.text()).not.toContain('还没有关注任何来源');
     spy.mockRestore();
+  });
+});
+
+/**
+ * HomeFeed · 负反馈与曝光（E3）
+ *
+ * 钉的是"用户能感知的三件事"：看完的不再占位、踩了立刻消失、举报不混进负反馈。
+ */
+describe('HomeFeed 负反馈与曝光（E3）', () => {
+  const twoCards = () =>
+    vi.spyOn(newsState, 'bucketOf').mockReturnValue({
+      list: [
+        { id: 'n1', title: '第一条', source: '中新网', sourceKey: 's1' },
+        { id: 'n2', title: '第二条', source: '新华社', sourceKey: 's2' },
+      ],
+      loading: false,
+      hasMore: false,
+    } as never);
+
+  it('未登录不上报曝光（服务端去重只对登录态有意义，匿名上报只会吃 401）', async () => {
+    userState.isLoggedIn = false;
+    const w = mountPage();
+    await settle(w);
+    exposureState.report?.(['n1']);
+    expect(reportExposures).not.toHaveBeenCalled();
+    w.unmount();
+  });
+
+  it('已登录时曝光回调走 /me/exposures', async () => {
+    userState.isLoggedIn = true;
+    const w = mountPage();
+    await settle(w);
+    exposureState.report?.(['n1', 'n2']);
+    expect(reportExposures).toHaveBeenCalledWith(['n1', 'n2']);
+    w.unmount();
+  });
+
+  it('进详情前先 flush 攒下的曝光（否则返回时服务端还没排除刚看过的这批）', async () => {
+    userState.isLoggedIn = true;
+    const spy = twoCards();
+    const w = mountPage();
+    await settle(w);
+    w.findAllComponents(NewsCard)[0].trigger('click');
+    await settle(w);
+    expect(flushSpy).toHaveBeenCalled();
+    expect(routerPush).toHaveBeenCalledWith('/news/n1');
+    spy.mockRestore();
+    w.unmount();
+  });
+
+  it('看过的那条原地移除，而不是留一个「已读」占位', async () => {
+    userState.isLoggedIn = true;
+    const spy = twoCards();
+    const w = mountPage();
+    await settle(w);
+    expect(w.findAllComponents(NewsCard)).toHaveLength(2);
+    w.findAllComponents(NewsCard)[0].trigger('click');
+    await settle(w);
+    const left = w.findAllComponents(NewsCard);
+    expect(left).toHaveLength(1);
+    expect(left[0].props('item').id).toBe('n2');
+    spy.mockRestore();
+    w.unmount();
+  });
+
+  it('「不感兴趣」立刻移除并调 addDislike（用户点了就该马上看到效果）', async () => {
+    userState.isLoggedIn = true;
+    const spy = twoCards();
+    const w = mountPage();
+    await settle(w);
+    w.findAllComponents(NewsCard)[0].vm.$emit('feedback', {
+      action: 'news',
+      id: 'n1',
+      sourceKey: 's1',
+    });
+    await settle(w);
+    expect(addDislike).toHaveBeenCalledWith({ newsId: 'n1' });
+    expect(w.findAllComponents(NewsCard)).toHaveLength(1);
+    spy.mockRestore();
+    w.unmount();
+  });
+
+  it('「减少该来源」按 sourceKey 提交，且不动列表（衰减不是硬过滤）', async () => {
+    userState.isLoggedIn = true;
+    const spy = twoCards();
+    const w = mountPage();
+    await settle(w);
+    w.findAllComponents(NewsCard)[0].vm.$emit('feedback', {
+      action: 'source',
+      id: 'n1',
+      sourceKey: 's1',
+    });
+    await settle(w);
+    expect(addDislike).toHaveBeenCalledWith({ sourceKey: 's1' });
+    expect(w.findAllComponents(NewsCard)).toHaveLength(2);
+    spy.mockRestore();
+    w.unmount();
+  });
+
+  it('举报打开 E5 弹窗，绝不走负反馈接口（两者严格分离）', async () => {
+    userState.isLoggedIn = true;
+    const spy = twoCards();
+    const w = mountPage();
+    await settle(w);
+    const dialog = w.findComponent(ReportDialog);
+    expect(dialog.props('open')).toBe(false);
+    w.findAllComponents(NewsCard)[0].vm.$emit('feedback', {
+      action: 'report',
+      id: 'n1',
+      sourceKey: 's1',
+    });
+    await settle(w);
+    expect(w.findComponent(ReportDialog).props('open')).toBe(true);
+    expect(w.findComponent(ReportDialog).props('targetId')).toBe('n1');
+    expect(addDislike).not.toHaveBeenCalled();
+    spy.mockRestore();
+    w.unmount();
   });
 });
