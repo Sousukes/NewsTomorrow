@@ -2,26 +2,13 @@ import { isReportReason, type ReportReason, type ReportTargetType } from '@/cons
 import { USE_MOCK } from './config';
 import { mockDelay, request } from './http';
 
-/**
- * 举报结果。
- *
- * `autoHidden` 表示**本次提交是否触发了阈值自动处置**（内容已被软隐藏/下架）。
- * 前端刻意**不向举报人展示**这个字段：一旦回显「已处理」，等于把阈值告诉了刷子，
- * 也给了被举报人反向锁定举报人的线索（设计文档 §六）。
- * 保留在返回值里是为了日志与将来的举报进度查询，不是给当前 UI 用的。
- */
+/** autoHidden 不下发到 UI：回显等于把自动处置阈值告诉刷子。 */
 export interface ReportResult {
   status: 'pending' | 'resolved' | 'dismissed';
   autoHidden: boolean;
 }
 
-/**
- * POST /api/reports —— 提交举报（**需登录**）。
- *
- * 幂等语义由服务端保证：同一用户对同一目标重复举报只更新理由、不新增行。
- * 因此前端**不需要**本地去重或「已举报过」状态——重复点只是换个理由，
- * 反而符合「我改主意了」的真实意图。
- */
+/** 提交举报（需登录）。幂等由服务端保证，前端不做本地「已举报」状态。 */
 export async function submitReport(
   targetType: ReportTargetType,
   targetId: string,

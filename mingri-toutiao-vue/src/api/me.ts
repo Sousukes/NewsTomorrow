@@ -1,9 +1,4 @@
-/**
- * 个人标记接口：收藏 / 浏览历史（云端同步）+ 修改昵称（P1-24）。
- *
- * 服务端为唯一事实源：所有写操作都返回**完整的最新集合** `{ ids, list }`，
- * 客户端拿到即为真相，无需自行推导增量。
- */
+/** 收藏/历史/昵称接口。服务端是唯一事实源：写操作返回完整集合，客户端不推导增量。 */
 import { USE_MOCK } from './config';
 import { mockDelay, request } from './http';
 import { normalizeNewsItem } from './news';
@@ -15,10 +10,7 @@ export interface MarksPayload {
   list: NewsItem[];
 }
 
-/**
- * 当前构建是否支持云同步。
- * mock 模式下没有后端，标记仅存 localStorage；置为 false 可让 store 跳过同步请求。
- */
+/** mock 模式下无后端，store 据此跳过同步请求。 */
 export const MARKS_SYNC_SUPPORTED = !USE_MOCK;
 
 const EMPTY: MarksPayload = { ids: [], list: [] };
@@ -94,11 +86,7 @@ const NICKNAME_SYMBOL_RE = /^[\w\u00b7\u2022\u30fb\-. ]*$/u;
 const MOCK_BLOCK_WORDS = ['博彩', '加微信'];
 const MOCK_REVIEW_WORDS = ['广告'];
 
-/**
- * 离线 mock 的形状校验：与后端 `validate_nickname_shape` 同规则
- * （先字符集后长度——字符根本不能用比太长更根本）。只服务 `VITE_USE_MOCK`
- * 演示路径；接 mock-server / 真实后端时全部走服务端这道闸。
- */
+/** 与后端 validate_nickname_shape 同规则，仅服务 VITE_USE_MOCK 演示路径。 */
 function mockShapeError(clean: string): string {
   if (!NICKNAME_SYMBOL_RE.test(clean)) {
     return '昵称仅支持中英文、数字及 _ - · . ・ 等符号';
@@ -110,13 +98,7 @@ function mockShapeError(clean: string): string {
 }
 
 /**
- * PUT /me/nickname —— 修改昵称：形状校验 → 敏感词校验 → 保存。
- *
- * 三级结果（服务端为唯一事实源，前端输入框的 maxlength 只是第一道闸）：
- * - 形状不合法 → **42203**，消息即面向用户的提示；
- * - 命中 block 级词 → **40006**，提示**不回显命中词**（回显等于给绕过者一份
- *   「哪些词不能起」的对照表）；
- * - 命中 review 级词 → 放行 + 置待人工复核（`result: 'review'`）。
+ * 改昵称：形状不合法 42203；命中 block 词 40006（不回显命中词）；review 词放行待复核。
  */
 export async function updateNickname(name: string): Promise<NicknameUpdateResult> {
   const clean = name.trim();

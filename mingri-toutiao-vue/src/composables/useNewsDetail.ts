@@ -2,14 +2,7 @@ import { onMounted, ref, watch } from 'vue';
 import { useNewsStore } from '@/stores/news';
 import type { NewsItem } from '@/types';
 
-/**
- * 深链安全的资讯详情加载：
- * 直接访问 /news/:id（或刷新）时内存无此条，自动按 id 拉取，
- * 避免把「尚未加载」误判为「内容不存在」。
- *
- * @param id 资讯 id 的 getter
- * @returns item / resolving / failed
- */
+/** 深链加载：内存无此条时按 id 拉取，避免把「尚未加载」误判为「不存在」。 */
 export function useNewsDetail(id: () => string) {
   const news = useNewsStore();
   const item = ref<NewsItem | null>(news.getById(id()));

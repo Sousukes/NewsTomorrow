@@ -26,20 +26,14 @@ const PREFS_KEY = 'mingri-toutiao:user';
 const MARKS_PREFIX = 'mingri-toutiao:marks:';
 const ANON_SCOPE = 'anonymous';
 /**
- * 搜索历史**单独分键**，与 marks 分开：
- * 它**不上云**（隐私敏感且跨端价值低），分开存储可确保云端同步逻辑不会误带上它。
- * 作用域规则与 marks 完全一致（复用同一个 scopeKey 后缀）。
+ * 搜索历史单独分键：不上云，分开存可确保同步逻辑不会误带上它。
+ * 作用域规则与 marks 一致。
  */
 const SEARCH_PREFIX = 'mingri-toutiao:search-history:';
 const searchKey = (userId: number | null) =>
   `${SEARCH_PREFIX}${userId === null ? ANON_SCOPE : `u${userId}`}`;
 /**
- * 曝光（E3-a）**单独分键**，与搜索历史同款处方：同一套作用域后缀规则，
- * 但**不并入 marks**。两条理由：
- * 1. 频次差一个量级——marks 的变更由用户显式动作触发，曝光是攒批 10 条一发，
- *    并进 marks 会让每一批都重写一遍收藏/历史；
- * 2. 它**不上云做双向同步**：登录时单向推送一次即由服务端负责，
- *    而 marks 要参与并集合并。混在一个键里会让同步逻辑多一条要排除的分支。
+ * 曝光单独分键，不并入 marks：写入频次差一个量级，且只做单向推送不做并集合并。
  */
 const EXPOSURES_PREFIX = 'mingri-toutiao:exposures:';
 const exposureKey = (userId: number | null) =>
@@ -47,10 +41,7 @@ const exposureKey = (userId: number | null) =>
 
 /** 曝光本地保留期（天）——与服务端 `EXPOSURE_RETENTION_DAYS` 对齐 */
 export const EXPOSURE_RETENTION_DAYS = 7;
-/**
- * 本地曝光条数上限。界两件事：localStorage 体积，以及"每批都要重写整份 map"
- * 的写入成本（攒批 10 条一发，map 越大每发越贵）。超限时保留**最近**的 N 条。
- */
+/** 超限保留最近的 N 条 */
 export const EXPOSURE_CAP = 500;
 
 /** 浏览历史本地/云端共同遵守的上限（与服务端 HISTORY_MAX 一致） */
@@ -63,24 +54,11 @@ interface PrefsShape {
   /** 当前账号 id；`null` = 未登录（匿名作用域） */
   userId: number | null;
   theme: ThemeMode;
-  /**
-   * 是否具备管理能力（后端按 `ADMIN_PHONES` 白名单判定）。
-   * 落库是为了刷新页面后入口不消失；白名单在服务端变动时，
-   * 该值要等下次登录/续期才更新——届时入口可能短暂失准，
-   * 但接口自身仍会 403，不会越权。
-   */
+  /** 落库以免刷新后入口消失；可能短暂失准，接口仍会 403。 */
   isAdmin: boolean;
-  /**
-   * 当前账号昵称（P1-24）。
-   * 登录响应下发，改名成功后同步；与 isAdmin 同理落库——
-   * 刷新页面后「我的」页不退回默认名。服务端改动要等下次登录才可见。
-   */
+  /** 落库以免刷新后退回默认名 */
   name: string;
-  /**
-   * 受限态：管理员刚代其重置过密码（C4）。
-   * **必须落盘**——否则刷新页面后守卫失效，用户能到处逛，
-   * 直到某个写操作撞上 40305 才想起"我还没改密码"，比一开始就被拦住更困惑。
-   */
+  /** 必须落盘：否则刷新后守卫失效，用户会到处逛到撞 40305 才发现。 */
   mustChangePassword: boolean;
 }
 
@@ -89,13 +67,7 @@ interface MarksShape {
   history: string[];
 }
 
-/**
- * 空标记。
- *
- * **必须是工厂函数**：早前用共享常量 `{ favorites: [], history: [] }`，
- * 浅拷贝后各作用域拿到的是**同一个数组实例**，一处 push 会污染所有作用域
- * （表现为"换个作用域莫名其妙多了别人的收藏"）。
- */
+/** 必须是工厂函数：共享常量会被各作用域浅拷贝成同一个数组实例。 */
 const emptyMarks = (): MarksShape => ({ favorites: [], history: [] });
 
 const scopeKey = (userId: number | null) =>
@@ -200,12 +172,7 @@ function mergeExposureMaps(a: ExposureMap, b: ExposureMap): ExposureMap {
   return out;
 }
 
-/**
- * 按保留期裁剪，再按条数上限保留**最近**的 N 条（新的在前）。
- *
- * 两个上限都要：只裁时间的话，一个把浏览器当后台挂着的用户能攒出几千条；
- * 只裁条数的话，几周前的一次误触会一直占着位置。
- */
+/** 时间与条数两个上限都要：只裁一个都会留下另一种垃圾。 */
 function pruneExposures(map: ExposureMap, now: number = Date.now()): ExposureMap {
   const cutoff = now - EXPOSURE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   return Object.fromEntries(
@@ -216,13 +183,7 @@ function pruneExposures(map: ExposureMap, now: number = Date.now()): ExposureMap
   );
 }
 
-/**
- * 读取偏好，并**一次性迁移**旧格式。
- *
- * 旧格式把 `favorites` / `history` 内嵌在 `mingri-toutiao:user` 里且无 `userId`；
- * 直接换新格式会静默丢掉用户已有数据，故迁移到**匿名作用域**
- * （旧数据本就无法归属到某个账号）。
- */
+/** 旧格式（marks 内嵌在 prefs、无 userId）迁移到匿名作用域，避免静默丢数据。 */
 function loadPrefs(): PrefsShape {
   const parsed = readJson<PrefsShape & MarksShape>(PREFS_KEY);
 
@@ -249,13 +210,8 @@ function loadPrefs(): PrefsShape {
 }
 
 /**
- * 用户 store：登录态（含 token）、收藏、浏览历史、主题偏好。
- *
- * **标记数据按用户命名空间隔离**（`mingri-toutiao:marks:<anonymous|u<id>>`）：
- * - 未登录时的收藏/历史落在**匿名作用域**，登出不会丢失；
- * - 各账号的本地缓存互不可见，**不存在换账号串数据**；
- * - 登录时把「匿名期数据 + 该账号本地缓存」**采纳**为该账号数据（匿名作用域随即清空），
- *   再与服务端做**并集合并**；登出仅切回匿名作用域，账号数据仍保留在本地，重新登录即恢复。
+ * 登录态、收藏、历史、主题。标记按 marks:<anonymous|u<id>> 隔离：
+ * 登出不丢匿名数据、换账号不串、登录时采纳匿名并集合并。
  */
 export const useUserStore = defineStore('user', () => {
   const prefs = loadPrefs();
@@ -277,11 +233,7 @@ export const useUserStore = defineStore('user', () => {
   const history = ref<string[]>(marks.history);
   /** 搜索历史：仅本地，按同一套作用域隔离（不同账号不串） */
   const searchTerms = ref<string[]>(loadSearchTerms(userId.value));
-  /**
-   * 曝光缓冲（E3-a）：**只有未登录时才往这里记**——已登录时服务端就是落点，
-   * 本地再记一份没有消费者（设计 §十一 理由一）。它的唯一用途是登录时被采纳。
-   * 刻意不做客户端去重：for-you 的去重只有服务端一份实现。
-   */
+  /** 仅未登录时记录，登录时被采纳；不做客户端去重（服务端是唯一实现）。 */
   const exposures = ref<ExposureMap>(loadExposures(userId.value));
 
   /** 云端同步状态（供界面展示/排障） */
@@ -303,12 +255,7 @@ export const useUserStore = defineStore('user', () => {
   );
 
   /**
-   * 把标记落盘到**当前作用域**。
-   *
-   * 变更点显式调用（`toggleFavorite` / `addHistory` / `clearHistory` / `applyPayload`），
-   * 保证作用域与数据在同一 tick 内一致；下面的 watcher 只作**直接赋值**（如 `$patch`）的兜底。
-   * 作用域切换前必须先 `persistMarks()` 把旧作用域落盘（见 `switchScope`），
-   * 否则 watcher 会在切换后把旧数据写进新作用域。
+   * 落盘到当前作用域。切换作用域前必须先调用，否则 watcher 会把旧数据写进新作用域。
    */
   function persistMarks() {
     saveMarks(userId.value, { favorites: favorites.value, history: history.value });
@@ -362,13 +309,7 @@ export const useUserStore = defineStore('user', () => {
     persistMarks();
   }
 
-  /**
-   * 记一批曝光到**当前作用域**的本地缓冲（E3-a）。
-   *
-   * 只由**未登录**路径调用（见 `exposures` 的注释）：已登录时 `reportExposures`
-   * 直接打服务端，本地这份没有消费者。写盘与改状态在同一个 tick 内完成——
-   * 曝光是最高频的写路径，不能等 watcher 兜底（那会在同一 tick 里被扫到旧值）。
-   */
+  /** 仅未登录路径调用；写盘与改状态必须同 tick（最高频写路径，不等 watcher）。 */
   function recordExposures(ids: string[]) {
     const list = (ids ?? []).map(String).filter(Boolean);
     if (!list.length) return;
@@ -380,15 +321,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   /**
-   * 登录时采纳曝光（E3-a）：匿名作用域 + 账号作用域合并后**单向推送**服务端。
-   *
-   * 三个刻意的次序：
-   * 1. **先落盘再推送**——推送失败时账号作用域里已有合并结果，下次登录重试即可，
-   *    不需要再从匿名作用域捞一次（那时匿名数据可能已被清）；
-   * 2. **推送成功才清本地副本**（含匿名作用域）——数据已经归属该账号，
-   *    留着会造成下次登录重复推送；
-   * 3. **失败只静默**：曝光丢失的代价只是"这条可能重复出现一次"，
-   *    远小于阻断登录（与 `syncMarks` 同一口径）。
+   * 登录时合并匿名与账号曝光并单向推送：先落盘再推送、成功才清本地、失败静默。
    */
   async function adoptExposures(nextUserId: number | null): Promise<void> {
     const anon = loadExposures(null);
@@ -425,10 +358,7 @@ export const useUserStore = defineStore('user', () => {
     persistMarks();
   }
 
-  /**
-   * 与服务端合并本地标记（登录后 / 应用启动时调用）。
-   * 失败不抛出：同步是增强能力，不应阻断登录或浏览。
-   */
+  /** 失败不抛出：同步是增强能力，不应阻断登录或浏览。 */
   async function syncMarks(): Promise<void> {
     if (!canSync()) return;
     syncing.value = true;
@@ -443,10 +373,7 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  /**
-   * 登录：写入 token 与账号作用域，**采纳匿名期数据**，再与服务端并集合并。
-   * 匿名数据被采纳后清空匿名作用域（它已归属该账号，留着会造成重复计数）。
-   */
+  /** 登录：采纳匿名数据（随即清空匿名作用域）并做并集合并。 */
   async function login(phone: string, password: string) {
     const res = await apiLogin({ phone, password });
     token.value = res.token;
@@ -502,12 +429,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   /**
-   * 修改密码（C4）。
-   *
-   * 走二次校验（服务端 40304 会触发全局对话框），成功后：
-   * - 后端已把旧令牌全部作废并下发新的一对，这里接着写本地；
-   * - 清掉受限标志，用户可以正常发评论/收藏了；
-   * - 主动同步一次收藏/历史：受限期间它们的云端写入被拦过，本地数据还没并上去。
+   * 改密：后端已换发令牌并作废旧令牌，这里写本地、清受限标志、补一次标记同步。
    */
   async function changePassword(oldPassword: string, newPassword: string) {
     const res = await apiChangePassword(oldPassword, newPassword);
@@ -589,11 +511,7 @@ export const useUserStore = defineStore('user', () => {
     theme.value = toThemeMode(mode);
   }
 
-  /**
-   * 更新昵称（P1-24）：改名接口成功后调用。
-   * 只改本地展示与持久化——服务端校验（拦截/复核/形状）已在 api 层拦下，
-   * 能走到这里说明服务端已接受。
-   */
+  /** 改名成功后只更新本地；校验已在 api 层完成。 */
   function setName(next: string) {
     name.value = next;
   }

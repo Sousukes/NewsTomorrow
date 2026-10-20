@@ -8,17 +8,10 @@ export interface LoginParams {
 
 export interface LoginResult {
   token: string;
-  /**
-   * C1 双令牌：`refreshToken` 只能用来换 access（7 天），`expiresIn` 是
-   * access 剩余秒数（默认 1800）。两者**刻意可选**——老环境可能还没升级后端。
-   */
+  /** 双令牌：refreshToken 换 access（7 天），expiresIn 为 access 剩余秒数。 */
   refreshToken?: string;
   expiresIn?: number;
-  /**
-   * `id` 用于本地标记的作用域隔离（mock 模式下可能缺失）。
-   * `isAdmin` 由后端按 `ADMIN_PHONES` 白名单判定后下发——前端据此决定
-   * 是否展示管理入口，省掉一次探测请求；只下发布尔值，不下发白名单本身。
-   */
+  /** id 用于本地标记作用域（mock 下可能缺失）；isAdmin 只下发布尔值。 */
   user: {
     id?: number;
     name: string;
@@ -65,12 +58,7 @@ export async function logout(): Promise<void> {
   }
 }
 
-/**
- * POST /auth/step-up —— 高敏操作二次校验（C10）。
- *
- * 验通过后由 `http.ts` 保管 5 分钟；期间高敏请求自动带 `X-Step-Up-Token`。
- * 失败会抛错（40101 密码错 / 42902 连续失败被锁），由对话框展示。
- */
+/** 二次校验：通过后由 http.ts 保管 5 分钟（40101 密码错 / 42902 被锁）。 */
 export async function stepUp(password: string): Promise<boolean> {
   const data = await request<{ stepUpToken: string; expiresIn: number }>('/auth/step-up', {
     method: 'POST',
@@ -81,11 +69,7 @@ export async function stepUp(password: string): Promise<boolean> {
   return true;
 }
 
-/** POST /auth/password —— 自助改密（C4）。
- *
- * 需要二次校验（`X-Step-Up-Token`）与旧密码；成功后**后端会作废全部旧令牌**，
- * 因此响应里带的是**新的一对**令牌，必须立刻写入，否则用户改完密被自己踢下线。
- */
+/** 自助改密：后端作废旧令牌并下发新的一对，必须立刻写入。 */
 export async function changePassword(
   oldPassword: string,
   newPassword: string,

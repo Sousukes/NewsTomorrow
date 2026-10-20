@@ -1,11 +1,7 @@
 import { computed, ref } from 'vue';
 import { useUserStore } from '@/stores/user';
 
-/**
- * 管理端页面的三段样板：鉴权守卫、错误文案、列表状态机。
- *
- * 抽这三个是稳的，抽「表格/筛选栏」不稳（见文件末尾的说明），原因写在下面。
- */
+/** 管理端三段样板：鉴权守卫、错误文案、列表状态机。 */
 
 /** 错误 → 文案。原先 8 个页面各写一遍 2 行。 */
 export function messageOf(e: unknown, fallback: string): string {
@@ -17,25 +13,14 @@ function isDeniedMessage(msg: string): boolean {
   return /403|无权限/.test(msg);
 }
 
-/**
- * 管理端鉴权守卫。
- *
- * 两个触发源缺一不可：
- * - 前端态（`isLoggedIn` / `isAdmin`）：入口已按 `isAdmin` 隐藏，这里兜住
- *   **手敲网址**与**登录态过期**；
- * - 服务端态（`denied`）：令牌有效但服务端判定无权限。前端标志可能过期
- *   （管理员刚被移除），只看前端态会让页面继续显示旧数据。
- */
+/** 前端态兜手敲网址与登录过期，服务端态兜权限变更（前端标志可能过期）。 */
 export function useAdminGuard() {
   const user = useUserStore();
   const denied = ref(false);
 
   const noAccess = computed(() => !user.isLoggedIn || !user.isAdmin || denied.value);
 
-  /**
-   * 翻译一次失败：命中权限问题就置 `denied` 并返回空串（不写 error，
-   * 否则页面上会同时出现「无权限」和一段错误文案），否则返回文案给调用方。
-   */
+  /** 权限问题置 denied 并返回空串，避免同时出现两条提示。 */
   function handleError(e: unknown, fallback: string): string {
     const msg = messageOf(e, fallback);
     if (isDeniedMessage(msg)) {
@@ -67,18 +52,8 @@ export interface UseAdminListOptions<T> {
 }
 
 /**
- * 列表状态机：首屏重载 + **游标续页** + 去重 + 代次守卫。
- *
- * **契约只覆盖游标分页**（响应带 `nextCursor`）。`AdminNicknameReviews` 走的是
- * offset + `total.length` 推断，它没有游标可续——硬塞进来就得加
- * `mode: 'cursor' | 'offset'` 开关，两套算法挤在一个 `if/else` 里，
- * 以后再加一种就成三路分支。那个页面保留自己的 `loadMore`，
- * 只用 `useAdminGuard` —— **不适用就不该用**，硬抽象的代价是所有人一起将就。
- *
- * 代次守卫的必要性：运营改筛选条件后，旧请求可能更晚返回。
- * 门店页（A4）踩过同样的坑——`loadMore` 在途时重新 `fetch`，
- * 旧响应回来会覆盖新列表、或把 `loadingMore` 卡成 true 导致翻页永久卡死。
- * 同一个错误值得同一个解法。
+ * 列表状态机：首屏重载 + 游标续页 + 去重 + 代次守卫。
+ * 只支持游标分页（offset 页面用自己的 loadMore）；代次守卫防旧响应覆盖新列表。
  */
 export function useAdminList<T>(options: UseAdminListOptions<T> = {}) {
   const idOf = options.idOf ?? ((item: T) => (item as { id?: string | number }).id);

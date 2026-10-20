@@ -18,11 +18,7 @@ const emit = defineEmits<{ (e: 'select', id: string): void }>();
 
 const frames = computed(() => props.items.map((i) => i.id));
 
-/** id → 条目 的索引表。
- *
- * 此前每帧渲染都要 `props.items.find()`（配图与标题各一次），
- * 帧数 × 列表长度 = O(n²) 且每次渲染重算；改为一次建表后查表 O(1)。
- */
+/** id → 条目索引表：避免每帧 find() 造成 O(n²) 重算 */
 const itemById = computed(() => new Map(props.items.map((i) => [i.id, i])));
 
 const {
@@ -112,11 +108,7 @@ startAuto();
         :style="trackStyle"
         @transitionend="onTransitionEnd"
       >
-        <!--
-          key 必须是「轨道下标 + id」组合：
-          无限回环时 slides = [末帧, ...全部, 首帧]，首帧与末帧各出现两次，
-          仅用 id 作为 key 会产生重复 key，触发 Vue 告警并可能错误复用 DOM。
-        -->
+        <!-- key 用「下标 + id」：回环时首末帧各出现两次，只用 id 会重复 key -->
         <!-- 链接而非可点 div；滑动后由 moved 守卫吞掉点击 -->
         <a
           v-for="(id, i) in slides"
