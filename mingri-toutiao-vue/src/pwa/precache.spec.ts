@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildServiceWorker, PRECACHE_TOKEN, VERSION_TOKEN } from './precache';
+import { buildServiceWorker, OWN_ORIGINS_TOKEN, PRECACHE_TOKEN, VERSION_TOKEN } from './precache';
 
 /**
  * precache 注入（E8 / P1-78）。
@@ -17,20 +17,22 @@ import { buildServiceWorker, PRECACHE_TOKEN, VERSION_TOKEN } from './precache';
 const template = [
   `const VERSION = '${VERSION_TOKEN}';`,
   `const PRECACHE_URLS = ${PRECACHE_TOKEN};`,
+  `const OWN_ORIGINS = ${OWN_ORIGINS_TOKEN};`,
   `const KEY_A = 'sw-precache-${VERSION_TOKEN}';`,
   `const KEY_B = '${VERSION_TOKEN}/x';`,
 ].join('\n');
 
 describe('pwa/precache', () => {
   it('占位符全部被替换，产物里不留字面量', () => {
-    const out = buildServiceWorker(template, ['/assets/index-abc.js'], 'b1');
+    const out = buildServiceWorker(template, ['/assets/index-abc.js'], 'b1', ['https://api.x.com']);
     expect(out).not.toContain(PRECACHE_TOKEN);
-    expect(out).not.toContain(VERSION_TOKEN);
+    expect(out).not.toContain(OWN_ORIGINS_TOKEN);
+    expect(out).toContain('const OWN_ORIGINS = ["https://api.x.com"];');
     expect(out).toContain('const PRECACHE_URLS = ["/assets/index-abc.js"];');
   });
 
   it('版本号的每一处都被替换（只换第一处会让缓存键与版本号不一致）', () => {
-    const out = buildServiceWorker(template, [], 'v9');
+    const out = buildServiceWorker(template, [], 'v9', []);
     // 定义 + 两处引用都必须换成同一个值
     expect(out.match(/v9/g) ?? []).toHaveLength(3);
     expect(out).toContain("'sw-precache-v9'");
@@ -39,23 +41,32 @@ describe('pwa/precache', () => {
 
   it('清单按传入顺序原样进入（顺序影响 install 时的并发，不去重不排序）', () => {
     const urls = ['/index.html', '/assets/a.js', '/assets/b.css'];
-    const out = buildServiceWorker(template, urls, 'b1');
+    const out = buildServiceWorker(template, urls, 'b1', []);
     expect(out).toContain(JSON.stringify(urls));
   });
 
   it('空清单合法（极小部署也产出一个能装的 SW，只是首次离线不可读）', () => {
-    const out = buildServiceWorker(template, [], 'b1');
+    const out = buildServiceWorker(template, [], 'b1', []);
     expect(out).toContain('const PRECACHE_URLS = [];');
   });
 
-  it('模板缺占位符时**抛错**而不是悄悄产出空清单', () => {
-    // 静默产出的 SW 会缓存空清单——那种失效在运行时毫无线索，必须炸在构建期
+  it('模板缺占位符时**抛错**而不是悄悄产出残缺 SW', () => {
+    // 静默产出的 SW 会缓存空清单、或 OWN_ORIGINS 缺失导致跨源图片全漏——
+    // 那种失效在运行时毫无线索，必须炸在构建期
     expect(() => buildServiceWorker('const a = 1;', ['/x'], 'b1')).toThrow(/占位符/);
+    expect(() => buildServiceWorker(`const A = ${PRECACHE_TOKEN};`, ['/x'], 'b1')).toThrow(
+      /占位符/,
+    );
+  });
+
+  it('跨域 API 部署时把代理源注进去（否则配图一张都缓存不到）', () => {
+    const out = buildServiceWorker(template, [], 'b1', ['https://api.example.com']);
+    expect(out).toContain('["https://api.example.com"]');
   });
 
   it('真实模板也能被正确注入（防模板被改成别的占位符写法）', async () => {
     const { default: swSource } = await import('./sw-template.js?raw');
-    const out = buildServiceWorker(swSource, ['/index.html'], 'b7');
+    const out = buildServiceWorker(swSource, ['/index.html'], 'b7', []);
     expect(out).not.toContain('__PRECACHE__');
     expect(out).not.toContain('__VERSION__');
     expect(out).toContain("const VERSION = 'b7'");

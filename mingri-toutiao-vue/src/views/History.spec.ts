@@ -14,8 +14,12 @@ const userState = {
 };
 vi.mock('@/stores/user', () => ({ useUserStore: () => userState }));
 
+const offlineDetail = vi.fn((_id?: string): unknown => null);
 const newsState = {
   getById: vi.fn((id: string) => (id === 'gone' ? null : { id, title: `标题${id}` })),
+  // E8 / P1-79：离线兜底。默认 null（在线路径不受影响），
+  // 断网场景由下面专门的用例覆盖
+  offlineDetail,
 };
 vi.mock('@/stores/news', () => ({ useNewsStore: () => newsState }));
 
@@ -58,5 +62,27 @@ describe('History', () => {
     expect(clearBtn, '页面上应有清空入口').toBeTruthy();
     void clearBtn!.trigger('click');
     expect(userState.clearHistory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('History 离线兜底（E8 / P1-79）', () => {
+  beforeEach(() => {
+    userState.history = ['n1', 'gone'];
+  });
+
+  it('内存里没有的 id 回退到本地阅读副本（断网重启后历史仍可点开）', () => {
+    offlineDetail.mockReturnValue({ id: 'gone', title: '离线副本标题', content: '正文' });
+    const w = mountPage();
+    expect(offlineDetail).toHaveBeenCalledWith('gone');
+    const titles = w.findAllComponents(NewsCard).map((c) => c.props('item').title);
+    expect(titles).toContain('离线副本标题');
+  });
+
+  it('副本也没有时才剔除该 id（不渲染空白卡片）', () => {
+    offlineDetail.mockReturnValue(null);
+    const w = mountPage();
+    const items = w.findAllComponents(NewsCard).map((c) => c.props('item'));
+    expect(items).toHaveLength(1); // 只剩内存命中的 n1
+    expect(items[0].id).toBe('n1');
   });
 });

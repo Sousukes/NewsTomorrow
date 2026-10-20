@@ -22,8 +22,10 @@ describe('pwa/sw-template', () => {
     expect(swSource).toContain('async function trim(');
   });
 
-  it('跨域请求不拦截（图片代理前的源站与第三方资源不该被同源缓存策略处理）', () => {
-    expect(swSource).toContain('url.origin !== self.location.origin');
+  it('只处理"我们自己的源"：第三方与源站直连不被拦截', () => {
+    expect(swSource).toContain('OWN_ORIGINS.includes(url.origin)');
+    // 自己的源 = 注入的代理源 + 运行时 concat 的 SW 所在源
+    expect(swSource).toContain('__OWN_ORIGINS__.concat(self.location.origin)');
   });
 
   it('页面导航断网时回落外壳（SPA 只有一个 html，回落它才有东西可显示）', () => {

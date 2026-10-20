@@ -13,8 +13,16 @@ const router = useRouter();
 const news = useNewsStore();
 const user = useUserStore();
 
+/**
+ * 列表解析（E8 / P1-79）：内存命中优先，未命中**回退到本地阅读副本**。
+ *
+ * 回退是离线阅读的关键：收藏的资讯**曾在详情页打开过**（否则不会进收藏流程的
+ * 常见路径），副本里就有正文；断网重启后内存已空，只能靠副本。
+ */
 const items = computed<NewsItem[]>(() =>
-  user.history.map((id) => news.getById(id)).filter((x): x is NewsItem => x !== null),
+  user.history
+    .map((id) => news.getById(id) ?? news.offlineDetail(id))
+    .filter((x): x is NewsItem => x !== null),
 );
 
 function open(id: string) {

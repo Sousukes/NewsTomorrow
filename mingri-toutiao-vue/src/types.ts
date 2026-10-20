@@ -24,6 +24,11 @@ export interface NewsItem {
    * 此时前端按「不可关注」处理（不显示关注按钮），而不是报错。
    */
   sourceKey?: string | null;
+  /**
+   * 本条来自**本地阅读副本**（E8 / P1-79）：断网时从 localStorage 读出的详情。
+   * 仅展示用（界面据此标注"离线内容"），不参与任何业务判断。
+   */
+  fromCache?: boolean;
   commentCount?: number;
   time: string;
   /** 配图 URL 列表，三图变体取前 3 张 */

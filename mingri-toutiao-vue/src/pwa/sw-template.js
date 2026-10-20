@@ -39,6 +39,15 @@ const PRECACHE_URLS = __PRECACHE__;
 
 const API_MAX_ENTRIES = 60;
 const IMG_MAX_ENTRIES = 80;
+/**
+ * 我们自己的源（构建期注入）：图片代理所在源 + 运行时 concat 的 SW 所在源。
+ *
+ * 代理源是不可省的：`proxiedImageUrl()` 产出 `${API_BASE}/api/img?…`，
+ * 而 `VITE_API_BASE` 完全可以指向**另一个源**（常见部署：静态站 + 独立 API 域名）。
+ * 只认同源会让这类部署下的配图一张都缓存不到——离线仍然是裂图。
+ */
+// eslint-disable-next-line no-undef
+const OWN_ORIGINS = __OWN_ORIGINS__.concat(self.location.origin);
 const OFFLINE_FALLBACK_HTML = '<!doctype html><title>离线</title>';
 
 self.addEventListener('install', (event) => {
@@ -48,7 +57,9 @@ self.addEventListener('install', (event) => {
       // 逐个 add 而不 all：单个失败（如被 CDN 拦截）不该让整个安装失败，
       // 那会让 SW 永远装不上，比"少缓存一个文件"严重得多。
       await Promise.all(
-        PRECACHE_URLS.map((url) => cache.add(new Request(url, { cache: 'reload' })).catch(() => {})),
+        PRECACHE_URLS.map((url) =>
+          cache.add(new Request(url, { cache: 'reload' })).catch(() => {}),
+        ),
       );
       await self.skipWaiting();
     })(),
@@ -78,7 +89,7 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return; // 写操作一律直连，不缓存不重试
   const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return; // 跨域（含图片代理前的源站）不碰
+  if (!OWN_ORIGINS.includes(url.origin)) return; // 只处理我们自己的源（含图片代理）
 
   if (req.mode === 'navigate') {
     event.respondWith(navigationHandler(req));

@@ -145,6 +145,10 @@ const reportOpen = ref(false);
     />
     <div class="detail__scroll">
       <h1 class="detail__title">{{ item.title }}</h1>
+      <!-- E8：离线副本标注。静默展示旧内容=骗人，用户至少该知道"这是断网前存的" -->
+      <p v-if="item.fromCache" class="detail__offline" role="status">
+        当前离线，展示的是本地保存的副本
+      </p>
       <div class="detail__meta">
         <span>{{ item.source }}</span>
         <span class="detail__dot">·</span>
@@ -260,6 +264,16 @@ const reportOpen = ref(false);
   flex: 1;
   overflow-y: auto;
   padding: 16px 16px 24px;
+}
+
+/* E8：离线副本提示（与壳层横幅同一视觉语言，但出现在内容顶部更醒目） */
+.detail__offline {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-divider);
+  border-radius: 8px;
 }
 
 .detail__title {

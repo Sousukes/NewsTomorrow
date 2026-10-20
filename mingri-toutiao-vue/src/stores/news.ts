@@ -10,7 +10,33 @@ import { mockNews } from '@/data/mockNews';
 import { CHANNELS, DEFAULT_CHANNEL, FOLLOWING_FEED, type ListKey } from '@/constants/channels';
 import { DEFAULT_SORT, SORT_MODES } from '@/constants/sort';
 import type { SortMode } from '@/constants/sort';
+import { listReaderIds, readReader, readerKey, writeReader } from '@/utils/reader';
+import { USE_MOCK } from '@/api/config';
+
+/**
+ * 当前账号 id（阅读副本的作用域依据）。
+ *
+ * 从 prefs 读而不是引入 user store：news store 被 user store 依赖
+ * （浏览历史要查资讯），反向 import 会成环。prefs 里已经有权威的 userId。
+ */
+const userId = ref<number | null>(readUserId());
+function readUserId(): number | null {
+  try {
+    const prefs = JSON.parse(localStorage.getItem('mingri-toutiao:user') ?? '{}');
+    const v = prefs?.userId;
+    return typeof v === 'number' ? v : null;
+  } catch {
+    return null;
+  }
+}
 import type { NewsItem } from '@/types';
+
+/**
+ * 阅读副本（E8 / P1-79）：详情读成功后写一份到 localStorage，**读失败时回退到它**。
+ *
+ * 写穿放在 store 而不是路由：每条被打开的详情都该留下副本，而"打开详情"这条路
+ * 只经过 `loadDetail`（列表预取走 `cacheMany`，不含正文，不落）。
+ */
 
 /**
  * 单个「列表桶」：一个 (频道 × 排序) 组合的完整列表状态。
@@ -257,11 +283,28 @@ export const useNewsStore = defineStore('news', () => {
     try {
       const item = await apiFetchNewsById(id);
       if (item) detailCache.value = { ...detailCache.value, [id]: item };
+      // 读成功即写穿（不挑内容源：在线读到的才值得留，mock 数据不留本地档案）
+      if (item && !USE_MOCK) {
+        const scope = readerKey(userId.value);
+        writeReader(scope, id, item as unknown as Record<string, unknown>);
+      }
       return item;
     } catch {
       // 详情加载失败由调用方（useNewsDetail 的 failed）呈现，不污染列表的 error
-      return null;
+      return offlineDetail(id);
     }
+  }
+
+  /**
+   * 断网兜底：从阅读副本里取一条详情（E8 / P1-79）。
+   *
+   * 与 `getById` 的区别是它**不看内存桶**而是看本地存储——重启页面后内存已空，
+   * 而副本还在。返回的条目带 `fromCache: true`，供 UI 标注"离线内容"。
+   */
+  function offlineDetail(id: string): NewsItem | null {
+    const raw = readReader(readerKey(userId.value), id);
+    if (!raw) return null;
+    return { ...(raw as unknown as NewsItem), fromCache: true };
   }
 
   /** 本地过滤（离线兜底 / 搜索接口不可用时降级）：取默认桶作语料 */
@@ -290,6 +333,9 @@ export const useNewsStore = defineStore('news', () => {
   }
 
   return {
+    offlineDetail,
+    /** 让收藏/历史页能拿到当前作用域的副本 id（离线排序用） */
+    readerIds: () => listReaderIds(readerKey(userId.value)),
     buckets,
     detailCache,
     searching,

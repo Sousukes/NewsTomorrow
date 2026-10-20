@@ -40,6 +40,21 @@ function cspPlugin(apiBase: string): Plugin {
 }
 
 /**
+ * 取 API 基址的 origin（跨域部署时图片代理在另一个源上）。
+ * 相对路径（`/api`，即同源部署）返回空串——那种部署不需要额外放行任何源。
+ */
+function apiOrigin(apiBase: string): string {
+  const base = apiBase.trim();
+  if (!base) return '';
+  try {
+    const u = new URL(base, 'http://placeholder.invalid');
+    return u.origin === 'http://placeholder.invalid' ? '' : u.origin;
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 生成 PWA 产物：`manifest.webmanifest` + `sw.js`（E8 / P1-78）。
  *
  * 为什么不让它们以静态文件形式存在于 `public/`：
@@ -49,7 +64,7 @@ function cspPlugin(apiBase: string): Plugin {
  *
  * 与 `cspPlugin` 同一模式：都在构建期改写产物。
  */
-function pwaPlugin(): Plugin {
+function pwaPlugin(apiBase: string): Plugin {
   return {
     name: 'pwa-manifest-and-sw',
     apply: () => true,
@@ -85,7 +100,10 @@ function pwaPlugin(): Plugin {
       this.emitFile({
         type: 'asset',
         fileName: 'sw.js',
-        source: buildServiceWorker(tpl, urls, version),
+        // own origins：图片代理所在源（SW 自己的源由模板在运行时 concat 进来——
+        // 部署域名构建期不可知）。同源部署时是空串；跨域 API 部署时必须带上，
+        // 否则配图（`${API_BASE}/api/img?…`）一张都缓存不到。
+        source: buildServiceWorker(tpl, urls, version, [apiOrigin(apiBase)]),
       });
     },
   };
@@ -94,7 +112,7 @@ function pwaPlugin(): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
   return {
-    plugins: [vue(), cspPlugin(env.VITE_API_BASE ?? ''), pwaPlugin()],
+    plugins: [vue(), cspPlugin(env.VITE_API_BASE ?? ''), pwaPlugin(env.VITE_API_BASE ?? '')],
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -10,17 +10,27 @@
  * 它只替换第一处，模板里若出现第二次（如缓存键拼接）就会漏。
  */
 
-/** 模板里的两个占位符。命名刻意不可能与真实内容撞上 */
+/** 模板里的占位符。命名刻意不可能与真实内容撞上 */
 export const PRECACHE_TOKEN = '__PRECACHE__';
 export const VERSION_TOKEN = '__VERSION__';
+export const OWN_ORIGINS_TOKEN = '__OWN_ORIGINS__';
 
-export function buildServiceWorker(template: string, urls: string[], version: string): string {
-  if (!template.includes(PRECACHE_TOKEN)) {
-    // 模板被改动过（占位符没了）必须炸：静默产出一份空清单的 SW，
-    // 比构建失败难查得多——后者至少会告诉你哪里错了。
-    throw new Error(`SW 模板缺少占位符 ${PRECACHE_TOKEN}，拒绝产出空清单`);
+export function buildServiceWorker(
+  template: string,
+  urls: string[],
+  version: string,
+  ownOrigins: string[] = [],
+): string {
+  // 两个占位符都必须替换：缺任何一个都说明模板被改过。静默产出一份
+  // `PRECACHE_URLS` 为 undefined 或 `OWN_ORIGINS` 缺失的 SW，
+  // 比构建失败难查得多——后者至少会告诉你哪里错了。
+  for (const token of [PRECACHE_TOKEN, OWN_ORIGINS_TOKEN]) {
+    if (!template.includes(token)) {
+      throw new Error(`SW 模板缺少占位符 ${token}，拒绝产出残缺的 Service Worker`);
+    }
   }
   return template
     .replace(PRECACHE_TOKEN, JSON.stringify(urls))
+    .replace(OWN_ORIGINS_TOKEN, JSON.stringify(ownOrigins))
     .replace(new RegExp(VERSION_TOKEN, 'g'), version);
 }
