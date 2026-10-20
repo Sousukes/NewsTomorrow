@@ -2,13 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { manifest, manifestJson } from './manifest';
 import { palette } from '@/styles/palette';
 
-/**
- * manifest 契约（E8 / P1-78）。
- *
- * 为什么值得单测：manifest 缺一个字段的**表现**是"安装按钮不出现"——
- * 没有报错、没有日志，只有用户装不上。这种缺失必须在 CI 里拦住。
- * `purpose: 'maskable'` 手滑写成 `maskabble` 同样只表现为 Android 上缘露白边。
- */
+/** manifest 缺字段的表现是"安装按钮不出现"，无报错无日志，只能靠测试拦。 */
 describe('pwa/manifest', () => {
   it('可安装所必需的字段齐备', () => {
     expect(manifest.name).toBe('明日头条');

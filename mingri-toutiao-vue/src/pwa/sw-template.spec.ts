@@ -1,12 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import swSource from './sw-template.js?raw';
 
-/**
- * SW 模板本身的行为约定（E8 / P1-78）。
- *
- * 这些断言针对**模板源码**（注入逻辑由 `precache.spec.ts` 覆盖）：
- * 写操作不被缓存、回落带标记、缓存有上限——三条全是"错了也不会报错"的坑。
- */
+/** SW 模板的行为约定。注入逻辑见 precache.spec.ts。 */
 describe('pwa/sw-template', () => {
   it('非 GET 一律不碰（写操作重发会重复计数，幂等键在服务端）', () => {
     expect(swSource).toContain("req.method !== 'GET'");

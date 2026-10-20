@@ -1,15 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-/**
- * PWA 注册器（E8 / P1-78）。
- *
- * 三条守卫是本文件的全部重点——它们各自对应一个真实的崩溃场景：
- * - **dev 不注册**：dev 的模块按需加载，precache 会缓存半批模块，
- *   症状是"改了代码却不生效"（这种锅极难归因到 SW 上）；
- * - **无 `navigator.serviceWorker` 不注册**：jsdom / 旧浏览器会 ReferenceError；
- * - **非安全上下文不注册**：浏览器本身禁止，register() 会 reject，
- *   不 catch 就是一条未处理的 Promise 拒绝。
- */
+/** 三条守卫缺一条都会在特定环境炸：dev / jsdom / 非安全上下文。 */
 
 /** 带参数的 register mock：否则 vi.fn 的实现函数是 0 参，`mock.calls[0][0]` 取不到值 */
 const regMock = (waiting: unknown = null) =>

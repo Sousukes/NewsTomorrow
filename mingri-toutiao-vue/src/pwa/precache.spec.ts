@@ -1,16 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildServiceWorker, OWN_ORIGINS_TOKEN, PRECACHE_TOKEN, VERSION_TOKEN } from './precache';
 
-/**
- * precache 注入（E8 / P1-78）。
- *
- * 这条链路错了**不会有任何运行时报错**，只会表现为"离线打不开"——所以必须是单测。
- * 三个坑分别对应：
- * 1. 占位符没替换干净 → SW 里残留字面量，`PRECACHE_URLS` 是 undefined，
- *    `install` 里 `undefined.map` 直接抛，SW 装不上（且只在浏览器控制台可见）；
- * 2. 只替换了第一处版本号 → 缓存键与比较用的版本号不一致，旧缓存永不清理；
- * 3. 清单里混入手写裸路径 → hash 名对不上，永远命不中。
- */
+/** 注入链路失败没有任何运行时表现，只表现为"离线打不开"——所以必须单测。 */
 
 // 模板里版本号出现 **3 次**：一次定义、两次被引用（缓存键与目录名）。
 // 只换第一处的恶果正是这两处引用对不上——旧缓存永不清理。

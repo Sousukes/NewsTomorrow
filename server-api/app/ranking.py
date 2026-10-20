@@ -153,8 +153,7 @@ def bump_hot_score(db: Session, news_id: str) -> None:
     except Exception as e:  # 热度是派生数据，失败不得影响主流程（评论/收藏）
         logger.warning("热度分更新失败（已回滚，不影响主流程）: %s", e)
         db.rollback()
-        # 失败不能只有日志：容器日志没人看，运营大盘看不到 = 静默失效。
-        # 落审计让「排序长期失真」至少有一处可见的痕迹（P1-82）。
+        # 只写日志等于静默失效：落审计，让排序失真在大盘可见
         _record_hot_failure(db, news_id, str(e))
 
 

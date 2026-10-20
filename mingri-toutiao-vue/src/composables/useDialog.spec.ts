@@ -3,15 +3,7 @@ import { mount } from '@vue/test-utils';
 import { defineComponent, h, nextTick, ref } from 'vue';
 import { focusableWithin, useDialog } from './useDialog';
 
-/**
- * 对话框的键盘与焦点行为（E9 / P1-80）。
- *
- * 三条都要测，因为每一条坏掉的方式都很隐蔽：
- * - **Escape**：没有它，键盘用户找不到"退出"（遮罩点击对键盘不存在）；
- * - **焦点陷阱**：`aria-modal="true"` 声称外界不可交互，Tab 却能逃出去——
- *   焦点落到遮罩下方，屏幕上"看不见焦点在哪"；
- * - **焦点还原**：关闭后焦点掉回 `<body>`，长列表里等于从头 Tab 一遍。
- */
+/** Escape / 焦点陷阱 / 焦点还原：每一条坏掉的方式都很隐蔽。 */
 
 /** 最小宿主：一个触发按钮 + 一个可开关的对话框 */
 function mountHost() {

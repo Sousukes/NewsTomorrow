@@ -540,8 +540,6 @@ def create_comment(
     if news is not None:
         news.comment_count = (news.comment_count or 0) + 1
 
-    # 通知与评论**同一次提交**：分成两次会留下「评论成功、通知静默丢失」的窗口，
-    # 而通知表写入与评论写入同库同级，没有理由让它们不同生共死。
     if parent is not None:
         notify_comment_replied(db, parent=parent, actor_id=user.id, actor_name=user.name)
     else:
@@ -555,7 +553,7 @@ def create_comment(
     db.commit()
     db.refresh(c)
 
-    # 热度是派生数据：失败不影响评论，但失败会落审计（见 bump_hot_score）
+    # 热度是派生数据，失败不影响评论（见 bump_hot_score）
     bump_hot_score(db, news_id)
 
     # 返回体带 parentId/rootId 与「回复 @谁」，前端可直接渲染
@@ -590,7 +588,6 @@ def set_like(
     elif not body.liked and existing is not None:
         db.delete(existing)
         c.likes = max((c.likes or 0) - 1, 0)
-    # 仅在**新增点赞**时通知作者；与点赞本身同一次提交（同库同级，不该分两次）
     if just_liked:
         notify_comment_liked(db, comment=c, actor_id=user.id, actor_name=user.name)
     db.commit()

@@ -1,14 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mockSourceKey } from './source';
 
-/**
- * 离线来源标识（E6b）的**确定性**。
- *
- * 这条属性是全部离线关注功能的地基：种子资讯数组的顺序、条数在演示过程中会变
- * （加一条演示数据、隐藏一条），如果 key 是按"第几个来源"自增，那么数组一变，
- * 上一次存的关注记录就指向了别的来源——用户会看到"我关注的人怎么换了"。
- * 哈希保证同一名称永远得到同一 key。
- */
+/** key 必须确定：否则演示数据顺序一变，已关注的关系就指向别的来源。 */
 describe('utils/source 离线来源标识', () => {
   it('同一名称得到同一 key（可重复调用、可跨进程）', () => {
     expect(mockSourceKey('新华社')).toBe(mockSourceKey('新华社'));
