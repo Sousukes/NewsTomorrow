@@ -2,7 +2,9 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
+import Button from '@/components/Button.vue';
 import ChannelTabs from '@/components/ChannelTabs.vue';
+import EmptyState from '@/components/EmptyState.vue';
 import NewsCard from '@/components/NewsCard.vue';
 import { useNewsStore } from '@/stores/news';
 import { useInfiniteList } from '@/composables/useInfiniteList';
@@ -66,6 +68,21 @@ function open(id: string) {
       <template v-if="bucket.loading && !bucket.list.length">
         <div v-for="i in 3" :key="`sk-${i}`" class="video__skeleton" />
       </template>
+
+      <!--
+        空态（P1-85）：这一页原先只有骨架屏与列表，**没有空态**。
+        而 video 频道当前恒为空（P1-84 已量证：全库 `video_url` 非空 0 条，
+        抓取链路唯一写 `video_url` 的地方写的是 None）——也就是说进入这个 Tab
+        的人**每次**都只看到一片空白，像页面坏了。空态要说清状态，并给一个出口。
+      -->
+      <EmptyState
+        v-if="!bucket.loading && !bucket.list.length && !bucket.error"
+        icon="collect"
+        title="暂无视频内容"
+        description="视频频道还没有内容，可以先去首页看看推荐资讯。"
+      >
+        <Button variant="primary" label="去看推荐" @click="router.push('/')" />
+      </EmptyState>
 
       <NewsCard v-for="item in bucket.list" :key="item.id" :item="item" @click="open" />
 

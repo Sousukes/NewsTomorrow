@@ -13,9 +13,37 @@
  *
  * 用法：先启动后端，再执行 node scripts/contract-check.mjs
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 const BASE = process.env.API_BASE || 'http://127.0.0.1:8000/api';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 前端常量文件（P1-85：枚举逐值校验从这里取值，不在脚本里抄第二份） */
+const channelsFile = fileURLToPath(new URL('../src/constants/channels.ts', import.meta.url));
+const reasonsFile = fileURLToPath(new URL('../src/constants/reports.ts', import.meta.url));
+const commentSortsFile = fileURLToPath(new URL('../src/constants/comments.ts', import.meta.url));
+
+/**
+ * 从前端常量文件读出枚举取值。
+ *
+ * 两种形态都支持：`['a','b']`（举报理由）与 `[{ key: 'a', label: '甲' }]`
+ * （频道 / 评论排序）。**不在本脚本里维护一份拷贝**——脚本自己抄一份就成了
+ * 第四处来源，后端改了值时脚本会照旧"通过"，那这条校验就白写了。
+ */
+function readConstValues(file, constName) {
+  const text = readFileSync(file, 'utf8');
+  const at = text.indexOf(`export const ${constName}`);
+  if (at < 0) throw new Error(`常量文件里找不到 ${constName}（${file}）`);
+  const open = text.indexOf('[', at);
+  const close = text.indexOf(']', open);
+  if (open < 0 || close < 0) throw new Error(`${constName} 不是数组字面量（${file}）`);
+  const body = text.slice(open + 1, close);
+  const keyed = [...body.matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]);
+  if (keyed.length) return keyed;
+  return [...body.matchAll(/^\s*'([^']+)'/gm)].map((m) => m[1]);
+}
 
 /**
  * C10 受护端点：请求自动带上 step-up 头（与前端 `api/http.ts` 同一套行为——
@@ -3040,6 +3068,78 @@ const run = async () => {
         `${latestBefore.split(',').length} → ${latestAfter.split(',').length}`,
       );
     }
+  }
+
+  // 15) 枚举逐值校验（P1-85）：前端常量与后端白名单**逐字**比对
+  //
+  // 之前这条是"文档承诺了但没实现"：`src/constants/reports.spec.ts` 写着
+  // "逐字比对放在契约脚本（它会拿真实值打接口）"，而本脚本只硬编码打了
+  // 6 个理由里的 2 个、7 个频道里的 3 个——后端改一个枚举值，
+  // 前端测试照样绿（它硬编码的是旧值），只有点到那个选项的用户会撞 422。
+  //
+  // 做法：本脚本**读前端常量文件**取值（不在脚本里抄一份，避免第四处来源），
+  // 再拿每个真实值打一次接口。漂移于是在 CI 阶段就暴露。
+  {
+    const channels = readConstValues(channelsFile, 'CHANNELS');
+    const reasons = readConstValues(reasonsFile, 'REPORT_REASONS');
+    const commentSorts = readConstValues(commentSortsFile, 'COMMENT_SORTS');
+
+    check(
+      '能从前端常量文件读出枚举（读不到即脚本失效，不能算"通过"）',
+      channels.length >= 7 && reasons.length >= 6 && commentSorts.length >= 2,
+      `频道 ${channels.length} / 理由 ${reasons.length} / 评论排序 ${commentSorts.length}`,
+    );
+
+    // 频道：每个 key 都要被后端接受（改名/删除会在这里红）
+    const badChannels = [];
+    for (const key of channels) {
+      try {
+        await request(`/news?channel=${encodeURIComponent(key)}&pageSize=1`);
+      } catch {
+        badChannels.push(key);
+      }
+    }
+    check(
+      `全部 ${channels.length} 个频道都被后端接受`,
+      badChannels.length === 0,
+      badChannels.length ? `被拒：${badChannels.join(',')}` : channels.join(','),
+    );
+
+    // 举报理由：逐值提交（同一用户同一目标幂等，不新增行，只更新理由）
+    if (token) {
+      const badReasons = [];
+      for (const reason of reasons) {
+        try {
+          await request('/reports', {
+            method: 'POST',
+            token,
+            body: { targetType: 'news', targetId: 'n4', reason },
+          });
+        } catch {
+          badReasons.push(reason);
+        }
+      }
+      check(
+        `全部 ${reasons.length} 个举报理由都被后端接受（白名单逐字一致）`,
+        badReasons.length === 0,
+        badReasons.length ? `被拒：${badReasons.join(',')}` : reasons.join(','),
+      );
+    }
+
+    // 评论排序：逐值请求
+    const badSorts = [];
+    for (const sort of commentSorts) {
+      try {
+        await request(`/news/n4/comments?sort=${encodeURIComponent(sort)}`, { token });
+      } catch {
+        badSorts.push(sort);
+      }
+    }
+    check(
+      `全部 ${commentSorts.length} 种评论排序都被后端接受`,
+      badSorts.length === 0,
+      badSorts.length ? `被拒：${badSorts.join(',')}` : commentSorts.join(','),
+    );
   }
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`);
