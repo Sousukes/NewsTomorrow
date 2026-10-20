@@ -35,11 +35,19 @@ EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "#")
 
 ENTRY_DOCS = [
     DOCS / "README.md",
-    REPO / "优化落地记录.md",
     REPO / "明日头条-组件与接口速查表.md",
     REPO / "server-api" / "README.md",
     REPO / "mingri-toutiao-vue" / "README.md",
 ]
+
+#: 本地治理台账。**已从版本库移除**（见 `.gitignore`）：它是过程资料，
+#: 公开仓库里没有读者。本地存在时才校验——否则新克隆的 CI 会因为
+#: "文件不存在"而红，而那与代码质量无关。
+LOCAL_LEDGER = REPO / "优化落地记录.md"
+HAS_LOCAL_LEDGER = LOCAL_LEDGER.exists()
+
+#: 只存在于工作区、不随仓库分发的文档（按文件名匹配，链接可能带相对路径）
+LOCAL_ONLY_DOCS = {"优化落地记录.md", "项目评估与优化建议.md"}
 
 
 def _links(path: Path) -> list[str]:
@@ -66,6 +74,11 @@ class TestLinksResolve:
                 target = unquote(raw.split("#", 1)[0].strip())
                 if not target:
                     continue
+                # 指向"本地治理文档"的链接在**新克隆里必然悬空**：那些文件
+                # 已从版本库移除（见 `.gitignore`）。它们不是内容文档，
+                # 不参与公开仓库的链接完整性——本地存在时上面已经校验过。
+                if Path(target).name in LOCAL_ONLY_DOCS:
+                    continue
                 if not (md.parent / target).exists():
                     broken.append(f"{md.relative_to(REPO)} → {raw}")
         assert not broken, "断链（拆分后最容易出的错，且没有任何报错）：\n" + "\n".join(broken)
@@ -76,10 +89,12 @@ class TestLinksResolve:
         漏挂一个 = 那个批次从此不可检索，而目录里明明有它——这种不一致
         不会触发任何错误。
         """
+        if not HAS_LOCAL_LEDGER:
+            pytest.skip("本地治理台账（优化落地记录.md）不在版本库中，跳过索引覆盖检查")
         batch_dir = DOCS / "治理" / "落地记录"
         files = {f.name for f in batch_dir.glob("*.md")}
         assert len(files) >= 40, "批次文件数量异常，拆分可能被误删"
-        index = (REPO / "优化落地记录.md").read_text(encoding="utf-8")
+        index = LOCAL_LEDGER.read_text(encoding="utf-8")
         missing = sorted(f for f in files if f not in index)
         assert not missing, f"这些批次文件没被索引引用：{missing}"
 
