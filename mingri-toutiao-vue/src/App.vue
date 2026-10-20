@@ -9,6 +9,8 @@ import Showcase from '@/views/Showcase.vue';
 import { useMessagesStore } from '@/stores/messages';
 import { useFollowsStore } from '@/stores/follows';
 import { useUserStore } from '@/stores/user';
+import { useOnline } from '@/composables/useOnline';
+import { registerServiceWorker, type PwaUpdateHandle } from '@/pwa/register';
 import type { TabItem } from '@/types';
 
 const route = useRoute();
@@ -61,6 +63,16 @@ watch(
   () => void follows.refresh(),
 );
 
+// E8：Service Worker 注册与更新提示（prod 才有；dev/jsdom 下 register 内部自行跳过）
+const pwa = ref<PwaUpdateHandle | null>(null);
+onMounted(() => {
+  pwa.value = registerServiceWorker();
+});
+
+// 网络状态：掉线时给一条**持久**提示（不用 toast——toast 会消失，
+// 而"当前离线"这件事在用户恢复网络前应该一直可见）
+const { online } = useOnline();
+
 function onTab(key: string) {
   const path = tabRoutes[key];
   if (path) router.push(path);
@@ -79,6 +91,15 @@ function onTab(key: string) {
     <div class="page__stage">
       <PhoneFrame>
         <div class="app-shell">
+          <!-- E8：新版本提示（点击才刷新，不自动 skipWaiting——那会在阅读中途换掉执行环境） -->
+          <div v-if="pwa && pwa.available()" class="app-banner app-banner--update">
+            <span>发现新版本</span>
+            <button type="button" @click="pwa?.refresh()">刷新</button>
+          </div>
+          <!-- E8：离线提示（持久可见；SW 会把 GET 请求回落缓存，但列表会是旧数据） -->
+          <div v-if="!online" class="app-banner app-banner--offline">
+            <span>当前离线，展示的是缓存内容</span>
+          </div>
           <main class="app-shell__main">
             <!-- 渲染异常时降级为局部错误页，避免整页白屏 -->
             <ErrorBoundary>
@@ -153,5 +174,38 @@ function onTab(key: string) {
   flex: 1;
   overflow-y: auto;
   background: var(--color-page-bg);
+}
+
+/* E8：状态横幅。放在 app-shell 顶部而不是全局 fixed——它属于"这个 App"的状态，
+   陈列区（右侧组件库）不该跟着变。 */
+.app-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: var(--font-cn);
+  flex-shrink: 0;
+}
+
+.app-banner--offline {
+  color: var(--color-text-primary);
+  background: var(--color-divider);
+}
+
+.app-banner--update {
+  color: #fff;
+  background: var(--color-primary);
+}
+
+.app-banner--update button {
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--color-primary);
+  background: #fff;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
 }
 </style>

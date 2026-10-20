@@ -70,6 +70,9 @@ export function buildCsp(options: CspOptions = {}): string {
     // 不写 'unsafe-inline' / 'unsafe-eval'：这正是本策略的价值所在
     ['default-src', "'self'"],
     ['script-src', "'self'"],
+    // E8：Service Worker 单独声明。不写时它回落到 script-src（同为 'self'，
+    // 行为不变），但显式写出来可避免以后收紧 script-src 时把 SW 一起挡掉。
+    ['worker-src', "'self'"],
     // 'unsafe-inline' 是必须的：Vue 作用域样式与组件的内联 style 属性都走它
     ['style-src', "'self' 'unsafe-inline' https://fonts.googleapis.com"],
     // B4 之后资讯配图一律走**本域的图片代理**（`${apiBase}/api/img`），

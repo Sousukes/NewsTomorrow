@@ -1,5 +1,9 @@
+import { existsSync, readFileSync as fsReadFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
+import { manifest, manifestJson } from './src/pwa/manifest';
+import { buildServiceWorker } from './src/pwa/precache';
 import vue from '@vitejs/plugin-vue';
 import { buildCsp } from './src/security/csp';
 
@@ -35,10 +39,62 @@ function cspPlugin(apiBase: string): Plugin {
   };
 }
 
+/**
+ * 生成 PWA 产物：`manifest.webmanifest` + `sw.js`（E8 / P1-78）。
+ *
+ * 为什么不让它们以静态文件形式存在于 `public/`：
+ * - **manifest** 的唯一事实源是 `src/pwa/manifest.ts`（可类型检查、可单测），
+ *   静态副本必然漂移（与 D4「mock 第二实现」同一个坑）；
+ * - **sw.js** 的 precache 清单必须是这一批构建的 hash 名，人工维护必然过期。
+ *
+ * 与 `cspPlugin` 同一模式：都在构建期改写产物。
+ */
+function pwaPlugin(): Plugin {
+  return {
+    name: 'pwa-manifest-and-sw',
+    apply: () => true,
+    generateBundle(_options, bundle) {
+      // 图标存在性在**构建期**校验：缺文件时构建直接失败，
+      // 而不是上线后表现为"安装按钮不出现"（那种缺失用户侧才暴露）。
+      const publicDir = fileURLToPath(new URL('./public', import.meta.url));
+      for (const icon of manifest.icons) {
+        const file = resolve(publicDir, `.${icon.src}`);
+        if (!existsSync(file)) {
+          this.error(`PWA 图标缺失：${icon.src}（先跑 scripts/gen_pwa_icons.py）`);
+        }
+      }
+
+      // 只 precache「带 hash 的构建产物」+ 入口与 manifest：地图、LICENSE 之类
+      // 对离线启动没用，只会把清单撑大（每条都是首屏要多下一次的请求）。
+      const urls = Object.values(bundle)
+        .map((o) => `/${o.fileName}`)
+        .concat(['/index.html', '/manifest.webmanifest', '/icons/icon-192.png'])
+        .filter((v, i, a) => a.indexOf(v) === i);
+
+      const tpl = fsReadFileSync(
+        fileURLToPath(new URL('./src/pwa/sw-template.js', import.meta.url)),
+        'utf-8',
+      );
+      const version = `b${Date.now().toString(36)}`;
+
+      this.emitFile({
+        type: 'asset',
+        fileName: 'manifest.webmanifest',
+        source: manifestJson(),
+      });
+      this.emitFile({
+        type: 'asset',
+        fileName: 'sw.js',
+        source: buildServiceWorker(tpl, urls, version),
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
   return {
-    plugins: [vue(), cspPlugin(env.VITE_API_BASE ?? '')],
+    plugins: [vue(), cspPlugin(env.VITE_API_BASE ?? ''), pwaPlugin()],
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
