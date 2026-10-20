@@ -8,6 +8,12 @@
  * 前端联调：npm run dev:api     （以 --mode api 启动，自动指向本服务）
  *
  * 约定：所有响应形如 { code, message, data }，code 0/200 为成功。
+ *
+ * **刻意不模拟**（与真后端的已知差异，`scripts/contract-diff.mjs` 里同步声明）：
+ * - 举报阈值自动处置：需 3 个不同账号才触达，mock 的 `autoHidden` 恒 false；
+ * - 来源 key：mock 用 `mockSourceKey(名称)` 合成，真后端种子资讯的来源不在
+ *   RSS 源表里，`sourceKey` 为 null（mock 合成是为了让离线演示能展示「关注」）。
+ * 新增 mock 端点时若与真后端有差异，请在此表态并同步到 diff 脚本。
  */
 import { createServer } from 'node:http';
 
@@ -2228,11 +2234,18 @@ const server = createServer(async (req, res) => {
    * 声明必须在各 news 路由之前：这些路由是同一函数内顺序执行的 if 块，
    * 声明在后会先被使用（TDZ）。
    */
-  const listOut = (row) => {
+  // 公开视图：去掉管理端字段（hotScore/publishedAt 不下发给客户端），
+  // 并补齐后端固定下发的可空字段（null），否则两边形状不一致
+  const publicNews = (row, { withContent = false } = {}) => {
     const out = { ...row };
-    delete out.content;
+    delete out.hotScore;
+    delete out.publishedAt;
+    if (!withContent) delete out.content;
+    for (const k of ['cover', 'videoUrl', 'playCount']) out[k] = row[k] ?? null;
+    out.isTop = Boolean(row.isTop);
     return out;
   };
+  const listOut = (row) => publicNews(row);
 
   if (head === 'news' && !a && method === 'GET') {
     const channel = url.searchParams.get('channel') || 'recommend';
@@ -2454,7 +2467,7 @@ const server = createServer(async (req, res) => {
     const item = news.find((n) => n.id === a);
     // P1-20：已下架与不存在同码 40400（对外不暴露"被下了"）
     if (!item || item.hidden === true) return fail(res, 404, 40400, '内容不存在或已下架');
-    return ok(res, item);
+    return ok(res, publicNews(item, { withContent: true }));
   }
 
   // GET /news/:id/comments（P1-12：只返回主评论，附回复数与最早 2 条预览）

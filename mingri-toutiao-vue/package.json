@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "contract-check": "node scripts/contract-check.mjs",
+    "contract-diff": "node scripts/contract-diff.mjs",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "mock:api": "node mock-server/server.mjs",
