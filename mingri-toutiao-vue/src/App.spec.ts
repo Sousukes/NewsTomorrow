@@ -148,3 +148,24 @@ it('E6b：启动时拉一次关注集合，登录态变化后重拉（防切账�
   await flush();
   expect(refreshFollows).toHaveBeenCalledTimes(1);
 });
+
+/**
+ * E9：跳过导航与唯一 h1。
+ * skip link 让键盘用户不必每次穿过导航与频道栏；陈列区标题降为 h2，
+ * 因为各视图内部已有 h1（同一文档只该有一个）。
+ */
+describe('App 可访问性（E9）', () => {
+  it('有跳到主要内容的 skip link，且锚点存在', () => {
+    const w = mountApp();
+    const link = w.find('a.skip-link');
+    expect(link.exists()).toBe(true);
+    expect(link.attributes('href')).toBe('#main-content');
+    expect(w.find('#main-content').exists()).toBe(true);
+  });
+
+  it('陈列区标题不是 h1（视图内才是）', () => {
+    const w = mountApp();
+    const pageHeader = w.find('.page__header');
+    expect(pageHeader.find('h1').exists()).toBe(false);
+  });
+});

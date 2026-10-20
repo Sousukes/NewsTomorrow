@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { manifest, manifestJson } from './manifest';
+import { palette } from '@/styles/palette';
 
 /**
  * manifest 契约（E8 / P1-78）。
@@ -24,9 +25,9 @@ describe('pwa/manifest', () => {
     expect(manifest.background_color).toMatch(/^#[0-9a-f]{6}$/i);
   });
 
-  it('主题色与设计令牌一致（改 tokens.css 时这里会提醒同步）', () => {
-    expect(manifest.theme_color).toBe('#2d6cff');
-    expect(manifest.background_color).toBe('#f4f5f6');
+  it('主题色直接取自 palette（不再有第二份色值）', () => {
+    expect(manifest.theme_color).toBe(palette.light.primary);
+    expect(manifest.background_color).toBe(palette.light.pageBg);
   });
 
   it('图标同时覆盖 any 与 maskable（少 maskable，Android 裁切后边缘出白边）', () => {

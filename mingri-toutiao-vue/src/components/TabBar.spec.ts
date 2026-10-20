@@ -44,3 +44,24 @@ describe('components/TabBar 图标配色（A6）', () => {
     expect(badges[0].text()).toBe('3');
   });
 });
+
+/**
+ * E9：当前项要有 `aria-current`。
+ * 只靠 `.is-active` 类，读屏用户无法知道"我在哪个 tab"——视觉信息没有语义对应。
+ */
+describe('TabBar 可访问性（E9）', () => {
+  it('仅当前项带 aria-current="page"', () => {
+    const w = mount(TabBar, {
+      props: {
+        items: [
+          { key: 'home', label: '首页', icon: 'home' },
+          { key: 'mine', label: '我的', icon: 'mine' },
+        ],
+        active: 'mine',
+      },
+    });
+    const items = w.findAll('.mt-tabbar__item');
+    expect(items[0].attributes('aria-current')).toBeUndefined();
+    expect(items[1].attributes('aria-current')).toBe('page');
+  });
+});

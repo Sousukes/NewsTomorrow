@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { manifest, manifestJson } from './src/pwa/manifest';
+import { CSS_VAR_MAP, palette } from './src/styles/palette';
 import { buildServiceWorker } from './src/pwa/precache';
 import vue from '@vitejs/plugin-vue';
 import { buildCsp } from './src/security/csp';
@@ -35,6 +36,38 @@ function cspPlugin(apiBase: string): Plugin {
           },
         ];
       },
+    },
+  };
+}
+
+/**
+ * 校验 `tokens.css` 与 `palette.ts` 一致（E9）。
+ * 色值必须在 CSS 里，而对比度门槛要在单测里断言（vitest 会把 .css 置空），
+ * 两者各存一份，靠构建期校验钉住。
+ */
+function tokensPlugin(): Plugin {
+  return {
+    name: 'tokens-palette-check',
+    buildStart() {
+      const css = fsReadFileSync(
+        fileURLToPath(new URL('./src/styles/tokens.css', import.meta.url)),
+        'utf-8',
+      );
+      const blocks: Record<string, string> = {
+        light: css.slice(css.indexOf(':root {'), css.indexOf("[data-theme='dark']")),
+        dark: css.slice(css.indexOf("[data-theme='dark']")),
+      };
+      for (const [mode, block] of Object.entries(blocks)) {
+        for (const [cssVar, key] of Object.entries(CSS_VAR_MAP)) {
+          const expected = palette[mode as 'light' | 'dark'][key];
+          const found = block.match(new RegExp(`--${cssVar}:\\s*(#[0-9a-fA-F]{3,6})`))?.[1];
+          if (found && found.toLowerCase() !== expected.toLowerCase()) {
+            this.error(
+              `tokens.css 与 palette.ts 不一致：${mode} --${cssVar} = ${found}，期望 ${expected}`,
+            );
+          }
+        }
+      }
     },
   };
 }
@@ -112,7 +145,12 @@ function pwaPlugin(apiBase: string): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
   return {
-    plugins: [vue(), cspPlugin(env.VITE_API_BASE ?? ''), pwaPlugin(env.VITE_API_BASE ?? '')],
+    plugins: [
+      vue(),
+      cspPlugin(env.VITE_API_BASE ?? ''),
+      pwaPlugin(env.VITE_API_BASE ?? ''),
+      tokensPlugin(),
+    ],
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),

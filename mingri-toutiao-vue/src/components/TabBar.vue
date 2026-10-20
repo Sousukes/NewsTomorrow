@@ -49,6 +49,7 @@ function badgeText(key: string): string {
       :key="item.key"
       class="mt-tabbar__item"
       :class="{ 'is-active': item.key === active }"
+      :aria-current="item.key === active ? 'page' : undefined"
       @click="emit('update:active', item.key)"
     >
       <span class="mt-tabbar__icon">

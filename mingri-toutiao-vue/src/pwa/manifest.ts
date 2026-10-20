@@ -3,6 +3,9 @@
  * 产物由 vite.config.ts::pwaPlugin 构建期生成，public 下不留副本。
  */
 
+// 相对路径：本文件被 vite.config 直接 import，@/ 别名在配置文件里不可用
+import { palette } from '../styles/palette';
+
 export interface ManifestIcon {
   src: string;
   sizes: string;
@@ -32,9 +35,8 @@ export interface WebManifest {
   }[];
 }
 
-/** 与 tokens.css 的 --color-primary / --color-page-bg 对齐 */
-export const THEME_COLOR = '#2d6cff';
-export const BACKGROUND_COLOR = '#f4f5f6';
+export const THEME_COLOR = palette.light.primary;
+export const BACKGROUND_COLOR = palette.light.pageBg;
 
 export const manifest: WebManifest = {
   id: '/',

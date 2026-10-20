@@ -138,7 +138,7 @@ async function onSubmit() {
   font-size: 15px;
   color: var(--color-text-primary);
   background: var(--color-card-bg, #fff);
-  border: 1px solid var(--color-border, rgb(0 0 0 / 8%));
+  border: 1px solid var(--color-border-strong);
   border-radius: 8px;
 }
 

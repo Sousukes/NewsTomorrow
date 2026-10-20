@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（7 项）
+## 开放项（6 项）
 
 ### P1 · 安全
 
@@ -54,7 +54,6 @@
 
 | D4 | 消除 mock 第二实现 | L | `server.mjs` 3,007 行镜像后端（含昵称引擎副本），双份实现 + 双份漂移；改「真后端 + 种子数据」或 OpenAPI 生成 | 审查报告 §4 |
 | D7 | 领域事件 outbox | L | 消息通知/审计/热度 bump 内联在路由里，改事件表 + 异步消费 | 审查报告 §4 |
-| E9 | a11y 与 i18n | M | **P1-80 已落地**：`NewsCard` / `BannerCarousel` 改为覆盖整卡的真链接（键盘可达、保住中键/右键）、`useDialog` 统一三弹窗的 Escape + 焦点陷阱 + 焦点还原；15 项新测试，vitest 912 → 927。**剩 P1-81**：对比度 token 拆分（`secondary` 实测 2.66:1 → `#666c76`）+ `utils/contrast.ts` 守护测试 + skip link / `aria-current` / `alt` / 标题层级。i18n 显式不做（触发条件见设计 §三 D6）。[E9 设计](../前端/E9可访问性与i18n设计.md) | 审查报告 §4 |
 
 ## 已偿还记录
 
@@ -62,6 +61,7 @@
 
 | 批次 | 偿还项 |
 | --- | --- |
+| P1-81 | E9 闭环：色板 `secondary` 2.66→5.29:1、新增 `tertiary`/`border-strong`、主色微调达标；`palette.ts` 作事实源 + `contrast.ts` 工具 + **构建期校验 tokens.css 与之一致**（反向变异验证过）；skip link、`aria-current`、标题层级、表单描边；vitest 927 → 936；**E9 移出开放项**，i18n 按 D6 显式不做（触发条件入档） |
 | P1-79 | E8-b 离线阅读：阅读副本 `reader:<作用域>`（条数 30 / 单条 8KB / 总量 512KB 三重上限 + 7 天保留期 + 账号隔离）+ `loadDetail` 写穿与**冷启动回落**（`fromCache` 供 UI 标注）+ 收藏/历史页离线兜底 + **图片缓存放行代理源**（跨域 API 部署不再裂图）；19 项测试；vitest 892 → 912；**E8 闭环** |
 | P1-78 | E8-a PWA 基建：manifest 唯一事实源在 `src/pwa/manifest.ts`（构建期生成 + 图标存在性构建期校验）+ 自写 SW（precache / network-first + `X-Offline-Fallback` / 图片有界淘汰，零依赖）+ 注册三条守卫 + 更新提示刷新；**抓住自己两次踩进的「replace 只替换第一处」**（占位符字样写进注释 / global 声明 → 产出运行时零报错的坏 SW）；`navigator.onLine` 不随事件更新的缺陷亦由测试抓出；25 项测试；vitest 867 → 892 |
 | P1-77 | E7-b 运营大盘前端 + **E5 举报复核页补齐**：`AdminDashboard.vue`（六块 + 待办可点进"已筛好"的队列 + 行内条形不引图表库）、`AdminReports.vue`（预览/二次确认/处理完移出）、`?status=` 直达筛选、`fetchDashboard`/`fetchReports`/`resolveReport` 归一化（**保住 null**：`Number(null)===0` 会把"无尝试"抹成 0%）；后端补「被举报对象预览」（2 条 IN 查询非 N+1）+ 契约 5 项（此前 `/admin/reports` 零覆盖）；vitest 822 → 860，覆盖率四项全升；pytest 1043 → 1048；**E7 闭环** |

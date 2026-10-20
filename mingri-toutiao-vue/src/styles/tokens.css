@@ -1,18 +1,22 @@
 :root {
   /* 品牌 / 基础色 */
-  --color-primary: #2d6cff;
+  --color-primary: #2a68f7;
   --color-page-bg: #f4f5f6;
   --color-card-bg: #ffffff;
   --color-text-primary: #222222;
-  --color-text-secondary: #9a9fa8;
+  /* 元信息（来源/时间/评论数）：实测 5.29:1（白卡）/ 4.84:1（页底），过 AA */
+  --color-text-secondary: #666c76;
+  /* 纯装饰小字（分隔符、禁用提示）：不承载信息，保持原淡色 */
+  --color-text-tertiary: #9a9fa8;
   --color-divider: #f0f1f2;
 
   /* 语义色（仅用于表单报错 / 错误提示） */
   --color-error: #e5484d;
   --color-error-bg: #fceded;
 
-  /* 描边 / 占位 */
+  /* 描边 / 占位：装饰性描边；表单控件边界需 ≥3:1，用 strong */
   --color-border: #e5e6e8;
+  --color-border-strong: #8e939d;
 
   /* 圆角 */
   --radius-card: 6px;
@@ -45,8 +49,10 @@
   --color-card-bg: #1c1e22;
   --color-text-primary: #e8eaed;
   --color-text-secondary: #9aa0a6;
+  --color-text-tertiary: #7d838c;
   --color-divider: #2a2d33;
   --color-border: #33373d;
+  --color-border-strong: #6b7280;
   --color-error: #ff6b6f;
   --color-error-bg: #3a2224;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);

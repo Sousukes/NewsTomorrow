@@ -36,6 +36,7 @@ function select(key: string) {
       :key="tab.key"
       class="mt-channels__item"
       :class="{ 'is-active': tab.key === activeKey }"
+      :aria-current="tab.key === activeKey ? 'true' : undefined"
       @click="select(tab.key)"
     >
       {{ tab.label }}

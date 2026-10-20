@@ -315,7 +315,8 @@ function formatCount(n?: number): string {
 }
 
 .mt-card__dot {
-  color: var(--color-text-secondary);
+  /* 纯装饰分隔符，不承载信息 → tertiary */
+  color: var(--color-text-tertiary);
 }
 
 /* ---- E3 负反馈入口与菜单 ---- */

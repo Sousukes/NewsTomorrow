@@ -82,7 +82,7 @@ function onTab(key: string) {
 <template>
   <div class="page">
     <header class="page__header">
-      <h1>明日头条 · Vue 3 多页应用</h1>
+      <h2>明日头条 · Vue 3 多页应用</h2>
       <p>
         vue-router + Pinia 驱动的可导航 App 骨架，复用组件库与设计令牌；左侧为运行中的
         App，右侧为组件库陈列。
@@ -91,6 +91,8 @@ function onTab(key: string) {
     <div class="page__stage">
       <PhoneFrame>
         <div class="app-shell">
+          <!-- E9：跳过导航。键盘用户不必每次穿过导航与频道栏才能到内容 -->
+          <a class="skip-link" href="#main-content">跳到主要内容</a>
           <!-- E8：新版本提示（点击才刷新，不自动 skipWaiting——那会在阅读中途换掉执行环境） -->
           <div v-if="pwa && pwa.available()" class="app-banner app-banner--update">
             <span>发现新版本</span>
@@ -100,7 +102,7 @@ function onTab(key: string) {
           <div v-if="!online" class="app-banner app-banner--offline">
             <span>当前离线，展示的是缓存内容</span>
           </div>
-          <main class="app-shell__main">
+          <main id="main-content" class="app-shell__main" tabindex="-1">
             <!-- 渲染异常时降级为局部错误页，避免整页白屏 -->
             <ErrorBoundary>
               <!-- Tab 级列表页缓存：切回时保留滚动位置与已加载数据 -->
@@ -178,6 +180,24 @@ function onTab(key: string) {
 
 /* E8：状态横幅。放在 app-shell 顶部而不是全局 fixed——它属于"这个 App"的状态，
    陈列区（右侧组件库）不该跟着变。 */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  z-index: 100;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: #fff;
+  background: var(--color-primary);
+  border-radius: 0 0 8px 8px;
+  text-decoration: none;
+}
+
+/* 只有键盘聚焦时才可见：鼠标用户看不到它，键盘用户 Tab 一下就出现 */
+.skip-link:focus-visible {
+  left: 50%;
+  transform: translateX(-50%);
+}
+
 .app-banner {
   display: flex;
   align-items: center;

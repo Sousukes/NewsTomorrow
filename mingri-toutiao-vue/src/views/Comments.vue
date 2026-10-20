@@ -593,7 +593,7 @@ function openReport(c: Comment) {
   flex: 1;
   height: 40px;
   padding: 0 14px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-strong);
   border-radius: 20px;
   background: var(--color-page-bg);
   font-size: 14px;
