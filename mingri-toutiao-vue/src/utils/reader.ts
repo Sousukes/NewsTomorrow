@@ -1,19 +1,7 @@
 /**
- * 阅读副本（E8 / P1-79）：把**已读/收藏详情**落到 localStorage，断网时可打开。
- *
- * 为什么要独立一份存储（而不是塞进 marks 或 news store 的内存缓存）：
- * 1. **`detailCache` 是内存 ref**，刷新即失——断网重启后没有任何残留；
- * 2. marks 只存 id，不给正文；离线读收藏需要的是**内容本身**（`content` 仅详情下发）；
- * 3. 频次与形态都不同：marks 由用户显式动作触发，这里是"看过一篇就落一份"，
- *    并进 marks 会让每次收藏/浏览都重写几十 KB 的正文。
- *
- * 三条硬约束（前两条是 localStorage 的物理限制，第三条是隐私）：
- * - **条数上限**：只保留最近的 N 条（默认 30）。它服务的是"刚看的 + 收藏的"，
- *   不是本地档案馆——真要看全部内容，联网时有服务端；
- * - **单条字节上限**：后端单条正文可达 8000 字（E1），超限的条目直接不落，
- *   否则一条异常长文就能把配额吃光；
- * - **按账号作用域隔离**：与 marks / exposures 同一套后缀规则（`anonymous` / `u<id>`），
- *   换账号后看不到上一个账号的阅读副本。
+ * 阅读副本：已读/收藏详情落 localStorage，断网可读。
+ * 独立于 marks（那里只有 id，没有正文）与内存 `detailCache`（刷新即失）。
+ * 上限与作用域规则见 docs/后端/E8-PWA与离线阅读设计.md。
  */
 
 /** 本地保留天数。过期内容允许"再在线拉一次"，不做永久本地档案 */
@@ -31,7 +19,7 @@ const ANON_SCOPE = 'anonymous';
 export const readerKey = (userId: number | null) =>
   `${READER_PREFIX}${userId === null ? ANON_SCOPE : `u${userId}`}`;
 
-/** 一条阅读副本：资讯本体 + 落库时间（用于保留期淘汰） */
+/** 资讯本体 + 落库时间（保留期淘汰用） */
 export interface ReaderEntry {
   item: Record<string, unknown>;
   savedAt: number;
@@ -64,19 +52,19 @@ function sizeOf(shape: ReaderShape): number {
   try {
     return new Blob([JSON.stringify(shape)]).size;
   } catch {
-    // Blob 不可用（极端环境）时退化为字符数近似：宁可是近似，也别让写入崩
+    // Blob 不可用（极端环境）时退化为字符数近似
     return JSON.stringify(shape).length;
   }
 }
 
-/** 淘汰：先按保留期删过期，再按 total 上限从最旧的开始删，最后按条数上限截断 */
+/** 淘汰：过期 → 总量超限 → 条数超限，都从最旧的开始删 */
 function prune(shape: ReaderShape, now = Date.now()): ReaderShape {
   const cutoff = now - READER_RETENTION_DAYS * 86400 * 1000;
   let out: ReaderShape = {};
   for (const [id, e] of Object.entries(shape)) {
     if (e.savedAt >= cutoff) out[id] = e;
   }
-  // 保存时间倒序（新的在前），total 超限时从尾部开始丢
+  // 新的在前，超限从尾部丢
   const sorted = Object.entries(out).sort((a, b) => b[1].savedAt - a[1].savedAt);
   out = Object.fromEntries(sorted);
   while (Object.keys(out).length > READER_CAP) {
@@ -96,7 +84,7 @@ function persist(key: string, shape: ReaderShape): void {
   try {
     localStorage.setItem(key, JSON.stringify(shape));
   } catch {
-    /* 隐私模式 / 配额已满：静默失败（阅读副本是增强，不是功能前提） */
+    /* 隐私模式 / 配额已满：静默失败 */
   }
 }
 
@@ -122,7 +110,7 @@ export function writeReader(
   if (!id || !item || !item.id) return false;
   const shape = prune(readRaw(key), now);
   const candidate: ReaderEntry = { item, savedAt: now };
-  // 单条体积先量一次：超限者整条不落（而不是落一半——半个资讯比没有更糟）
+  // 超限者整条不落（落半个资讯比没有更糟）
   const bytes = sizeOf({ [id]: candidate });
   if (bytes > READER_ENTRY_MAX_BYTES) return false;
   shape[id] = candidate;
@@ -139,7 +127,7 @@ export function clearReader(key: string): void {
   }
 }
 
-/** 当前作用域有哪些 id（最近优先）——供收藏/历史页离线排序用 */
+/** 当前作用域的副本 id（最近优先） */
 export function listReaderIds(key: string, now = Date.now()): string[] {
   const cutoff = now - READER_RETENTION_DAYS * 86400 * 1000;
   return Object.entries(readRaw(key))

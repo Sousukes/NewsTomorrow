@@ -117,10 +117,7 @@ startAuto();
           无限回环时 slides = [末帧, ...全部, 首帧]，首帧与末帧各出现两次，
           仅用 id 作为 key 会产生重复 key，触发 Vue 告警并可能错误复用 DOM。
         -->
-        <!--
-          E9：轮播位同样是**链接**而非可点的 div。`.exact.prevent` 只接管
-          无修饰键的点击（滑动后由 `moved` 守卫吞掉），中键/右键仍是原生行为。
-        -->
+        <!-- 链接而非可点 div；滑动后由 moved 守卫吞掉点击 -->
         <a
           v-for="(id, i) in slides"
           :key="`${id}-${i}`"
@@ -181,7 +178,7 @@ startAuto();
 }
 
 .banner__slide {
-  /* E9：作为链接渲染后要显式去掉下划线与默认色，视觉与改动前一致 */
+  /* 链接渲染后去掉下划线与默认色 */
   text-decoration: none;
   color: inherit;
   flex: 0 0 100%;
