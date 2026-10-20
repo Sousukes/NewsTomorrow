@@ -252,6 +252,92 @@ class TestAdminResolve:
         assert r.status_code == 200
         assert len(r.json()["data"]["list"]) == 2
 
+    def test_list_carries_news_preview(self, client):
+        """资讯被举报：带标题，且 `targetNewsId` 就是它自己（前端据此跳转）。"""
+        _seed_news("n1")
+        h = _login(client, phone="13900000001")
+        _post_report(client, h, target_type="news", target_id="n1")
+        ah = self._admin_headers(client)
+
+        item = client.get("/api/admin/reports", headers=ah).json()["data"]["list"][0]
+        assert item["targetTitle"] == "标题"
+        assert item["targetSnippet"] is None
+        assert item["targetNewsId"] == "n1"
+        assert item["targetMissing"] is False
+
+    def test_list_carries_comment_preview_and_parent_news(self, client):
+        """评论被举报：带内容片段 + **所属资讯 id**。
+
+        后者是复盘的关键：只给 comment id，运营拿着它无处可去
+        （评论没有独立的公开页面），必须先知道它挂在哪条资讯下。
+        """
+        _seed_comment("c1")
+        h = _login(client, phone="13900000001")
+        _post_report(client, h, target_type="comment", target_id="c1")
+        ah = self._admin_headers(client)
+
+        item = client.get("/api/admin/reports", headers=ah).json()["data"]["list"][0]
+        assert item["targetSnippet"] == "内容"
+        assert item["targetNewsId"] == "n1", "评论要能跳回所属资讯"
+        assert item["targetTitle"] is None
+        assert item["targetMissing"] is False
+
+    def test_comment_snippet_is_truncated(self, client):
+        """片段截断到 PREVIEW_LEN：整段 500 字塞进列表是无效带宽。"""
+        from app.routers.admin.reports import PREVIEW_LEN
+
+        _seed_news("n1")
+        with SessionLocal() as db:
+            db.add(
+                Comment(
+                    id="c_long",
+                    news_id="n1",
+                    content="很" * (PREVIEW_LEN + 20),
+                    seed="s",
+                    created_at=now_str(),
+                )
+            )
+            db.commit()
+        h = _login(client, phone="13900000001")
+        _post_report(client, h, target_type="comment", target_id="c_long")
+        ah = self._admin_headers(client)
+
+        item = client.get("/api/admin/reports", headers=ah).json()["data"]["list"][0]
+        assert len(item["targetSnippet"]) == PREVIEW_LEN + 1  # 截断 + 省略号
+        assert item["targetSnippet"].endswith("…")
+
+    def test_deleted_target_marked_missing(self, client):
+        """目标已被删除：`targetMissing=true`，前端据此提示"对象已不存在"。
+
+        举报刻意不建外键（`target_id` 异构 + 目标删了举报仍要留存），
+        所以"目标没了"是正常状态，必须显式表达而不是留一片空白让人猜。
+        """
+        _seed_news("n1")
+        h = _login(client, phone="13900000001")
+        _post_report(client, h, target_type="news", target_id="n1")
+        with SessionLocal() as db:
+            db.query(News).filter(News.id == "n1").delete()
+            db.commit()
+        ah = self._admin_headers(client)
+
+        item = client.get("/api/admin/reports", headers=ah).json()["data"]["list"][0]
+        assert item["targetMissing"] is True
+        assert item["targetTitle"] is None
+
+    def test_resolve_also_carries_preview(self, client):
+        """处置响应与列表同形状：前端就地更新行，不必再拉一次列表。"""
+        _seed_news("n1")
+        h = _login(client, phone="13900000001")
+        _post_report(client, h, target_type="news", target_id="n1")
+        with SessionLocal() as db:
+            rid = db.query(Report).first().id
+        ah = self._admin_headers(client)
+
+        d = client.post(
+            f"/api/admin/reports/{rid}/resolve", json={"resolution": "hidden"}, headers=ah
+        ).json()["data"]
+        assert d["targetTitle"] == "标题" and d["targetMissing"] is False
+
 
 class TestHiddenNewsFilteredFromPublic:
     def test_auto_hidden_news_disappears_from_list(self, client):

@@ -42,8 +42,22 @@ const menu = computed(() => {
     },
   ];
   if (showAdminEntry.value) {
+    // E7：大盘放第一位——后台的入口页，其余都是它的下钻目标
     items.push({
       key: 'admin',
+      label: '运营大盘',
+      desc: '待办队列、源健康、审核与命中趋势',
+      to: '/admin',
+    });
+    // E5 复核（P1-77 补齐）：用户能举报，运营必须能处理
+    items.push({
+      key: 'admin-reports',
+      label: '举报复核',
+      desc: '处理用户举报：确认隐藏或驳回',
+      to: '/admin/reports',
+    });
+    items.push({
+      key: 'admin-sources',
       label: 'RSS 源管理',
       desc: '增删启停信源、查看抓取状态',
       to: '/admin/sources',

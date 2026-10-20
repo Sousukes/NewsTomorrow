@@ -1,7 +1,8 @@
 /**
  * 管理端接口：RSS 源配置（后端 P1-9，界面 P1-10）+ 管理员白名单（P1-14）
  * + 运营审计（P1-15）+ 资讯审核与下架（P1-20）+ 评论治理（P1-22）
- * + 敏感词库与命中日志（P1-23）+ 昵称敏感词与复核队列（P1-24）。
+ * + 敏感词库与命中日志（P1-23）+ 昵称敏感词与复核队列（P1-24）
+ * + 运营大盘（P1-76 / E7）+ 举报复核（P1-77 / E5 前端补齐）。
  *
  * 与 `api/me.ts` 的关键差别：**没有 mock 短路**。源配置与白名单只存在于
  * 后端数据库中，mock 模式下并无真实对象可操作——伪造一份"能增能删"的假列表
@@ -21,10 +22,15 @@ import type {
   AdminNewsItem,
   AdminNewsListResult,
   AdminNewsQuery,
+  AdminReportItem,
+  AdminReportListResult,
+  AdminReportQuery,
   AdminUserInput,
   AdminUserItem,
   AdminUserList,
   CommentHideInput,
+  Dashboard,
+  DashboardQuery,
   HitListResult,
   HitQuery,
   NewsHideInput,
@@ -42,6 +48,7 @@ import type {
   NicknameWordListResult,
   NicknameWordQuery,
   NicknameWordUpdateInput,
+  ReportResolveInput,
   RssSourceItem,
   SensitiveHitItem,
   SensitiveWordItem,
@@ -70,6 +77,19 @@ function ensureRealBackend(): void {
 }
 
 function num(raw: unknown): number | null {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 可空数字：**null / undefined / 空串保持 null**，其余转数字。
+ *
+ * 不能直接用 `num`：`Number(null)` 是 `0`，于是"没有成功轮次"（avgItems=null）
+ * 会被抹成"平均 0 条"、"无尝试"（rate=null）会被抹成"0% 成功率"——
+ * 两者含义完全不同，前端一个显示 `—`、一个显示 `0%`。
+ */
+function nullableNum(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === '') return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 }
@@ -943,4 +963,164 @@ export async function reviewNickname(userId: number): Promise<NicknameReviewResu
     pendingReview: data?.pendingReview === true,
     reviewedAt: typeof data?.reviewedAt === 'string' && data.reviewedAt ? data.reviewedAt : null,
   };
+}
+
+/* ------------------------------ 运营大盘（P1-76 / E7） ------------------------------ */
+
+/** 面板数字收敛成非负整数：脏值（null / 字符串 / 负数）归 0，别让界面渲染出 NaN */
+function countOf(raw: unknown): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * GET /admin/dashboard —— 运营大盘（E7）。
+ *
+ * **单端点**拉全部六个板块：拆成六个请求会让页面出现六个 loading 态，
+ * 而且无法保证"同一时间口径"（后端 `build_dashboard` 用一个 now 聚合全部板块，
+ * 拆开就成了六次独立取时刻）。
+ */
+export async function fetchDashboard(query: DashboardQuery = {}): Promise<Dashboard> {
+  ensureRealBackend();
+  const days = query.days;
+  const qs = days && days > 0 ? `?days=${encodeURIComponent(String(days))}` : '';
+  const data = await request<Record<string, unknown>>(`/admin/dashboard${qs}`);
+  const c = (data?.content ?? {}) as Record<string, unknown>;
+  const todo = (data?.todo ?? {}) as Record<string, unknown>;
+  const eng = (data?.engagement ?? {}) as Record<string, unknown>;
+  const health = (data?.sourceHealth ?? {}) as Record<string, unknown>;
+  const mod = (data?.moderation ?? {}) as Record<string, unknown>;
+  const hits = (mod.hits ?? {}) as Record<string, unknown>;
+  const search = (data?.search ?? {}) as Record<string, unknown>;
+
+  return {
+    days: countOf(data?.days) || 30,
+    generatedAt: typeof data?.generatedAt === 'string' ? data.generatedAt : '',
+    content: {
+      news: countOf(c.news),
+      newsHidden: countOf(c.newsHidden),
+      comments: countOf(c.comments),
+      users: countOf(c.users),
+      sources: countOf(c.sources),
+      sourcesEnabled: countOf(c.sourcesEnabled),
+    },
+    todo: {
+      reports: countOf(todo.reports),
+      commentReviews: countOf(todo.commentReviews),
+      nicknameReviews: countOf(todo.nicknameReviews),
+    },
+    engagement: {
+      searches: countOf(eng.searches),
+      favorites: countOf(eng.favorites),
+      history: countOf(eng.history),
+      follows: countOf(eng.follows),
+      exposures: countOf(eng.exposures),
+      dislikes: countOf(eng.dislikes),
+    },
+    sourceHealth: {
+      windowDays: countOf(health.windowDays) || 30,
+      unhealthy: countOf(health.unhealthy),
+      worst: (Array.isArray(health.worst) ? health.worst : []).map((raw) => {
+        const w = (raw ?? {}) as Record<string, unknown>;
+        const key = typeof w.key === 'string' ? w.key : '';
+        return {
+          key,
+          name: typeof w.name === 'string' && w.name ? w.name : key,
+          attempts: countOf(w.attempts),
+          ok: countOf(w.ok),
+          failed: countOf(w.failed),
+          rate: nullableNum(w.rate),
+          avgItems: nullableNum(w.avgItems),
+          lastFailAt: typeof w.lastFailAt === 'string' && w.lastFailAt ? w.lastFailAt : null,
+        };
+      }),
+    },
+    moderation: {
+      newsHidden: countOf(mod.newsHidden),
+      commentsHidden: countOf(mod.commentsHidden),
+      hits: { sensitive: countOf(hits.sensitive), nickname: countOf(hits.nickname) },
+      hitsTrend: (Array.isArray(mod.hitsTrend) ? mod.hitsTrend : []).map((raw) => {
+        const p = (raw ?? {}) as Record<string, unknown>;
+        return {
+          date: typeof p.date === 'string' ? p.date : '',
+          sensitive: countOf(p.sensitive),
+          nickname: countOf(p.nickname),
+        };
+      }),
+    },
+    search: {
+      hot: (Array.isArray(search.hot) ? search.hot : []).map((raw) => {
+        const t = (raw ?? {}) as Record<string, unknown>;
+        return { term: typeof t.term === 'string' ? t.term : '', count: countOf(t.count) };
+      }),
+    },
+  };
+}
+
+/* --------------------------- 举报复核（P1-77 / E5 前端补齐） --------------------------- */
+
+function toAdminReport(raw: unknown): AdminReportItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = Number(r.id);
+  if (!Number.isFinite(id)) return null;
+  const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+  return {
+    id,
+    targetType: r.targetType === 'news' ? 'news' : 'comment',
+    targetId: typeof r.targetId === 'string' ? r.targetId : '',
+    reason: typeof r.reason === 'string' ? r.reason : '',
+    status: r.status === 'resolved' || r.status === 'dismissed' ? r.status : ('pending' as const),
+    resolution: r.resolution === 'hidden' || r.resolution === 'kept' ? r.resolution : null,
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
+    // P1-77：预览三件套 + 缺失标记。老后端（无这些字段）会得到全 null + missing=true，
+    // 页面退化为"被举报对象已不存在"——比渲染成空白更能说明"该升级后端了"
+    targetTitle: str(r.targetTitle),
+    targetSnippet: str(r.targetSnippet),
+    targetNewsId: str(r.targetNewsId),
+    targetMissing: r.targetMissing === true,
+  };
+}
+
+/**
+ * GET /admin/reports —— 举报复核队列（默认只列 pending）。
+ *
+ * 后端响应**没有 `hasMore`**、只有 `nextCursor`：这里据此推导，
+ * 与审计页同款（`useAdminList` 读的是 `hasMore`，缺省会被当成"没有下一页"，
+ * 于是翻页永远不出现——这正是要在归一化里补齐的原因）。
+ */
+export async function fetchReports(query: AdminReportQuery = {}): Promise<AdminReportListResult> {
+  ensureRealBackend();
+  const params = new URLSearchParams();
+  if (query.status) params.set('status', query.status);
+  if (query.targetType) params.set('targetType', query.targetType);
+  if (query.limit && query.limit > 0) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', String(query.cursor));
+  const qs = params.toString();
+  const data = await request<Record<string, unknown>>(`/admin/reports${qs ? `?${qs}` : ''}`);
+  const list = (Array.isArray(data?.list) ? data.list : [])
+    .map(toAdminReport)
+    .filter((x): x is AdminReportItem => x !== null);
+  const cursor = num(data?.nextCursor);
+  return { list, nextCursor: cursor === null ? null : String(cursor) };
+}
+
+/**
+ * POST /admin/reports/:id/resolve —— 处置一条举报。
+ *
+ * `hidden` 确认隐藏（目标转为隐藏态）、`kept` 驳回并恢复可见；
+ * 两端都写审计 `report.resolve`（detail 只记结论，不记内容原文）。
+ */
+export async function resolveReport(
+  id: number,
+  input: ReportResolveInput,
+): Promise<AdminReportItem> {
+  ensureRealBackend();
+  const data = await request<unknown>(`/admin/reports/${encodeURIComponent(String(id))}/resolve`, {
+    method: 'POST',
+    body: input,
+  });
+  const item = toAdminReport(data);
+  if (!item) throw new Error('处置成功但响应无法解析');
+  return item;
 }

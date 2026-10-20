@@ -54,6 +54,18 @@ const router = createRouter({
     // 从首页「关注」空态与「我的 → 我的关注」进入
     { path: '/sources', name: 'sources', component: () => import('@/views/Sources.vue') },
     // 运营向入口：不在 TabBar 中，仅对管理员在「我的」页展示（后端按白名单判定）
+    // E7（P1-77）：运营大盘放最前——它是后台的入口页，其余页面都是它的下钻目标
+    {
+      path: '/admin',
+      name: 'admin-dashboard',
+      component: () => import('@/views/AdminDashboard.vue'),
+    },
+    // E5 举报复核（P1-77 补齐）：后端端点自 P1-65 就有，前端此前零对接
+    {
+      path: '/admin/reports',
+      name: 'admin-reports',
+      component: () => import('@/views/AdminReports.vue'),
+    },
     {
       path: '/admin/sources',
       name: 'admin-sources',

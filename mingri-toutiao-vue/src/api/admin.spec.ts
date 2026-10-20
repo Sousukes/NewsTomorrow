@@ -11,7 +11,9 @@ import {
   deleteWord,
   fetchAdminComments,
   fetchAdminNews,
+  fetchDashboard,
   fetchModerationHits,
+  fetchReports,
   fetchSourceHealth,
   fetchSources,
   fetchWords,
@@ -19,6 +21,7 @@ import {
   hideNews,
   reloadWords,
   resetSources,
+  resolveReport,
   restoreComment,
   restoreNews,
   reviewComment,
@@ -1034,5 +1037,190 @@ describe('api/admin（mock 模式）', () => {
     await expect(mod.reviewComment('c_1')).rejects.toThrow('mock 模式');
     vi.doUnmock('@/api/config');
     vi.resetModules();
+  });
+});
+
+/**
+ * E7（P1-77）：大盘聚合与举报复核的归一化。
+ *
+ * 归一化的价值在"脏值不传染"：后端某个字段为 null/缺省时，页面应当渲染 0/空，
+ * 而不是 NaN 或 undefined.length —— 后者会直接白屏。
+ */
+describe('api/admin · 大盘与举报（E7）', () => {
+  it('fetchDashboard 走 GET /admin/dashboard 并带上 days', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        respond({
+          days: 7,
+          generatedAt: '2026-10-20T06:00:00+00:00',
+          content: {
+            news: 491,
+            newsHidden: 12,
+            comments: 340,
+            users: 88,
+            sources: 14,
+            sourcesEnabled: 12,
+          },
+          todo: { reports: 3, commentReviews: 2, nicknameReviews: 1 },
+          engagement: {
+            searches: 1,
+            favorites: 2,
+            history: 3,
+            follows: 4,
+            exposures: 5,
+            dislikes: 6,
+          },
+          sourceHealth: { windowDays: 7, unhealthy: 1, worst: [] },
+          moderation: {
+            newsHidden: 5,
+            commentsHidden: 9,
+            hits: { sensitive: 34, nickname: 7 },
+            hitsTrend: [],
+          },
+          search: { hot: [{ term: '新能源', count: 12 }] },
+        }),
+      ),
+    );
+
+    const d = await fetchDashboard({ days: 7 });
+    const [url] = lastCall()!;
+    expect(String(url)).toContain('/admin/dashboard?days=7');
+    expect(d.content.news).toBe(491);
+    expect(d.content.newsHidden).toBe(12);
+    expect(d.todo.reports).toBe(3);
+    expect(d.search.hot[0]).toEqual({ term: '新能源', count: 12 });
+  });
+
+  it('缺字段/脏值收敛为 0 与空数组（不把 undefined 传给模板）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => respond({ days: null, content: { news: 'oops' }, search: {} })),
+    );
+
+    const d = await fetchDashboard();
+    expect(d.days).toBe(30); // 缺省回落到保留期口径
+    expect(d.content.news).toBe(0);
+    expect(d.moderation.hitsTrend).toEqual([]);
+    expect(d.search.hot).toEqual([]);
+    expect(d.sourceHealth.worst).toEqual([]);
+  });
+
+  it('worst 保持后端给的顺序（不在前端重排）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        respond({
+          sourceHealth: {
+            windowDays: 7,
+            unhealthy: 2,
+            worst: [
+              {
+                key: 'b',
+                name: 'B',
+                attempts: 5,
+                ok: 0,
+                failed: 5,
+                rate: 0,
+                avgItems: null,
+                lastFailAt: null,
+              },
+              {
+                key: 'a',
+                name: 'A',
+                attempts: 9,
+                ok: 5,
+                failed: 4,
+                rate: 0.56,
+                avgItems: 3,
+                lastFailAt: null,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const d = await fetchDashboard();
+    // 顺序是后端口径（失败率升序）；前端若自作主张排序，两端就可能不一致
+    expect(d.sourceHealth.worst.map((w) => w.key)).toEqual(['b', 'a']);
+    expect(d.sourceHealth.worst[0].avgItems).toBeNull();
+  });
+
+  it('fetchReports 由 nextCursor 推导 hasMore（后端没有 hasMore 字段）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        respond({
+          list: [
+            {
+              id: 7,
+              targetType: 'comment',
+              targetId: 'c_1',
+              reason: '广告营销',
+              status: 'pending',
+              resolution: null,
+              createdAt: '2026-10-19T09:30:00+00:00',
+              targetSnippet: '片段',
+              targetNewsId: 'n_1',
+              targetMissing: false,
+            },
+          ],
+          nextCursor: 7,
+        }),
+      ),
+    );
+
+    const r = await fetchReports({ status: 'pending', limit: 20 });
+    const [url] = lastCall()!;
+    expect(String(url)).toContain('status=pending');
+    expect(String(url)).toContain('limit=20');
+    expect(r.nextCursor).toBe('7');
+    expect(r.list[0].targetNewsId).toBe('n_1');
+    expect(r.list[0].targetTitle).toBeNull();
+  });
+
+  it('resolveReport 发 POST 并带 resolution（两个取值）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        respond({
+          id: 7,
+          targetType: 'news',
+          targetId: 'n_1',
+          reason: '其他',
+          status: 'resolved',
+          resolution: 'hidden',
+          createdAt: '2026-10-19T09:30:00+00:00',
+          targetMissing: false,
+        }),
+      ),
+    );
+
+    const item = await resolveReport(7, { resolution: 'hidden' });
+    const [url, init] = lastCall()!;
+    expect(String(url)).toContain('/admin/reports/7/resolve');
+    expect((init as RequestInit).method).toBe('POST');
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ resolution: 'hidden' });
+    expect(item.status).toBe('resolved');
+  });
+
+  it('id 非法时丢弃该行而不是抛错（一条脏数据不该让整页空掉）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        respond({
+          list: [
+            { targetType: 'news', targetId: 'n_1' },
+            { id: 2, targetType: 'news', targetId: 'n_2', targetMissing: true },
+          ],
+          nextCursor: null,
+        }),
+      ),
+    );
+
+    const r = await fetchReports();
+    expect(r.list).toHaveLength(1);
+    expect(r.list[0].id).toBe(2);
   });
 });

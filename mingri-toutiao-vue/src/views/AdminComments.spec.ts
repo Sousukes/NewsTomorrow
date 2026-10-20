@@ -15,8 +15,11 @@ vi.mock('@/stores/user', () => ({
 }));
 
 const routerPush = vi.fn();
+/** E7：本页支持 `?status=` 直达筛选（大盘的待办卡片跳过来时带） */
+const routeState: { query: Record<string, string> } = { query: {} };
 vi.mock('vue-router', () => ({
   useRouter: () => ({ back: vi.fn(), push: routerPush }),
+  useRoute: () => routeState,
 }));
 
 import AdminComments from './AdminComments.vue';
@@ -86,6 +89,8 @@ const openHide = async (w: ReturnType<typeof mountPage>, content = '这是一条
 beforeEach(() => {
   vi.clearAllMocks();
   routerPush.mockClear();
+  // 默认无 query：各用例按需覆盖（不清会在用例间串味）
+  routeState.query = {};
   userState.isLoggedIn = true;
   userState.isAdmin = true;
   mockList([]);
@@ -564,5 +569,31 @@ describe('views/AdminComments 加载更多与历史', () => {
     await settle(w);
     await btn(w, '历史').trigger('click');
     expect(routerPush).toHaveBeenCalledWith('/admin/audit?target=c_1');
+  });
+});
+
+/**
+ * E7（大盘待办卡片的落点）：`?status=` 直达筛选。
+ *
+ * 大盘只显示"待复核评论 N"却点不到对应队列，等于把运营挡在半路。
+ * 两个方向都要钉：认得的档位生效、不认得的静默回落 `all`（不能白屏或 422）。
+ */
+describe('AdminComments · ?status= 直达筛选（E7）', () => {
+  it('?status=pending 进页即按待复核筛选', async () => {
+    routeState.query = { status: 'pending' };
+    const w = mountPage();
+    await settle(w);
+
+    const [opts] = vi.mocked(adminApi.fetchAdminComments).mock.calls[0];
+    expect(opts?.status).toBe('pending');
+  });
+
+  it('未知档位静默回落 all（不白屏、不发非法参数）', async () => {
+    routeState.query = { status: 'bogus' };
+    const w = mountPage();
+    await settle(w);
+
+    const [opts] = vi.mocked(adminApi.fetchAdminComments).mock.calls[0];
+    expect(opts?.status).toBe('all');
   });
 });

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import AppNav from '@/components/AppNav.vue';
 import Button from '@/components/Button.vue';
 import EmptyState from '@/components/EmptyState.vue';
@@ -10,6 +10,7 @@ import { messageOf as message, useAdminGuard, useAdminList } from '@/composables
 import type { AdminCommentItem } from '@/types';
 
 const router = useRouter();
+const route = useRoute();
 const user = useUserStore();
 // D3：鉴权守卫抽到 composable
 const { noAccess, handleError, resetDenied } = useAdminGuard();
@@ -39,7 +40,13 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: 'pending', label: '待复核' },
 ];
 
-const status = ref<StatusFilter>('all');
+const status = ref<StatusFilter>(
+  // E7 大盘的「待复核评论」直接跳到本页的待复核队列（`?status=pending`）：
+  // 只给数字不给出口，运营还得自己再找一遍筛选器。非法值静默回落 `all`
+  STATUS_FILTERS.some((f) => f.value === route.query.status)
+    ? (route.query.status as StatusFilter)
+    : 'all',
+);
 const keyword = ref('');
 /** 按所属资讯过滤（点行上的资讯标签设置；null 为不限） */
 const newsId = ref<string | null>(null);

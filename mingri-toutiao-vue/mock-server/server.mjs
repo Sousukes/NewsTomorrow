@@ -1382,6 +1382,15 @@ const seenPhones = new Set();
  */
 const auditLog = [];
 let auditSeq = 0;
+/**
+ * 举报复核队列（E5 / P1-77）：`POST /reports` 落这里，管理端列表/处置读它。
+ *
+ * mock 无 reporter 维度（单一登录态），幂等按「目标」去重即可。
+ * 与真后端的差别只有一处：真库按 `(reporter, target)` 唯一，mock 按 target 唯一——
+ * 对"同一目标是否已举报过"这个契约观察点，两者等价。
+ */
+const adminReports = [];
+let reportSeq = 0;
 function audit(actor, action, target, detail) {
   auditLog.push({
     id: ++auditSeq,
@@ -1766,8 +1775,9 @@ function mockDashboard(win) {
       sourcesEnabled: sources.filter((s) => s.enabled).length,
     },
     todo: {
-      // mock 不建模举报复核队列（用户举报只进 POST /reports 的响应），给 0
-      reports: 0,
+      // P1-77 起 mock 也建模举报队列（`POST /reports` 落库），大盘跟着它走——
+      // 写死 0 会让演示时"待办说没有、队列里却有一条"，比没有这个数字更糟
+      reports: adminReports.filter((r) => r.status === 'pending').length,
       commentReviews: allComments.filter((c) => c.pendingReview).length,
       nicknameReviews: [...accounts.values()].filter((a) => a.pendingReview).length,
     },
@@ -1803,6 +1813,47 @@ function mockDashboard(win) {
         .slice(0, 10)
         .map(({ term, count }) => ({ term, count })),
     },
+  };
+}
+
+/**
+ * 举报行 → 响应（含被举报对象预览，P1-77）。
+ *
+ * 与真后端 `routers/admin/reports.py::_report_out` 同形状：
+ * 资讯给标题、评论给内容片段 + **所属资讯 id**（评论没有独立页面，必须能跳回）。
+ * 目标已被删除时 `targetMissing=true`——举报刻意不建外键，这是正常状态。
+ */
+function mockReportOut(row) {
+  let preview = null;
+  if (row.targetType === 'news') {
+    const n = news.find((x) => x.id === row.targetId);
+    if (n) preview = { title: n.title, snippet: null, newsId: n.id };
+  } else {
+    for (const [newsId, list] of Object.entries(comments)) {
+      const c = list.find((x) => x.id === row.targetId);
+      if (c) {
+        const body = String(c.content ?? '');
+        preview = {
+          title: null,
+          snippet: body.length > 60 ? `${body.slice(0, 60)}…` : body,
+          newsId,
+        };
+        break;
+      }
+    }
+  }
+  return {
+    id: row.id,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    reason: row.reason,
+    status: row.status,
+    resolution: row.resolution,
+    createdAt: row.createdAt,
+    targetTitle: preview ? preview.title : null,
+    targetSnippet: preview ? preview.snippet : null,
+    targetNewsId: preview ? preview.newsId : null,
+    targetMissing: !preview,
   };
 }
 
@@ -2584,7 +2635,22 @@ const server = createServer(async (req, res) => {
         : Object.values(comments).some((list) => list.some((c) => c.id === targetId));
     if (!exists) return fail(res, 404, 40409, '举报对象不存在或已删除');
     // 幂等：同一用户对同一目标重复举报，服务端只更新理由、不新增行。
-    // mock 无 reporter 维度（单一登录态），直接返回同一结果即为幂等。
+    // mock 无 reporter 维度（单一登录态），按「目标」去重即为幂等。
+    const dup = adminReports.find((r) => r.targetType === targetType && r.targetId === targetId);
+    if (dup) {
+      dup.reason = reason;
+    } else {
+      adminReports.push({
+        id: ++reportSeq,
+        targetType,
+        targetId,
+        reason,
+        status: 'pending',
+        resolution: null,
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+      });
+    }
     return ok(res, { status: 'pending', autoHidden: false });
   }
 
@@ -3948,6 +4014,58 @@ const server = createServer(async (req, res) => {
     const requested = raw === null ? 0 : Number(raw);
     const win = requested > 0 ? Math.min(requested, HEALTH_KEEP_DAYS) : HEALTH_KEEP_DAYS;
     return ok(res, mockDashboard(win));
+  }
+
+  // GET /admin/reports —— 举报复核队列（P1-77 契约补齐）
+  if (head === 'admin' && a === 'reports' && !b && method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const q = url.searchParams;
+    const status = q.get('status') ?? 'pending';
+    if (!['all', 'pending', 'resolved', 'dismissed'].includes(status)) {
+      return fail(res, 422, 42200, '参数校验失败：status 取值不合法');
+    }
+    const targetType = q.get('targetType');
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
+    const cursor = q.get('cursor');
+    let rows = [...adminReports].sort((x, y) => y.id - x.id);
+    if (status !== 'all') rows = rows.filter((r) => r.status === status);
+    if (targetType) rows = rows.filter((r) => r.targetType === targetType);
+    if (cursor) rows = rows.filter((r) => r.id < Number(cursor));
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit);
+    return ok(res, {
+      list: items.map(mockReportOut),
+      nextCursor: hasMore && items.length ? items[items.length - 1].id : null,
+    });
+  }
+
+  // POST /admin/reports/:id/resolve —— 处置（确认隐藏 / 驳回恢复）
+  if (head === 'admin' && a === 'reports' && b && c === 'resolve' && method === 'POST') {
+    const operator = requireAdmin(req, res);
+    if (!operator) return;
+    const row = adminReports.find((r) => r.id === Number(b));
+    if (!row) return fail(res, 404, 40408, '举报不存在');
+    const body = await readBody(req);
+    const resolution = String(body.resolution ?? '');
+    if (resolution !== 'hidden' && resolution !== 'kept') {
+      return fail(res, 422, 42200, '参数校验失败：resolution 取值不合法');
+    }
+    // 与真后端同口径：确认隐藏 → 目标转隐藏态；驳回 → 恢复可见
+    const target =
+      row.targetType === 'news'
+        ? news.find((n) => n.id === row.targetId)
+        : Object.values(comments)
+            .flat()
+            .find((c) => c.id === row.targetId);
+    if (target) {
+      target.hidden = resolution === 'hidden';
+      target.hiddenAt = resolution === 'hidden' ? new Date().toISOString() : null;
+    }
+    row.status = resolution === 'hidden' ? 'resolved' : 'dismissed';
+    row.resolution = resolution;
+    row.resolvedAt = new Date().toISOString();
+    audit(operator, 'report.resolve', `${row.targetType}:${row.targetId}`, { resolution });
+    return ok(res, mockReportOut(row));
   }
 
   fail(res, 404, 40404, '接口不存在');

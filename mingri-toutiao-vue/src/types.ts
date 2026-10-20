@@ -653,3 +653,136 @@ export interface NicknameUpdateResult {
   reason: string;
   pendingReview: boolean;
 }
+
+// ------------------------------------------------ 运营大盘（P1-76 / E7）
+
+/** 内容与账号的**存量**规模（不随 days 变） */
+export interface DashboardContent {
+  news: number;
+  /** 已下架（软下架）：与 news 分开数，否则"下架了多少"永远看不出来 */
+  newsHidden: number;
+  comments: number;
+  users: number;
+  sources: number;
+  sourcesEnabled: number;
+}
+
+/** "系统在等人"的队列——大盘上最该被看见的几个数字 */
+export interface DashboardTodo {
+  /** E5：待复核举报（只数 pending；已处置/驳回不占待办数） */
+  reports: number;
+  /** P1-23：命中敏感词被脱敏后发布、等人工看一眼的评论 */
+  commentReviews: number;
+  /** P1-24：被放行但待人工复核的昵称 */
+  nicknameReviews: number;
+}
+
+/** 窗口内的互动量 */
+export interface DashboardEngagement {
+  searches: number;
+  favorites: number;
+  history: number;
+  follows: number;
+  exposures: number;
+  dislikes: number;
+}
+
+/** 窗口内最值得关注的源（按失败率升序取 Top N） */
+export interface DashboardWorstSource {
+  key: string;
+  name: string;
+  attempts: number;
+  ok: number;
+  failed: number;
+  /** 成功率；无尝试时为 null */
+  rate: number | null;
+  /** 成功轮次的平均条数；无成功轮次为 null */
+  avgItems: number | null;
+  /** 最近一次失败的绝对时间（ISO）；无失败为 null */
+  lastFailAt: string | null;
+}
+
+export interface DashboardSourceHealth {
+  windowDays: number;
+  /** 有尝试且有失败的源数（空闲源不算） */
+  unhealthy: number;
+  worst: DashboardWorstSource[];
+}
+
+/** 窗口内的治理量 + 命中趋势（按 UTC 天分桶，升序） */
+export interface DashboardModeration {
+  newsHidden: number;
+  commentsHidden: number;
+  hits: { sensitive: number; nickname: number };
+  hitsTrend: { date: string; sensitive: number; nickname: number }[];
+}
+
+/** GET /api/admin/dashboard 的完整响应（单端点，六个板块） */
+export interface Dashboard {
+  days: number;
+  /** 聚合时刻（ISO，UTC） */
+  generatedAt: string;
+  content: DashboardContent;
+  todo: DashboardTodo;
+  engagement: DashboardEngagement;
+  sourceHealth: DashboardSourceHealth;
+  moderation: DashboardModeration;
+  search: { hot: { term: string; count: number }[] };
+}
+
+/** 大盘查询：days 越界由后端 Query(ge=1, le=365) 拒，超保留期收敛 */
+export interface DashboardQuery {
+  days?: number;
+}
+
+// ------------------------------------------------ 举报复核（P1-77 / E5 前端补齐）
+
+/** 管理端举报行（对应 GET /api/admin/reports 的条目） */
+export interface AdminReportItem {
+  id: number;
+  targetType: 'comment' | 'news';
+  targetId: string;
+  reason: string;
+  /** pending（待处理）| resolved（已处置）| dismissed（已驳回） */
+  status: 'pending' | 'resolved' | 'dismissed';
+  /** 人工结论：hidden（确认隐藏）| kept（驳回）；未处置为 null */
+  resolution: 'hidden' | 'kept' | null;
+  /** ISO 时间串 */
+  createdAt: string;
+  /**
+   * ---- 被举报对象的预览（P1-77）----
+   * 复核页要回答"这条该不该藏"，只给 id 等于让运营自己去别处对照：
+   * 评论尤其致命（它没有独立的公开页面，光看 id 无从判断）。
+   */
+  /** 资讯标题；评论为 null */
+  targetTitle: string | null;
+  /** 评论内容片段（截断到 60 字）；资讯为 null */
+  targetSnippet: string | null;
+  /** 能跳到的资讯 id：资讯是自身 id，评论是其所属资讯 id；对象不存在为 null */
+  targetNewsId: string | null;
+  /** 被举报对象已被删除（举报刻意不建外键，所以这是正常状态） */
+  targetMissing: boolean;
+}
+
+/**
+ * 复核队列信封。**没有 `hasMore`**：后端只给 `nextCursor`，
+ * 前端据此推导（与审计页同款）。
+ */
+export interface AdminReportListResult {
+  list: AdminReportItem[];
+  nextCursor: string | null;
+}
+
+export interface AdminReportQuery {
+  /** all | pending（默认）| resolved | dismissed */
+  status?: 'all' | 'pending' | 'resolved' | 'dismissed';
+  targetType?: 'comment' | 'news';
+  limit?: number;
+  /** 上一页末条的 id（客户端不解析） */
+  cursor?: number | null;
+}
+
+/** 处置入参：hidden 确认隐藏 / kept 驳回并恢复可见 */
+export interface ReportResolveInput {
+  resolution: 'hidden' | 'kept';
+}

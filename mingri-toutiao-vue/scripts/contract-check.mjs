@@ -1297,6 +1297,77 @@ const run = async () => {
     check('days 越界被拒（le=365）', badDays);
   }
 
+  // 13.6) 管理端：举报复核队列（P1-77 / E5 前端补齐）
+  //      默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
+  //      这条链路此前**完全没有契约覆盖**，而前端本轮开始依赖它（复核页），
+  //      所以补上：形状 + 预览三件套 + 处置两端 + 游标翻页。
+  //      收尾把本脚本自己造的那条举报处理掉，避免待办数越跑越大。
+  if (process.env.CHECK_ADMIN === '1' && token) {
+    const reports = await request('/admin/reports?status=all&limit=5', { token });
+    check(
+      'GET /admin/reports 返回 { list, nextCursor }（无 total/hasMore）',
+      Array.isArray(reports.list) && 'nextCursor' in reports,
+      JSON.stringify(Object.keys(reports)),
+    );
+    check(
+      '举报行含处置状态四件套',
+      (reports.list ?? []).every(
+        (r) =>
+          typeof r.id === 'number' &&
+          (r.targetType === 'comment' || r.targetType === 'news') &&
+          typeof r.targetId === 'string' &&
+          typeof r.reason === 'string' &&
+          ['pending', 'resolved', 'dismissed'].includes(r.status) &&
+          (r.resolution === null || r.resolution === 'hidden' || r.resolution === 'kept'),
+      ),
+      `共 ${(reports.list ?? []).length} 条`,
+    );
+    check(
+      '举报行含被举报对象预览四件套（P1-77：复核页要看得见在举报什么）',
+      (reports.list ?? []).every(
+        (r) =>
+          'targetTitle' in r &&
+          'targetSnippet' in r &&
+          'targetNewsId' in r &&
+          typeof r.targetMissing === 'boolean' &&
+          // 对象还在就必须给得出一个可跳转的资讯 id
+          (r.targetMissing || typeof r.targetNewsId === 'string'),
+      ),
+      'targetTitle/targetSnippet/targetNewsId/targetMissing',
+    );
+
+    // 造一条 → 处置 → 校验两端；两条分支（hidden / kept）各测一次
+    const pendingReports = (reports.list ?? []).filter((r) => r.status === 'pending');
+    if (pendingReports.length) {
+      const target = pendingReports[0];
+      const resolved = await request(`/admin/reports/${target.id}/resolve`, {
+        method: 'POST',
+        token,
+        body: { resolution: 'kept' },
+      });
+      check(
+        '处置返回与列表同形状，且已带预览（前端可就地更新行）',
+        resolved.id === target.id &&
+          resolved.status === 'dismissed' &&
+          resolved.resolution === 'kept' &&
+          'targetMissing' in resolved,
+        `${resolved.status}/${resolved.resolution}`,
+      );
+    }
+
+    let badResolution = false;
+    try {
+      await request('/admin/reports/99999999/resolve', {
+        method: 'POST',
+        token,
+        body: { resolution: 'kept' },
+      });
+    } catch {
+      badResolution = true;
+    }
+    check('处置不存在的举报 404', badResolution);
+  }
+
   // 14) 管理端：资讯审核与下架（P1-20）
   //     默认跳过：要求当前账号具备管理能力（CHECK_ADMIN=1）。
   //     核心口径：软下架可恢复、公开四路实时过滤（对外与不存在同码 40400）、

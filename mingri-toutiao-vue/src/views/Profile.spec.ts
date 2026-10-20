@@ -218,4 +218,28 @@ describe('views/Profile 管理入口', () => {
     expect(w.text()).not.toContain('昵称敏感词');
     expect(w.text()).not.toContain('昵称复核');
   });
+
+  it('E7：管理员可见「运营大盘」与「举报复核」并跳转（举报不再是黑洞）', async () => {
+    userState.isAdmin = true;
+    const w = mountPage();
+    await settle(w);
+
+    const dashBtn = w.findAll('button').find((b) => b.text().includes('运营大盘'))!;
+    const reportsBtn = w.findAll('button').find((b) => b.text().includes('举报复核'))!;
+    expect(dashBtn.exists()).toBe(true);
+    expect(reportsBtn.exists()).toBe(true);
+
+    await dashBtn.trigger('click');
+    expect(routerPush).toHaveBeenCalledWith('/admin');
+    await reportsBtn.trigger('click');
+    expect(routerPush).toHaveBeenCalledWith('/admin/reports');
+  });
+
+  it('E7：非管理员看不到大盘与举报入口', async () => {
+    userState.isAdmin = false;
+    const w = mountPage();
+    await settle(w);
+    expect(w.text()).not.toContain('运营大盘');
+    expect(w.text()).not.toContain('举报复核');
+  });
 });
