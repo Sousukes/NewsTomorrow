@@ -535,35 +535,28 @@ def create_comment(
         root_id=(parent.root_id or parent.id) if parent is not None else None,
     )
     db.add(c)
-    # 维护冗余计数：`comment_count` 此前只在种子/入库时赋值，评论增删从未更新，
-    # 导致详情页显示的评论数与真实条数不符，热度分也失真。
-    # 回复同样计数——「评论数」含回复，与讨论区实际展示的互动量一致。
+    # 评论数与「评论数含回复」的语义见 docs/后端/内容治理与用户数据.md
     news = db.query(News).filter(News.id == news_id).first()
     if news is not None:
         news.comment_count = (news.comment_count or 0) + 1
+
+    # 通知与评论**同一次提交**：分成两次会留下「评论成功、通知静默丢失」的窗口，
+    # 而通知表写入与评论写入同库同级，没有理由让它们不同生共死。
+    if parent is not None:
+        notify_comment_replied(db, parent=parent, actor_id=user.id, actor_name=user.name)
+    else:
+        notify_comment_on_article(
+            db,
+            news_id=news_id,
+            actor_id=user.id,
+            actor_name=user.name,
+            content=content,
+        )
     db.commit()
     db.refresh(c)
 
-    # 热度分随互动即时生效（派生数据，失败不影响评论本身）
+    # 热度是派生数据：失败不影响评论，但失败会落审计（见 bump_hot_score）
     bump_hot_score(db, news_id)
-
-    # 旁路通知：主评论广播给同样评论过该资讯的其他用户；回复只通知被回复者
-    # （失败不影响评论本身）
-    try:
-        if parent is not None:
-            notify_comment_replied(db, parent=parent, actor_id=user.id, actor_name=user.name)
-        else:
-            notify_comment_on_article(
-                db,
-                news_id=news_id,
-                actor_id=user.id,
-                actor_name=user.name,
-                content=content,
-            )
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        logger.warning("评论通知失败（不影响评论）: %s", e)
 
     # 返回体带 parentId/rootId 与「回复 @谁」，前端可直接渲染
     return ok(to_out(c, user, liked=False, reply_to=parent), message="评论成功")
@@ -597,17 +590,11 @@ def set_like(
     elif not body.liked and existing is not None:
         db.delete(existing)
         c.likes = max((c.likes or 0) - 1, 0)
+    # 仅在**新增点赞**时通知作者；与点赞本身同一次提交（同库同级，不该分两次）
+    if just_liked:
+        notify_comment_liked(db, comment=c, actor_id=user.id, actor_name=user.name)
     db.commit()
     db.refresh(c)
-
-    # 仅在**新增点赞**时通知作者（取消赞不打扰；失败不影响点赞结果）
-    if just_liked:
-        try:
-            notify_comment_liked(db, comment=c, actor_id=user.id, actor_name=user.name)
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.warning("点赞通知失败（不影响点赞）: %s", e)
 
     # liked 取操作后的真实状态（无变化时保持原值）
     liked = db.get(CommentLike, {"comment_id": c.id, "user_id": user.id}) is not None

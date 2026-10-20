@@ -34,6 +34,8 @@ AUDIT_NEWS_UPDATE = "news.update"
 # P1-22：评论治理（软隐藏/恢复）
 AUDIT_COMMENT_HIDE = "comment.hide"
 AUDIT_COMMENT_RESTORE = "comment.restore"
+# P1-82：旁路副作用失败（best-effort 的动作没做成，必须留痕而不是只写日志）
+AUDIT_SIDE_EFFECT_FAILED = "side_effect.failed"
 # P1-23：敏感词库与复核
 AUDIT_WORD_CREATE = "word.create"
 AUDIT_WORD_UPDATE = "word.update"

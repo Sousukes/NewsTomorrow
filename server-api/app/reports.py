@@ -113,13 +113,17 @@ def create_report(
             status="pending",
         )
     )
-    db.commit()
-
+    # 阈值判定与处置**并入同一次提交**：分成两次 commit 会留下
+    # 「举报写进去了、处置没生效」的窗口，而阈值检查只在提交新举报时触发，
+    # 该窗口没有自愈路径（要等第 N+1 个人举报才会再判）。
+    db.flush()
     auto_hidden = False
     if _pending_count(db, target_type, target_id) >= REPORT_AUTO_HIDE_THRESHOLD:
         _auto_hide(db, target_type, target_id)
-        db.commit()
         auto_hidden = True
+    db.commit()
+
+    if auto_hidden:
         logger.info(
             "举报达阈值自动处置：%s:%s（%d 人举报）",
             target_type,

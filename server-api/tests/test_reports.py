@@ -349,3 +349,63 @@ class TestHiddenNewsFilteredFromPublic:
         r = client.get("/api/news?limit=50")
         ids = [n["id"] for n in r.json()["data"]["list"]]
         assert "n1" not in ids
+
+
+class TestReportTransaction:
+    """P1-82：举报写入与阈值处置必须同一次提交。
+
+    拆成两次 commit 会留下「举报写进去了、处置没生效」的窗口，
+    而阈值只在提交新举报时检查——该窗口没有自愈路径。
+    """
+
+    def test_auto_hide_atomicity_via_module(self):
+        """直接调 `create_report`：最后一次调用同时落举报与隐藏目标。"""
+        import app.reports as reports_mod
+
+        with SessionLocal() as db:
+            u = User(phone="13900000055", name="乙", password_hash="x")
+            db.add(u)
+            db.commit()
+            reporter_id = u.id
+        _seed_comment("c_atomic")
+        n = config.REPORT_AUTO_HIDE_THRESHOLD
+        with SessionLocal() as db:
+            for i in range(n):
+                other = User(phone=f"1390000007{i:02d}", name=str(i), password_hash="x")
+                if db.query(User).filter_by(phone=other.phone).first() is None:
+                    db.add(other)
+                    db.commit()
+                reports_mod.create_report(
+                    db, reporter_id=other.id, target_type="comment",
+                    target_id="c_atomic", reason="广告营销",
+                )
+            # 末次调用即达阈值：此时举报与隐藏必须都已落库
+            row = db.query(Report).filter_by(target_id="c_atomic").count()
+            target = db.query(Comment).filter_by(id="c_atomic").first()
+            assert row == n
+            assert target.hidden is True
+
+    def test_partial_write_cannot_leave_report_without_disposition(self):
+        """处置失败时不允许留下「只有举报、没有处置」的中间态。"""
+        import app.reports as reports_mod
+
+        _seed_comment("c_atomic2")
+        u = User(phone="13900000066", name="丙", password_hash="x")
+        with SessionLocal() as db:
+            db.add(u)
+            db.commit()
+            uid = u.id
+        with SessionLocal() as db:
+            for i in range(config.REPORT_AUTO_HIDE_THRESHOLD - 1):
+                db.add(User(phone=f"1390000008{i:02d}", name=str(i), password_hash="x"))
+            db.commit()
+            for i in range(config.REPORT_AUTO_HIDE_THRESHOLD - 1):
+                other = db.query(User).filter_by(phone=f"1390000008{i:02d}").first()
+                reports_mod.create_report(
+                    db, reporter_id=other.id, target_type="comment",
+                    target_id="c_atomic2", reason="广告营销",
+                )
+        # 尚未达阈值：不应隐藏
+        with SessionLocal() as db:
+            c = db.query(Comment).filter_by(id="c_atomic2").first()
+            assert c.hidden is False

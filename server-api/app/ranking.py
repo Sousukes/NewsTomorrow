@@ -8,6 +8,7 @@
        与 keyset 游标分页不兼容；改为给偏好频道的候选**加权重分**，
        排序键仍是单一标量，游标语义不变。
 """
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -151,6 +152,29 @@ def bump_hot_score(db: Session, news_id: str) -> None:
         db.commit()
     except Exception as e:  # 热度是派生数据，失败不得影响主流程（评论/收藏）
         logger.warning("热度分更新失败（已回滚，不影响主流程）: %s", e)
+        db.rollback()
+        # 失败不能只有日志：容器日志没人看，运营大盘看不到 = 静默失效。
+        # 落审计让「排序长期失真」至少有一处可见的痕迹（P1-82）。
+        _record_hot_failure(db, news_id, str(e))
+
+
+def _record_hot_failure(db: Session, news_id: str, err: str) -> None:
+    """把热度更新失败写进审计（best-effort：连这条也不许抛）。"""
+    try:
+        from .models import AdminAuditLog
+
+        db.add(
+            AdminAuditLog(
+                actor_phone="system",
+                action="side_effect.failed",
+                target=news_id,
+                detail=json.dumps({"kind": "hot_score", "error": err[:300]}, ensure_ascii=False),
+                created_at=now_str(),
+            )
+        )
+        db.commit()
+    except Exception as e:  # pragma: no cover - 兜底中的兜底
+        logger.warning("热度失败落审计也失败了: %s", e)
         db.rollback()
 
 
