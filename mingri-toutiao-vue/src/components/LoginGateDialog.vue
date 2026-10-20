@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import Button from '@/components/Button.vue';
+import { useDialog } from '@/composables/useDialog';
 
 /**
  * 登录门禁对话框（E6b）。
@@ -11,7 +13,7 @@ import Button from '@/components/Button.vue';
  *
  * 与 `ReportDialog` 的差别：这里不承载任何业务表单，只做「解释 + 跳登录」。
  */
-withDefaults(
+const props = withDefaults(
   defineProps<{
     open: boolean;
     /** 标题：如「关注来源」 */
@@ -26,6 +28,14 @@ const emit = defineEmits<{ (e: 'update:open', value: boolean): void }>();
 
 const router = useRouter();
 
+/** E9：Escape 关闭 + 焦点陷阱 + 关闭后焦点还原（见 useDialog） */
+const panel = ref<HTMLElement | null>(null);
+useDialog(
+  () => props.open,
+  () => emit('update:open', false),
+  panel,
+);
+
 function goLogin() {
   emit('update:open', false);
   void router.push('/login');
@@ -34,7 +44,14 @@ function goLogin() {
 
 <template>
   <div v-if="open" class="mask" @click.self="emit('update:open', false)">
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="gate-title">
+    <div
+      ref="panel"
+      class="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="gate-title"
+      tabindex="-1"
+    >
       <h3 id="gate-title" class="dialog__title">{{ title }}</h3>
       <p class="dialog__desc">{{ message }}</p>
       <div class="dialog__actions">

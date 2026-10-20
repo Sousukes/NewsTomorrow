@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import Button from '@/components/Button.vue';
 import { REPORT_REASONS, type ReportReason, type ReportTargetType } from '@/constants/reports';
 import { submitReport } from '@/api/reports';
+import { useDialog } from '@/composables/useDialog';
 import { useUserStore } from '@/stores/user';
 
 /**
@@ -77,7 +78,7 @@ watch(
       error.value = '';
       done.value = false;
       submitting.value = false;
-      void nextTick(() => sheet.value?.focus());
+      // 初始焦点交给 useDialog（优先第一个可聚焦元素）；这里只重置业务状态
     } else {
       clearCloseTimer();
     }
@@ -107,14 +108,11 @@ function goLogin() {
   void router.push('/login');
 }
 
-/** Esc 关闭：移动端没有键盘，但桌面预览（本项目的 PhoneFrame 演示）会用到 */
-function onKeydown(ev: KeyboardEvent) {
-  if (ev.key === 'Escape' && props.open) close();
-}
+// E9：Escape / 焦点陷阱 / 焦点还原统一由 useDialog 承担。
+// 此前这里是**自己写的一份** Escape 监听——三份实现分叉的起点，已收回。
+useDialog(() => props.open, close, sheet);
 
-onMounted(() => window.addEventListener('keydown', onKeydown));
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown);
   clearCloseTimer();
 });
 </script>

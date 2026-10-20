@@ -177,8 +177,8 @@ describe('HomeFeed', () => {
     await settle(w);
     const card = w.findAllComponents(NewsCard);
     expect(card.length).toBeGreaterThan(0);
-    // NewsCard 对外是原生 click（`@click="open"`），不是自定义 emit
-    card[0].trigger('click');
+    // NewsCard 对外是原生 click，由覆盖整卡的链接触发（E9 起 article 不再挂 @click）
+    card[0].find('.mt-card__link').trigger('click');
     await settle(w);
     expect(routerPush).toHaveBeenCalledWith('/news/n1');
     newsState.bucketOf.mockReturnValue({
@@ -294,7 +294,7 @@ describe('HomeFeed 负反馈与曝光（E3）', () => {
     const spy = twoCards();
     const w = mountPage();
     await settle(w);
-    w.findAllComponents(NewsCard)[0].trigger('click');
+    w.findAllComponents(NewsCard)[0].find('.mt-card__link').trigger('click');
     await settle(w);
     expect(flushSpy).toHaveBeenCalled();
     expect(routerPush).toHaveBeenCalledWith('/news/n1');
@@ -308,7 +308,7 @@ describe('HomeFeed 负反馈与曝光（E3）', () => {
     const w = mountPage();
     await settle(w);
     expect(w.findAllComponents(NewsCard)).toHaveLength(2);
-    w.findAllComponents(NewsCard)[0].trigger('click');
+    w.findAllComponents(NewsCard)[0].find('.mt-card__link').trigger('click');
     await settle(w);
     const left = w.findAllComponents(NewsCard);
     expect(left).toHaveLength(1);

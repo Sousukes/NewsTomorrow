@@ -58,7 +58,20 @@ function formatCount(n?: number): string {
 </script>
 
 <template>
-  <article class="mt-card" @click="emit('click', item.id)">
+  <article class="mt-card">
+    <!--
+      E9：整卡是一个**真链接**，而不是给 article 挂 @click。
+      语义天然正确（读屏会念"链接"）、Enter 由浏览器负责、并且保住
+      中键/右键"新标签打开"——这是用户对"一条资讯"的合理预期。
+      `.exact` 让带修饰键的点击走浏览器原生行为（新标签/新窗口），
+      只有**无修饰键的普通点击**才交给 SPA 路由。
+    -->
+    <a
+      class="mt-card__link"
+      :href="`/news/${item.id}`"
+      :aria-label="item.title"
+      @click.exact.prevent="emit('click', item.id)"
+    />
     <!-- 纯文字 -->
     <template v-if="item.variant === 'text'">
       <div class="mt-card__head">
@@ -180,7 +193,28 @@ function formatCount(n?: number): string {
   border-radius: var(--radius-card);
   padding: 14px 16px;
   box-shadow: var(--shadow-card);
-  cursor: pointer;
+}
+
+/*
+ * E9：整卡覆盖链接。
+ *
+ * 代价说明（有意接受）：覆盖层会吃掉"拖选卡片正文"的操作——信息流里的标题/摘要
+ * 极少需要选中复制，而"点哪都能打开"是既有的交互预期，两者不可兼得时选后者。
+ * 想复制内容请进详情页。
+ */
+.mt-card__link {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+}
+
+/* 卡片内的交互元素必须抬到覆盖链接之上，否则点击被链接吃掉 */
+.mt-card__more,
+.mt-card__menu,
+.mt-card__triple-img {
+  position: relative;
+  z-index: 2;
 }
 
 .mt-card__head {

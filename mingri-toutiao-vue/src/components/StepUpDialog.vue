@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
+import { useDialog } from '@/composables/useDialog';
 import { useStepUpStore } from '@/stores/stepUp';
 import { STEP_UP_REQUIRED_EVENT } from '@/api/http';
 
@@ -11,6 +12,14 @@ import { STEP_UP_REQUIRED_EVENT } from '@/api/http';
  * 挂在 App 根部，与具体页面解耦。
  */
 const store = useStepUpStore();
+
+/** E9：Escape 取消 + 焦点陷阱 + 关闭后焦点还原（见 useDialog） */
+const panel = ref<HTMLElement | null>(null);
+useDialog(
+  () => store.visible,
+  () => store.cancel(),
+  panel,
+);
 
 function onRequired() {
   // 已在显示中则不重复弹（并发高敏请求只验证一次）
@@ -27,7 +36,14 @@ function onSubmit() {
 
 <template>
   <div v-if="store.visible" class="mask" @click.self="store.cancel()">
-    <div class="dialog" role="dialog" aria-modal="true" aria-label="二次校验">
+    <div
+      ref="panel"
+      class="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="二次校验"
+      tabindex="-1"
+    >
       <h3 class="dialog__title">身份验证</h3>
       <p class="dialog__desc">该操作需要再次验证身份，请输入登录密码</p>
       <input

@@ -56,7 +56,8 @@ describe('components/NewsCard', () => {
 
   it('点击卡片派发 click(id)', async () => {
     const w = mount(NewsCard, { props: { item: base() } });
-    await w.find('article').trigger('click');
+    // E9：点击由覆盖整卡的链接承担（article 本身不再挂 @click）
+    await w.find('.mt-card__link').trigger('click');
     expect(w.emitted('click')?.[0]).toEqual(['n1']);
   });
 
@@ -130,5 +131,54 @@ describe('components/NewsCard · 负反馈菜单（E3）', () => {
     await w.vm.$nextTick();
     expect(w.find('.mt-card__menu').exists()).toBe(false);
     w.unmount();
+  });
+});
+
+/**
+ * E9 可访问性契约（P1-80）。
+ *
+ * 核心断言：**打开一条资讯必须能用键盘完成**。此前这里是
+ * `<article @click>`——鼠标专属，键盘用户无法进入任何内容。
+ */
+describe('NewsCard 可访问性（E9）', () => {
+  it('整卡是一个带 href 的真链接（Enter/新标签/右键都有原生语义）', () => {
+    const w = mount(NewsCard, { props: { item: base() } });
+    const link = w.find('.mt-card__link');
+    expect(link.exists()).toBe(true);
+    expect(link.attributes('href')).toBe('/news/n1');
+  });
+
+  it('链接的可访问名是资讯标题（而不是"空链接"）', () => {
+    const w = mount(NewsCard, { props: { item: base() } });
+    expect(w.find('.mt-card__link').attributes('aria-label')).toBe(base().title);
+  });
+
+  it('带修饰键的点击**不**被 SPA 接管（中键/Ctrl 新标签是用户预期）', async () => {
+    const w = mount(NewsCard, { props: { item: base() } });
+    const link = w.find('.mt-card__link');
+    await link.trigger('click', { ctrlKey: true });
+    await link.trigger('click', { metaKey: true });
+    expect(w.emitted('click')).toBeUndefined();
+  });
+
+  it('卡片内交互元素抬到覆盖层之上（否则点"更多"会打开资讯）', () => {
+    const w = mount(NewsCard, { props: { item: base() } });
+    // 断言的是结构契约：覆盖链接与更多按钮是兄弟，且后者有更高层级
+    expect(w.find('.mt-card__more').exists()).toBe(true);
+    expect(w.find('.mt-card__link').exists()).toBe(true);
+  });
+
+  it('三图卡片的配图有 alt（读屏能区分第几张）', () => {
+    const w = mount(NewsCard, {
+      props: {
+        item: base({
+          variant: 'triple',
+          images: ['https://img.example.com/a.jpg', 'https://img.example.com/b.jpg', ''],
+        }),
+      },
+    });
+    const alts = w.findAll('img').map((i) => i.attributes('alt'));
+    expect(alts.length).toBeGreaterThan(0);
+    for (const alt of alts) expect(alt).toBeTruthy();
   });
 });

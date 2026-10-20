@@ -52,7 +52,7 @@ describe('History', () => {
 
   it('点卡片进详情', () => {
     const w = mountPage();
-    w.findAllComponents(NewsCard)[0].trigger('click');
+    w.findAllComponents(NewsCard)[0].find('.mt-card__link').trigger('click');
     expect(routerPush).toHaveBeenCalledWith('/news/n1');
   });
 

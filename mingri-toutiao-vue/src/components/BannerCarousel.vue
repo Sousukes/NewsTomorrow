@@ -117,12 +117,17 @@ startAuto();
           无限回环时 slides = [末帧, ...全部, 首帧]，首帧与末帧各出现两次，
           仅用 id 作为 key 会产生重复 key，触发 Vue 告警并可能错误复用 DOM。
         -->
-        <div
+        <!--
+          E9：轮播位同样是**链接**而非可点的 div。`.exact.prevent` 只接管
+          无修饰键的点击（滑动后由 `moved` 守卫吞掉），中键/右键仍是原生行为。
+        -->
+        <a
           v-for="(id, i) in slides"
           :key="`${id}-${i}`"
           class="banner__slide"
+          :href="`/news/${id}`"
           :style="{ backgroundImage: slideBg(id) }"
-          @click="onSlideClick(id)"
+          @click.exact.prevent="onSlideClick(id)"
         >
           <img
             v-if="coverOf(id)"
@@ -133,7 +138,7 @@ startAuto();
             decoding="async"
           />
           <span class="banner__title">{{ titleOf(id) }}</span>
-        </div>
+        </a>
       </div>
     </div>
 
@@ -176,6 +181,9 @@ startAuto();
 }
 
 .banner__slide {
+  /* E9：作为链接渲染后要显式去掉下划线与默认色，视觉与改动前一致 */
+  text-decoration: none;
+  color: inherit;
   flex: 0 0 100%;
   height: 132px;
   margin: 0 8px;
