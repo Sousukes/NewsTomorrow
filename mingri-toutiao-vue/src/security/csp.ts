@@ -1,6 +1,13 @@
 /**
  * 内容安全策略。构建期生成而非写死：connect-src 取决于 VITE_API_BASE。
- * 已知边界：视频未代理，media-src 仍保留 https:。详见 docs/前端/数据与安全.md。
+ *
+ * `media-src` 已收紧到 `'self' blob:`（P1-84）：全链路**没有任何一条视频数据**
+ * （真实库 700 条 `video_url` 全空、种子与 mock 的视频条目都不带地址），
+ * `<video>` 的渲染条件从未成立过，为一处零流量能力留 `https:` 是纯粹的风险敞口。
+ *
+ * **要接视频必须先做代理**（B7）：跨源 `<video src="https://…">` 会被本策略拦掉，
+ * 且浏览器只报控制台错误——是那种"功能看起来坏了但没人知道为什么"的静默故障。
+ * 放开前请先看 `docs/治理/落地记录/P1-84_B7视频代理.md`。
  */
 
 /** 生成入参 */
@@ -56,8 +63,10 @@ export function buildCsp(options: CspOptions = {}): string {
     // 无 apiBase 的 mock 演示态才保留 https:。data/blob 留给占位图。
     ['img-src', imgSrc],
     ['font-src', "'self' data: https://fonts.gstatic.com"],
-    // 视频未被代理（几十 MB + Range 请求），仍会暴露客户端 IP
-    ['media-src', "'self' blob: https:"],
+    // P1-84：收紧到 self + blob。放开 https: 的前提是**视频已走本域代理**（B7）——
+    // 视频是几十 MB + Range 请求，与图片不是一个量级，没做代理前任何外链地址
+    // 都会暴露客户端 IP（详见 csp 文件头与 P1-84 落地记录）
+    ['media-src', "'self' blob:"],
     ['connect-src', connect.join(' ')],
     ['object-src', "'none'"],
     ['base-uri', "'self'"],

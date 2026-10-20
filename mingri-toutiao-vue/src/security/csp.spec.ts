@@ -35,11 +35,13 @@ describe('security/csp（C9）', () => {
     expect(d['style-src']).toContain("'unsafe-inline'");
   });
 
-  it('无后端（mock 演示态）：图片保留 https 外链', () => {
+  it('无后端（mock 演示态）：图片保留 https 外链，媒体不放行', () => {
     const d = parse(buildCsp());
     expect(d['img-src']).toContain('https:');
     expect(d['img-src']).toContain('data:');
-    expect(d['media-src']).toContain('https:');
+    // 媒体与图片不是一回事：图片外链是 mock 演示态的必要让步，
+    // 媒体没有这个理由（见下一条的零数据证据）
+    expect(d['media-src']).not.toContain('https:');
   });
 
   it('B4：有后端时 img-src 收掉 https（外链图一律走本域代理）', () => {
@@ -54,9 +56,22 @@ describe('security/csp（C9）', () => {
     expect(d['img-src']).toContain('data:');
   });
 
-  it('media-src 仍放行 https：视频没有被代理（诚实边界）', () => {
-    const d = parse(buildCsp({ apiBase: 'https://api.example.com/api' }));
-    expect(d['media-src']).toContain('https:');
+  /**
+   * P1-84：media-src 收掉 https（零视频数据，不为零流量能力留敞口）。
+   *
+   * 证据：真实库 700 条资讯 `video_url` 非空 **0 条**；种子唯一的 video 变体条目
+   * 不带地址；mock 同样不带。也就是说 `<video>` 的渲染条件
+   * （`variant === 'video' && videoUrl`）**从未成立过**。
+   *
+   * 这条断言的价值在将来：谁要是放开 media-src（或接入视频），会先在这里红，
+   * 被迫显式记录理由——而不是让视频在浏览器里被 CSP 静默拦掉、没人知道为什么。
+   */
+  it('P1-84：media-src 不放行 https（零视频数据；要接视频先做 B7 代理）', () => {
+    for (const opts of [{}, { apiBase: 'https://api.example.com/api' }, { dev: true }]) {
+      const d = parse(buildCsp(opts));
+      expect(d['media-src']).not.toContain('https:');
+      expect(d['media-src']).toContain("'self'");
+    }
   });
 
   it('生产态 connect-src 只放行 self 与后端源，不含 localhost', () => {
