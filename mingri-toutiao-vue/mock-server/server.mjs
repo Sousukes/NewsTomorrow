@@ -1897,7 +1897,31 @@ function send(res, status, payload) {
 // 调用点传的第三参被静默丢弃——成功消息前端虽不读，但 mock 与真后端同形，
 // 排查「mock 与真后端响应不一致」时少一个干扰项
 const ok = (res, data, message = 'ok') => send(res, 200, { code: 0, message, data });
-const fail = (res, status, code, message) => send(res, status, { code, message, data: null });
+const fail = (res, status, code, message, data = null) =>
+  send(res, status, { code, message, data });
+
+/**
+ * 参数校验失败的**信封**（P1-86）。
+ *
+ * 真后端的 42200 全部来自 FastAPI 的 `RequestValidationError`（查询参数与
+ * 请求体都走它），响应体形如
+ *   { code: 42200, message: '参数校验失败：…', data: { errors: [{ loc, msg, type, ctx }] } }
+ * 而 mock 此前一律 `data: null` —— 差分契约把这类差异判为真漂移（也确实该判：
+ * 两端对同一个请求给出不同形状的响应体，排查"为什么演示正常、接真后端对不上"
+ * 时正好会被它带偏）。
+ *
+ * 两点如实说明：
+ * 1. **前端目前不读 `data.errors`**（全仓 grep 无消费方）。所以这不是"功能坏了"，
+ *    而是"两端形状不一致"——差分契约该抓的就是它本身，与有没有人消费无关。
+ * 2. `msg` 用 mock 自己的人话文案、`type` 固定 `value_error`、`ctx` 默认空，
+ *    都不复刻 Pydantic 原文。`ctx` 的差异（如真后端有 `pattern`）在
+ *    `contract-diff.mjs` 的 KNOWN_DIVERGENCES 里显式声明——**写在这里的取舍
+ *    要到那边对得上**，免得后人两边各改一半。
+ */
+const failValidation = (res, message, loc, type = 'value_error', ctx = {}) =>
+  fail(res, 422, 42200, message, {
+    errors: [{ loc: [...loc], msg: message, type, ctx }],
+  });
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -2121,7 +2145,10 @@ const server = createServer(async (req, res) => {
       return fail(res, 401, 40101, '原密码不正确');
     }
     if (newPassword.length < 6 || newPassword.length > 64) {
-      return fail(res, 422, 42200, '参数校验失败：newPassword 长度需为 6~64');
+      return failValidation(res, '参数校验失败：newPassword 长度需为 6~64', [
+        'body',
+        'newPassword',
+      ]);
     }
     if (newPassword === oldPassword) {
       return fail(res, 422, 42205, '新密码不能与原密码相同');
@@ -2171,7 +2198,7 @@ const server = createServer(async (req, res) => {
       return fail(res, 400, 40001, '请输入正确的 11 位手机号');
     }
     if (password.length < 6 || password.length > 64) {
-      return fail(res, 422, 42200, '参数校验失败：password 长度需为 6~64');
+      return failValidation(res, '参数校验失败：password 长度需为 6~64', ['body', 'password']);
     }
     const existing = accounts.get(phone);
     if (existing?.registered === true) {
@@ -2258,7 +2285,7 @@ const server = createServer(async (req, res) => {
     // E6b：关注流（需登录；**忽略 channel**——前端切 tab 时会带着上一次的频道）
     const feed = url.searchParams.get('feed');
     if (feed && feed !== 'following') {
-      return fail(res, 422, 42200, `不支持的 feed：${feed}`);
+      return failValidation(res, `不支持的 feed：${feed}`, ['query', 'feed']);
     }
     let list;
     if (feed === 'following') {
@@ -2401,7 +2428,7 @@ const server = createServer(async (req, res) => {
     // 夹取会让前端在 mock 上永远测不出"传错参数"，到了真后端才 422。
     const limitParam = Number(url.searchParams.get('limit') ?? 8);
     if (!Number.isInteger(limitParam) || limitParam < 1 || limitParam > 20) {
-      return fail(res, 422, 42200, '参数校验失败：limit 须为 1~20 的整数');
+      return failValidation(res, '参数校验失败：limit 须为 1~20 的整数', ['query', 'limit']);
     }
     const limit = limitParam;
     if (!raw) return ok(res, { list: [], keyword: '' });
@@ -2784,10 +2811,14 @@ const server = createServer(async (req, res) => {
       if (method !== 'POST') return fail(res, 405, 40500, '方法不允许');
       const body = await readBody(req);
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : null;
-      if (!ids || !ids.length) return fail(res, 422, 42200, '参数校验失败：ids 不能为空');
+      if (!ids || !ids.length)
+        return failValidation(res, '参数校验失败：ids 不能为空', ['body', 'ids']);
       // 与后端同口径：**拒绝**而不是静默截断
       if (ids.length > EXPOSURE_BATCH_MAX) {
-        return fail(res, 422, 42200, `参数校验失败：ids 最多 ${EXPOSURE_BATCH_MAX} 条`);
+        return failValidation(res, `参数校验失败：ids 最多 ${EXPOSURE_BATCH_MAX} 条`, [
+          'body',
+          'ids',
+        ]);
       }
       const map = exposuresOf(phone);
       let written = 0;
@@ -2996,7 +3027,7 @@ const server = createServer(async (req, res) => {
     // 契约检查会在一个后端绿、另一个后端红，排查半天以为是回归
     const raw = url.searchParams.get('days');
     const bad = raw !== null && (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 365);
-    if (bad) return fail(res, 422, 42200, '参数校验失败：days 须为 1~365 的整数');
+    if (bad) return failValidation(res, '参数校验失败：days 须为 1~365 的整数', ['query', 'days']);
     const days = raw === null ? 0 : Number(raw);
     return ok(res, mockSourceHealth(row, days));
   }
@@ -3008,7 +3039,10 @@ const server = createServer(async (req, res) => {
     const body = await readBody(req);
     const { key, name, channel, url } = body;
     if (!/^[a-z0-9_]+$/.test(String(key ?? ''))) {
-      return fail(res, 422, 42200, '参数校验失败：key 标识只能用英文小写字母、数字和下划线');
+      return failValidation(res, '参数校验失败：key 标识只能用英文小写字母、数字和下划线', [
+        'body',
+        'key',
+      ]);
     }
     if (!CHANNEL_KEYS.includes(channel)) {
       return fail(
@@ -3123,7 +3157,10 @@ const server = createServer(async (req, res) => {
     const q = url.searchParams;
     const status = q.get('status') || 'all';
     if (!NEWS_STATUSES.includes(status)) {
-      return fail(res, 422, 42200, `参数校验失败：status 必须是 ${NEWS_STATUSES.join('/')} 之一`);
+      return failValidation(res, `参数校验失败：status 必须是 ${NEWS_STATUSES.join('/')} 之一`, [
+        'query',
+        'status',
+      ]);
     }
     const channel = q.get('channel');
     if (channel !== null && !CHANNEL_KEYS.includes(channel)) {
@@ -3135,7 +3172,8 @@ const server = createServer(async (req, res) => {
       );
     }
     const keyword = q.get('keyword') ?? '';
-    if (keyword.length > 50) return fail(res, 422, 42200, '参数校验失败：keyword 不能超过 50 字');
+    if (keyword.length > 50)
+      return failValidation(res, '参数校验失败：keyword 不能超过 50 字', ['query', 'keyword']);
     const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
     const kw = keyword.trim().toLowerCase();
     let rows = news.filter((n) =>
@@ -3201,8 +3239,9 @@ const server = createServer(async (req, res) => {
     const body = await readBody(req);
     const reason = String(body.reason ?? '').trim();
     // 与后端 NewsHideIn 同口径：空/纯空白 422（留痕是准入条件）
-    if (!reason) return fail(res, 422, 42200, '参数校验失败：下架理由不能为空');
-    if (reason.length > 300) return fail(res, 422, 42200, '参数校验失败：下架理由不能超过 300 字');
+    if (!reason) return failValidation(res, '参数校验失败：下架理由不能为空', ['body', 'reason']);
+    if (reason.length > 300)
+      return failValidation(res, '参数校验失败：下架理由不能超过 300 字', ['body', 'reason']);
     // 幂等：已下架不覆盖原理由、不重复记审计
     if (item.hidden !== true) {
       item.hidden = true;
@@ -3375,8 +3414,9 @@ const server = createServer(async (req, res) => {
     const body = await readBody(req);
     const reason = String(body.reason ?? '').trim();
     // 与后端 CommentHideIn 同口径：空/纯空白 422（留痕是准入条件）
-    if (!reason) return fail(res, 422, 42200, '参数校验失败：隐藏理由不能为空');
-    if (reason.length > 300) return fail(res, 422, 42200, '参数校验失败：隐藏理由不能超过 300 字');
+    if (!reason) return failValidation(res, '参数校验失败：隐藏理由不能为空', ['body', 'reason']);
+    if (reason.length > 300)
+      return failValidation(res, '参数校验失败：隐藏理由不能超过 300 字', ['body', 'reason']);
     // 幂等：已隐藏不覆盖原理由、不重复记审计
     if (found.row.hidden !== true) {
       found.row.hidden = true;
@@ -3458,7 +3498,10 @@ const server = createServer(async (req, res) => {
     const kw = (q.get('keyword') ?? '').trim().toLowerCase();
     const action = q.get('action') ?? '';
     if (action && !['block', 'mask', 'allow'].includes(action)) {
-      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask/allow 之一');
+      return failValidation(res, '参数校验失败：action 必须是 block/mask/allow 之一', [
+        'query',
+        'action',
+      ]);
     }
     const enabledRaw = q.get('enabled');
     const limit = Math.min(Math.max(Number(q.get('limit') ?? 200) || 200, 1), 500);
@@ -3479,7 +3522,10 @@ const server = createServer(async (req, res) => {
     const word = String(body.word ?? '').trim();
     const action = String(body.action ?? 'mask');
     if (!WORD_ACTIONS.includes(action)) {
-      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask/allow 之一');
+      return failValidation(res, '参数校验失败：action 必须是 block/mask/allow 之一', [
+        'body',
+        'action',
+      ]);
     }
     // 与后端同口径：按**归一化后**的有效字符数判断（「傻 逼」算 2，「傻!」算 1）
     if (modLength(word) < MODERATION_MIN_WORD_LEN) {
@@ -3527,7 +3573,10 @@ const server = createServer(async (req, res) => {
     const changes = {};
     if (body.action !== undefined && body.action !== row.action) {
       if (!WORD_ACTIONS.includes(String(body.action))) {
-        return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask/allow 之一');
+        return failValidation(res, '参数校验失败：action 必须是 block/mask/allow 之一', [
+          'body',
+          'action',
+        ]);
       }
       changes.action = [row.action, body.action];
       row.action = body.action;
@@ -3582,10 +3631,16 @@ const server = createServer(async (req, res) => {
     const action = q.get('action') ?? '';
     const field = q.get('field') ?? '';
     if (action && !['block', 'mask'].includes(action)) {
-      return fail(res, 422, 42200, '参数校验失败：action 必须是 block/mask 之一');
+      return failValidation(res, '参数校验失败：action 必须是 block/mask 之一', [
+        'query',
+        'action',
+      ]);
     }
     if (field && !['content', 'name'].includes(field)) {
-      return fail(res, 422, 42200, '参数校验失败：field 必须是 content/name 之一');
+      return failValidation(res, '参数校验失败：field 必须是 content/name 之一', [
+        'query',
+        'field',
+      ]);
     }
     const limit = Math.min(Math.max(Number(q.get('limit') ?? 20) || 20, 1), 100);
     const cursor = q.get('cursor');

@@ -23,10 +23,6 @@ logger = logging.getLogger("toutiao.admin")
 
 router = APIRouter()
 
-router = APIRouter()
-
-router = APIRouter()
-
 def _news_out(n: News) -> dict:
     """管理端资讯行 → 输出：公开 `news.to_out` 的超集，附下架三件套与排查字段。
 

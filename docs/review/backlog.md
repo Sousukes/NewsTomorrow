@@ -20,7 +20,7 @@
 4. 批量处置时优先**同源项一起还**（如 D1 与 A3 是同一问题的短期/长期解），
    避免刚还一项又被它的长期版挡住。
 
-## 开放项（6 项）
+## 开放项（5 项）
 
 ### P1 · 安全
 
@@ -41,7 +41,7 @@
 | D1-2 | 时间列改 `TIMESTAMP`：**参与范围过滤 / keyset 游标**的列（`published_at` / `hot_score_at` / `hit_logs.*` / `search_logs.created_at` / `comments.created_at`） | L | **按需再迁**：A3 后字符串 ISO 比较已正确，当前无功能需求；真要用数据库时间函数时再迁。工具（`convert_column_type`）与 PG 演练已就位 |
 | ~~D1-a~~ | ~~低风险列改 TIMESTAMP~~ | — | **P1-51 已证伪，不做**：逐列核实后发现几乎没有"只排序"的列（`published_at` 参与保留期清理、`comments.created_at` 是 keyset 游标、`hot_score_at` 参与衰减筛选、命中日志参与保留期清理）。剩下的只写入列收益仅"类型诚实"，却要引入 `now_dt()`/`now_str()` 两套写入口径——A3 刚消除的那种漂移 | P1-51 结论 |
 | ~~D1-0~~ | ~~时间列存量数据清洗~~ | — | ✅ P1-52 已完成（迁移 0029）：`''`→NULL，展示列不在白名单，行为等价已用三种方式验证 |
-| D8 | 差分契约测试只覆盖 **7 个免鉴权端点**（`/news`、`/news/{id}`、`/news/{id}/comments`、`/news/search`、`/search/suggest`、`/me/favorites` 等）；30 个 `/api/admin/*` 与需登录端点（messages / comments 写路径 / reports）**未纳入比对** | M | D4-a 首次运行即抓到 3 处真实漂移，说明未覆盖区域大概率还有。扩到需登录端点：脚本要像 `contract-check.mjs` 那样先登录（两个后端同一套 `DEMO_PASSWORD`），再对同一清单打两端比对形状/类型/错误码 | P1-85 清点 |
+| ~~D8~~ | ~~差分契约测试只覆盖 **7 个免鉴权端点**~~ | — | ✅ **P1-86 已偿还**：用例 9 → **27**（+4 `/api/me/*` 需登录、+14 `/api/admin/*` 需管理员）；首轮即抓到**真漂移**（mock 的 422 一律 `data: null`，真后端带 `data.errors`）并把 `diff()` 拆成 `problems` / `inconclusive`（13 处"数据有无"噪声不再冒充漂移）；mock 19 处参数校验改为带 `errors` 信封；已知差异匹配从"字段名包含"收紧为**具体差异**（反向变异验证过：往 ctx 塞多余键会红）。**只比 GET**（写操作会污染开发库）、`/api/messages` 两端无可比对象、需动态 id 的端点不比 | P1-85 清点 |
 | D9 | 3 个**仅本文件内使用却 `export`** 的函数：`api/http.ts` 的 `clearStepUpToken`、`requestStepUp`，`api/follows.ts` 的 `mockSourceDirectory` | S | 收窄为非导出（或补上导出理由的注释）。导出即承诺公共面，无消费者时只会让人误以为可从外部调用 | P1-85 清点 |
 
 ### P2 · 能力扩展
@@ -60,6 +60,7 @@
 
 | 批次 | 偿还项 |
 | --- | --- |
+| P1-86 | D8 闭环（差分契约扩面）：用例 9 → 27；首轮抓到真漂移（mock 422 信封缺 `data.errors`）→ mock 19 处参数校验补信封；`diff()` 拆 `problems`/`inconclusive`（13 处"数据有无"噪声不再冒充漂移）；已知差异匹配收紧为具体差异（反向变异验证）；顺带去掉 `admin/news.py` 重复 3 次的 `router = APIRouter()`；差分 27/0，契约三档 113/339/341 全过 |
 | P1-85 | 新债清点后修两条：① **Videos.vue 空态**（主 Tab 恒为空白——P1-84 已量证 video 频道零数据；这条债此前只写在 `Videos.spec.ts` 注释里、从未上账）；② **契约脚本枚举逐值校验**（`reports.spec.ts` 声称"逐字比对放在契约脚本"，实际只打了 2/6 理由、4/7 频道 → 改为读前端常量文件逐个打接口，反向变异验证过）；新上账 D8（差分契约覆盖面）、D9（仅内部使用却导出）；vitest 936 → 940，契约三档各 +4 |
 | P1-84 | B7 方案评估：**证伪紧迫性**（全链路零视频数据：真实库 700 条 `video_url` 非空 0 条、抓取唯一写入是 `None`、种子/mock 都不带地址，`<video>` 渲染条件从未成立）→ B7 转"按需"；**顺带收紧** `media-src` → `'self' blob:`（零数据不留敞口）+ 护栏（放开 https: 先红在测试上，已反向变异验证）；vitest 936 未变（`csp.spec.ts` 改 2 条净 0） | P1-43 拆出 |
 | P1-83 | D4 闭环（差分契约测试）：`scripts/contract-diff.mjs` 同一清单打 mock 与真后端，比形状/类型/错误码；**首次运行即抓到 3 处真实漂移**（mock 下发管理端字段 `hotScore`/`publishedAt`、缺 4 个可空字段、`sourceKey` 有意差异）；mock 加 `publicNews()` 与「刻意不模拟」清单；反向变异验证（删字段 → 3 失败退出码 1）；既有契约检查打 mock 109/0；**D4 移出开放项** |
