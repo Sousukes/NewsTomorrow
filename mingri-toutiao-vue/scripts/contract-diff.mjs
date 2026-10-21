@@ -32,6 +32,8 @@ const MOCK = process.env.API_MOCK || 'http://127.0.0.1:3001/api';
 const REQUIRE_BOTH = process.env.DIFF_REQUIRE_BOTH === '1';
 const DEMO_PHONE = process.env.DEMO_PHONE || '13800138000';
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || '';
+/** 写路径回放总开关（P1-88）：默认关。会自动写库的脚本不该是默认行为 */
+const ALLOW_WRITES = process.env.DIFF_ALLOW_WRITES === '1';
 
 /**
  * 已声明且有意保留的差异：命中即跳过（打印为 KNOWN），新增漂移仍会失败。
@@ -159,10 +161,14 @@ async function login(base) {
   }
 }
 
-async function hit(base, path, token) {
+async function hit(base, path, token, method = 'GET', body) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${base}${path}`, { headers });
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   const text = await res.text();
   let json = null;
   try {
@@ -234,6 +240,61 @@ function diff(a, b, at = '$') {
   if (a !== b) problems.push(`${at}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`);
   return { problems, inconclusive };
 }
+
+/**
+ * 写路径回调用例（P1-88）。**默认不跑**，要显式 `DIFF_ALLOW_WRITES=1`——
+ * 一个会自动写库的脚本绝不该是默认行为（打错 `API_REAL` 就是在往生产灌数据）。
+ *
+ * 每条都是「写入 → 比形状 → 撤销」：
+ * - `undo(created)` 收**该侧自己的创建响应**：两端生成的 id 不同
+ *   （mock 是 `c_<时间戳>`、真后端是自己的规则），撤销必须各用各的；
+ * - 撤销放在 `finally` 里：比对失败也要收摊，不能把测试数据留在库里；
+ * - `undo: null` 表示天然幂等、无需撤销（举报按「举报人 × 目标」唯一）。
+ *
+ * 刻意不收的几类（理由写全，免得后人以为是遗漏）：
+ * - `POST /me/follows`：**没有两端都合法的 sourceKey**（mock 的 key 由来源名称
+ *   哈希派生，真后端是 RSS 源 key），打过去必然一边 422——那是数据不对等，
+ *   不是契约漂移，会制造假警报；
+ * - `POST /news/{id}/likes`：mock 未实现，没有可比对象；
+ * - `PUT /me/favorites`（合并）/ `PUT /me/history`：要构造合并语义，
+ *   收益不抵复杂度，留给契约检查的行为断言；
+ * - `/api/admin/*` 写端点：改的是运营配置与审核状态，undo 语义各异
+ *   （hide/restore 成对，但 sources/words 的增删会在开发库留痕）。
+ */
+const WRITE_CASES = [
+  {
+    name: 'POST /me/favorites 收藏',
+    method: 'POST',
+    path: '/me/favorites',
+    body: { newsId: 'n1' },
+    undo: () => ({ method: 'DELETE', path: '/me/favorites/n1' }),
+  },
+  {
+    name: 'POST /me/dislikes 负反馈',
+    method: 'POST',
+    path: '/me/dislikes',
+    body: { newsId: 'n1' },
+    undo: () => ({ method: 'DELETE', path: '/me/dislikes/news/n1' }),
+  },
+  {
+    name: 'POST /news/:id/comments 发评论',
+    method: 'POST',
+    path: '/news/n1/comments',
+    body: { content: `差分契约写路径探针 ${new Date().toISOString()}` },
+    undo: (created) => ({
+      method: 'DELETE',
+      path: `/news/n1/comments/${created?.data?.id ?? '__none__'}`,
+    }),
+  },
+  {
+    // 幂等：同一用户对同一目标重复举报只更新理由，不新增行
+    name: 'POST /reports 举报',
+    method: 'POST',
+    path: '/reports',
+    body: { targetType: 'news', targetId: 'n4', reason: '广告营销' },
+    undo: null,
+  },
+];
 
 const run = async () => {
   const [realOk, mockOk] = await Promise.all([ping(REAL), ping(MOCK)]);
@@ -317,6 +378,62 @@ const run = async () => {
     // 无可比数据的地方**显式列出**：这是工具的盲区，不报出来会让人以为比过了
     for (const note of inconclusive.slice(0, 3)) console.log(`        (盲区) ${note}`);
     if (inconclusive.length > 3) console.log(`        (盲区) …另 ${inconclusive.length - 3} 处`);
+  }
+
+  // 16) 写路径回放（P1-88）：默认跳过，DIFF_ALLOW_WRITES=1 才跑
+  if (!ALLOW_WRITES) {
+    console.log(
+      `\n写路径回放未启用（${WRITE_CASES.length} 条）。它会往两端写数据并撤销，` +
+        `确认 API_REAL 不是生产库后加 DIFF_ALLOW_WRITES=1 再跑。`,
+    );
+  } else if (!authReady) {
+    console.log('\n写路径回放跳过：两端未能登录。');
+  } else {
+    console.log(`\n--- 写路径回放（${WRITE_CASES.length} 条，跑完即撤销）---`);
+    for (const c of WRITE_CASES) {
+      let realCreated = null;
+      let mockCreated = null;
+      try {
+        const [r, m] = await Promise.all([
+          hit(REAL, c.path, realAuth.token, c.method, c.body),
+          hit(MOCK, c.path, mockAuth.token, c.method, c.body),
+        ]);
+        realCreated = r.json;
+        mockCreated = m.json;
+
+        const problems = [];
+        if (r.status !== m.status) problems.push(`HTTP ${r.status} ≠ ${m.status}`);
+        const { problems: shapeProblems, inconclusive } = diff(
+          shapeOf(mockCreated),
+          shapeOf(realCreated),
+        );
+        problems.push(...shapeProblems);
+
+        if (problems.length) {
+          fail++;
+          console.log(`  FAIL  ${c.name}`);
+          for (const p of problems.slice(0, 8)) console.log(`        ${p}`);
+        } else {
+          pass++;
+          const tail = inconclusive.length ? ` — 无可比数据 ${inconclusive.length} 处` : '';
+          console.log(`  PASS  ${c.name}${tail}`);
+        }
+      } finally {
+        // 撤销必须各用各的创建响应；finally 保证比对失败也收摊
+        for (const [base, token, created] of [
+          [REAL, realAuth.token, realCreated],
+          [MOCK, mockAuth.token, mockCreated],
+        ]) {
+          if (!c.undo || !created) continue;
+          const u = c.undo(created);
+          try {
+            await hit(base, u.path, token, u.method);
+          } catch {
+            console.log(`        (警告) 撤销失败：${u.method} ${u.path}`);
+          }
+        }
+      }
+    }
   }
 
   console.log(`\n${pass} passed, ${fail} failed, ${skipped} skipped`);

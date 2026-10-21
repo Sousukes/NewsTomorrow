@@ -2612,6 +2612,13 @@ const server = createServer(async (req, res) => {
       ...created,
       replyToName: parent?.name ?? null,
       replyToUserId: parent?.userId ?? null,
+      // P1-88：补上后端 `to_out` 固定下发、而新建评论"恰好为空"的三个字段。
+      // 只在这条响应里补是不够的——列表走 commentOut（它有 replies/replyCount），
+      // 所以此前 GET 用例看不出问题；写路径差分一跑就暴露了
+      // "新建评论的响应比列表少三个字段"（前端就地渲染新评论时会读到 undefined）。
+      isDeleted: false,
+      replyCount: 0,
+      replies: [],
     };
     delete out._seq;
     return ok(res, out);
@@ -2894,7 +2901,14 @@ const server = createServer(async (req, res) => {
     const listKey = a;
     const payload = () => ({
       ids: [...store[listKey]],
-      list: store[listKey].map((id) => news.find((n) => n.id === id)).filter(Boolean),
+      // P1-88：走 publicNews，**不能直接吐内部 news 行**。真后端的收藏/历史
+      // 返回的是 `to_out()` 形状（无 content/hotScore/publishedAt，
+      // 有 cover/isTop/playCount/videoUrl）；mock 此前吐内部行，
+      // 写路径差分一回就抓到 7 处字段差异（GET 用例没抓到是因为两边列表都空）。
+      list: store[listKey]
+        .map((id) => news.find((n) => n.id === id))
+        .filter(Boolean)
+        .map((row) => publicNews(row)),
     });
     const merge = (ids) => {
       for (const id of ids) {
