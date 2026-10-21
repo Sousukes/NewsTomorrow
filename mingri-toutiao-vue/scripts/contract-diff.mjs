@@ -267,6 +267,7 @@ const WRITE_CASES = [
     method: 'POST',
     path: '/me/favorites',
     body: { newsId: 'n1' },
+    needs: 'auth',
     undo: () => ({ method: 'DELETE', path: '/me/favorites/n1' }),
   },
   {
@@ -274,6 +275,7 @@ const WRITE_CASES = [
     method: 'POST',
     path: '/me/dislikes',
     body: { newsId: 'n1' },
+    needs: 'auth',
     undo: () => ({ method: 'DELETE', path: '/me/dislikes/news/n1' }),
   },
   {
@@ -281,6 +283,7 @@ const WRITE_CASES = [
     method: 'POST',
     path: '/news/n1/comments',
     body: { content: `差分契约写路径探针 ${new Date().toISOString()}` },
+    needs: 'auth',
     undo: (created) => ({
       method: 'DELETE',
       path: `/news/n1/comments/${created?.data?.id ?? '__none__'}`,
@@ -292,6 +295,43 @@ const WRITE_CASES = [
     method: 'POST',
     path: '/reports',
     body: { targetType: 'news', targetId: 'n4', reason: '广告营销' },
+    needs: 'auth',
+    undo: null,
+  },
+  // ---- P1-89：admin 写路径（运营实际操作的功能，漂移会直接影响排障）----
+  {
+    // 成对撤销：hide 之后 restore，净状态为零（hiddenAt/hiddenReason 都会被清）。
+    // 会各留一条审计记录——与 contract-check.mjs 既有做法同口径，可接受。
+    name: 'POST /admin/news/:id/hide 下架（成对撤销）',
+    method: 'POST',
+    path: '/admin/news/n1/hide',
+    body: { reason: '差分契约写路径探针' },
+    needs: 'admin',
+    undo: () => ({ method: 'POST', path: '/admin/news/n1/restore' }),
+  },
+  // 错误路径：**不改状态**，专比信封与错误码（404 的目标 id 两端都不存在）
+  {
+    name: 'POST /admin/news/:id/hide 目标不存在',
+    method: 'POST',
+    path: '/admin/news/__no_such__/hide',
+    body: { reason: 'x' },
+    needs: 'admin',
+    undo: null,
+  },
+  {
+    name: 'POST /admin/comments/:id/hide 目标不存在',
+    method: 'POST',
+    path: '/admin/comments/__no_such__/hide',
+    body: { reason: 'x' },
+    needs: 'admin',
+    undo: null,
+  },
+  {
+    name: 'POST /admin/reports/:id/resolve 目标不存在',
+    method: 'POST',
+    path: '/admin/reports/99999999/resolve',
+    body: { resolution: 'kept' },
+    needs: 'admin',
     undo: null,
   },
 ];
@@ -352,6 +392,12 @@ const run = async () => {
     const ms = shapeOf(m.json);
     const problems = [];
     if (r.status !== m.status) problems.push(`HTTP ${r.status} ≠ ${m.status}`);
+    // 业务 code 也要比**取值**：形状比对只看得出"都是 number"，
+    // 而"真后端 40408 / mock 40400"这种漂移只有比值才发现得了——
+    // 前端是按 code 分流的，code 不同就是契约不同。
+    if (r.json?.code !== m.json?.code) {
+      problems.push(`业务 code ${m.json?.code} ≠ ${r.json?.code}`);
+    }
     const { problems: shapeProblems, inconclusive } = diff(ms, rs);
     problems.push(...shapeProblems);
 
@@ -380,17 +426,20 @@ const run = async () => {
     if (inconclusive.length > 3) console.log(`        (盲区) …另 ${inconclusive.length - 3} 处`);
   }
 
-  // 16) 写路径回放（P1-88）：默认跳过，DIFF_ALLOW_WRITES=1 才跑
+  // 16) 写路径回放（P1-88 / P1-89）：默认跳过，DIFF_ALLOW_WRITES=1 才跑
   if (!ALLOW_WRITES) {
     console.log(
       `\n写路径回放未启用（${WRITE_CASES.length} 条）。它会往两端写数据并撤销，` +
         `确认 API_REAL 不是生产库后加 DIFF_ALLOW_WRITES=1 再跑。`,
     );
-  } else if (!authReady) {
-    console.log('\n写路径回放跳过：两端未能登录。');
   } else {
     console.log(`\n--- 写路径回放（${WRITE_CASES.length} 条，跑完即撤销）---`);
     for (const c of WRITE_CASES) {
+      if (c.needs === 'admin' && !adminReady) {
+        skipped++;
+        console.log(`  SKIP  ${c.name} — 该账号在两端不都是管理员`);
+        continue;
+      }
       let realCreated = null;
       let mockCreated = null;
       try {
@@ -403,6 +452,9 @@ const run = async () => {
 
         const problems = [];
         if (r.status !== m.status) problems.push(`HTTP ${r.status} ≠ ${m.status}`);
+        if (r.json?.code !== m.json?.code) {
+          problems.push(`业务 code ${m.json?.code} ≠ ${r.json?.code}`);
+        }
         const { problems: shapeProblems, inconclusive } = diff(
           shapeOf(mockCreated),
           shapeOf(realCreated),
