@@ -2,10 +2,16 @@
  * WCAG 2.1 对比度计算（纯函数，供色板守护测试使用）。
  * 公式：相对亮度 L = 0.2126R + 0.7152G + 0.0722B（各通道先做 sRGB 反伽马），
  * 对比度 = (L1 + 0.05) / (L2 + 0.05)。
+ *
+ * 本模块只导出 `contrastRatio` 与两个 AA 阈值（P1-87 / D9）：
+ * 其余三个原本也是 export，但全仓没有任何外部调用方——`parseHex` /
+ * `relativeLuminance` 是 `contrastRatio` 的内部步骤，`meetsAA` 是个从未被
+ * 用上的便捷包装（删掉了，需要时三行就能加回来）。导出即承诺公共面，
+ * 没有消费者的 export 只会让人以为"这东西能从外面调"。
  */
 
 /** 解析 #rgb / #rrggbb；非法值返回 null */
-export function parseHex(hex: string): [number, number, number] | null {
+function parseHex(hex: string): [number, number, number] | null {
   const raw = hex.trim().replace(/^#/, '');
   const full =
     raw.length === 3
@@ -23,7 +29,7 @@ export function parseHex(hex: string): [number, number, number] | null {
 }
 
 /** 相对亮度（0~1）；无法解析时返回 null */
-export function relativeLuminance(hex: string): number | null {
+function relativeLuminance(hex: string): number | null {
   const rgb = parseHex(hex);
   if (!rgb) return null;
   const [r, g, b] = rgb.map((v) => {
@@ -46,8 +52,3 @@ export function contrastRatio(a: string, b: string): number | null {
 /** WCAG 阈值：正文 4.5，大字/图形 3 */
 export const AA_TEXT = 4.5;
 export const AA_LARGE = 3;
-
-export function meetsAA(a: string, b: string, level: number = AA_TEXT): boolean {
-  const r = contrastRatio(a, b);
-  return r !== null && r >= level;
-}

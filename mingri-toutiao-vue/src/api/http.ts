@@ -144,7 +144,14 @@ export function getStepUpToken(): string {
   return stepUpToken;
 }
 
-export function clearStepUpToken(): void {
+/**
+ * 清掉二次校验令牌（登出 / 令牌过期时由本模块调用）。
+ *
+ * **刻意不导出**（P1-87 / D9）：清令牌是模块内部状态的管理，没有外部调用方。
+ * 导出即承诺公共面——留着 export 只会让人以为能从外部调用它，
+ * 而真要从外部清（比如"切换账号"）时，正确出口是登出流程，不是这个函数。
+ */
+function clearStepUpToken(): void {
   stepUpToken = '';
   stepUpExpiresAt = 0;
 }
@@ -157,8 +164,11 @@ let stepUpWaiters: ((granted: boolean) => void)[] = [];
  *
  * 由 `request()` 在收到 40304 时调用；对话框验证成功后调 `resolveStepUp(true)`，
  * 取消/失败调 `resolveStepUp(false)`。
+ *
+ * **刻意不导出**（P1-87 / D9）：唯一的调用点是本模块的 `request()`，
+ * 业务代码不该自己决定"现在要不要弹二次校验"——那是传输层的职责。
  */
-export function requestStepUp(): Promise<boolean> {
+function requestStepUp(): Promise<boolean> {
   if (typeof window === 'undefined') return Promise.resolve(false);
   return new Promise((resolve) => {
     stepUpWaiters.push(resolve);

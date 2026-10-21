@@ -61,12 +61,16 @@ export function mockFollowedKeys(): string[] {
   return USE_MOCK ? readLocal() : [];
 }
 
-/** 离线来源目录：由种子资讯按名称去重合成，key 由名称哈希派生（确定不变）
+/**
+ * 离线来源目录：由种子资讯按名称去重合成，key 由名称哈希派生（确定不变）
  *
  *  `newsCount` 不剔除已下架项：内置 mock 的种子数据不含 `hidden` 字段，
  *  剔了也永远筛不掉任何东西——不如如实计数，并在注释里说明边界。
+ *
+ * **刻意不导出**（P1-87 / D9）：它只服务本文件的离线分支，
+ *  是 mock 实现的一个内部件，不是"可复用的来源目录工具"。
  */
-export function mockSourceDirectory(): SourceItem[] {
+function mockSourceDirectory(): SourceItem[] {
   const map = new Map<string, { key: string; name: string; channel: string; count: number }>();
   for (const n of mockNews) {
     const key = mockSourceKey(n.source);
